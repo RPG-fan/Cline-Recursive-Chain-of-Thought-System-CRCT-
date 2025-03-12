@@ -1,0 +1,12 @@
+version: '3'
+
+services:
+  crct:
+    build: .
+    volumes:
+      - .:/app
+    environment:
+      - PYTHONPATH=/app
+    # Keep the container running for VSCode to attach
+    tty: true
+    stdin_open: true
