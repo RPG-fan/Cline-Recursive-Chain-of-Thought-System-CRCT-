@@ -323,8 +323,8 @@ def generate_embeddings(root_paths: List[str], output_dir: str, model_name: str 
     file_count = 0
 
     # Define exclusions
-    EXCLUDED_DIRS = {".venv", ".git", "__pycache__"}
-    EXCLUDED_EXTS = {".sqlite3", ".bin", ".pyc", ".pyo", ".pyd"}
+    EXCLUDED_DIRS = {".venv", ".git", "__pycache__", "node_modules"}
+    EXCLUDED_EXTS = {".sqlite3", ".bin", ".pyc", ".pyo", ".pyd", ".jpg", ".png", ".mp3", ".ttf", ".ico", ".jpeg", ".wav"}
 
     if os.path.exists(metadata_file):
         try:
