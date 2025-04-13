@@ -1,0 +1,29 @@
+---
+# Task Planning and Decomposition Guidelines
+
+description: |
+  Provides instructions for the AI on how to approach complex tasks by breaking them down recursively, planning implementation steps, and considering dependencies. Inspired by the CRCT system's Strategy phase and HDTA concepts.
+
+patterns:
+  - "*" # Apply generally when planning or starting complex tasks
+
+instructions: |
+  ## Task Decomposition & Planning:
+  1.  **Recursive Breakdown:** When faced with a large or complex request, break it down into smaller, more manageable sub-tasks. Continue decomposing until tasks are relatively small and well-defined.
+  2.  **Hierarchical Structure:** Think about the hierarchy of tasks (e.g., Feature -> Sub-feature -> Implementation Task -> Code Change).
+  3.  **Define Objectives:** For each significant task or sub-task, clearly state its objective.
+  4.  **Outline Steps:** Before diving into implementation, outline the key steps required to complete the task.
+  5.  **Identify Dependencies:** Consider dependencies between tasks or on existing code/modules. Note what needs to be done first.
+  6.  **Estimate Effort (Optional):** If helpful, provide a rough estimate of the complexity or effort involved for each step.
+  7.  **Define Expected Output:** Describe what the successful completion of the task should look like.
+
+  ## Implementation Planning:
+  1.  **Consider Alternatives:** Briefly explore different approaches or design patterns if applicable, discussing trade-offs.
+  2.  **Algorithm/Logic:** Outline the core logic or algorithms involved.
+  3.  **Data Flow:** If relevant, describe how data will move through the system or component.
+  4.  **Pre-computation/Pre-analysis:** Before making changes, analyze the existing code and context relevant to the task.
+
+  ## Collaboration:
+  1.  **Present the Plan:** Share the breakdown and plan with the user for feedback and approval before starting significant implementation.
+  2.  **Track Progress:** Keep track of which steps have been completed.
+---

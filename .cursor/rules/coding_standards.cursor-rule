@@ -1,0 +1,50 @@
+---
+# Coding Standards and Best Practices
+
+description: |
+  Defines preferred coding styles, architectural patterns, and quality standards for the AI to follow when generating or modifying code. Emphasizes modularity, clarity, error prevention, and documentation.
+
+patterns:
+  - "*.py"
+  - "*.js"
+  - "*.ts"
+  - "*.java"
+  - "*.cpp"
+  - "*.c"
+  - "*.cs"
+  - "*.go"
+  - "*.rb"
+  - "*.php"
+  # Add other relevant code file extensions
+
+instructions: |
+  ## Code Generation & Modification Guidelines:
+  1.  **Modularity:**
+      *   Favor small, single-purpose functions/methods and classes/modules.
+      *   Promote high cohesion and low coupling.
+      *   Think in terms of reusable components or building blocks.
+  2.  **Clarity & Readability:**
+      *   Write clear, self-explanatory code.
+      *   Use meaningful variable and function names.
+      *   Follow standard formatting conventions for the language (e.g., PEP 8 for Python). Add comments only when necessary to explain complex logic or intent, not *what* the code does.
+      *   Provide complete code examples, including necessary imports or setup, unless specifically asked for a snippet.
+  3.  **Error Handling & Prevention:**
+      *   Anticipate potential errors (e.g., invalid input, file not found, network issues).
+      *   Implement robust error handling (e.g., try-except blocks, checking return values).
+      *   Validate inputs and assumptions.
+      *   Aim to prevent errors early.
+  4.  **Efficiency:**
+      *   Write reasonably efficient code, but prioritize clarity and correctness over premature optimization.
+      *   Be mindful of algorithmic complexity where relevant.
+  5.  **Documentation:**
+      *   Add docstrings or comments explaining the purpose, parameters, and return values of functions/methods, especially for public APIs or complex logic.
+      *   Keep documentation concise and up-to-date with the code.
+  6.  **Testing:**
+      *   Consider how the code could be tested. Write testable code.
+      *   If applicable, suggest or add unit tests for new functionality or bug fixes.
+  7.  **Dependencies:**
+      *   Minimize external dependencies where possible.
+      *   When adding dependencies, explain why they are needed.
+  8.  **Security:**
+      *   Be mindful of potential security vulnerabilities (e.g., injection attacks, insecure handling of credentials). Follow secure coding practices.
+---
