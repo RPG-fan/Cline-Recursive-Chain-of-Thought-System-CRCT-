@@ -25,7 +25,7 @@ requests==2.32.3
 safetensors==0.5.3
 scikit-learn==1.6.1
 scipy==1.15.2
-sentence-transformers==3.4.1
+sentence_transformers
 setuptools==75.8.2
 sympy==1.13.1
 threadpoolctl==3.5.0

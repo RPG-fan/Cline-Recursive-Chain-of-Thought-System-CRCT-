@@ -168,61 +168,81 @@ def get_container_project_path(project_dir_name):
     return f"/workspaces/{project_dir_name}"
 
 def update_clinerules(crct_root_dir, project_dir_name, project_root_dir=None):
-    """Updates the .clinerules file with the project path."""
+    """Updates the .clinerules file to include both the project path and CRCT docs path."""
     clinerules_path = os.path.join(crct_root_dir, ".clinerules")
     
     if not os.path.exists(clinerules_path):
-        print("Warning: .clinerules file not found. Skipping update.")
+        print(f"Warning: .clinerules file not found at {clinerules_path}. Skipping update.")
         return
     
-    # Determine if we're in a container and get the appropriate project path
-    in_container = is_running_in_container()
-    container_project_path = get_container_project_path(project_dir_name)
+    # Define the required paths inside the container
+    user_project_container_path = get_container_project_path(project_dir_name)
+    # Assuming CRCT root is mounted at /workspaces/CRCT System
+    crct_docs_container_path = "/workspaces/CRCT System/cline_docs" 
+    
+    required_paths = {user_project_container_path, crct_docs_container_path}
+    found_paths = set()
     
     try:
         with open(clinerules_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
             
-        # Find the [CODE_ROOT_DIRECTORIES] section and update it
         in_code_root_section = False
-        code_root_section_end = False
         updated_lines = []
-        code_root_entry_added = False
         
-        for line in lines:
-            if line.strip() == "[CODE_ROOT_DIRECTORIES]":
+        for i, line in enumerate(lines):
+            stripped_line = line.strip()
+            
+            if stripped_line == "[CODE_ROOT_DIRECTORIES]":
                 in_code_root_section = True
                 updated_lines.append(line)
-                updated_lines.append("# Your project folder is available at /workspaces/User Project\n")
-                updated_lines.append(f"# For this workspace, consider using: {container_project_path}\n")
-            elif in_code_root_section and not code_root_section_end:
-                if line.strip().startswith("["):
-                    # We've reached the next section
-                    if not code_root_entry_added:
-                        # Add the project path entry before moving to the next section
-                        updated_lines.append(f"- {container_project_path}\n")
-                        code_root_entry_added = True
-                    code_root_section_end = True
+                # Add comments if they aren't already there (simple check)
+                if i + 1 >= len(lines) or not lines[i+1].strip().startswith("# Your project folder"):
+                    updated_lines.append("# Your project folder is available at /workspaces/User Project\n")
+                    updated_lines.append(f"# For this workspace, consider using: {user_project_container_path}\n")
+                    updated_lines.append(f"# CRCT docs path: {crct_docs_container_path}\n")
+                continue
+
+            if in_code_root_section:
+                # Check if we've left the section
+                if stripped_line.startswith("[") and stripped_line != "[CODE_ROOT_DIRECTORIES]":
+                    # Add any missing required paths before leaving the section
+                    missing_paths = required_paths - found_paths
+                    for path in sorted(list(missing_paths)): # Sort for consistent order
+                         updated_lines.append(f"- {path}\n")
+                    found_paths.update(missing_paths) # Mark as added
+                    
+                    in_code_root_section = False
                     updated_lines.append(line)
-                elif line.strip().startswith("-"):
-                    # This is an existing entry
-                    if line.strip() == f"- {container_project_path}":
-                        # The project path is already in the file
-                        code_root_entry_added = True
-                    updated_lines.append(line)
-                else:
-                    updated_lines.append(line)
-            else:
+                    continue
+
+                # Check if the line is one of the required paths
+                if stripped_line.startswith("-"):
+                    path_entry = stripped_line[1:].strip()
+                    if path_entry in required_paths:
+                        found_paths.add(path_entry)
+                
+                # Append the original line (including comments, other entries, etc.)
                 updated_lines.append(line)
-        
-        # If we reached the end of the file and haven't added the entry yet
-        if in_code_root_section and not code_root_section_end and not code_root_entry_added:
-            updated_lines.append(f"- {container_project_path}\n")
-        
+
+            else:
+                # Outside the target section
+                updated_lines.append(line)
+
+        # If the file ended while still in the section, add missing paths
+        if in_code_root_section:
+            missing_paths = required_paths - found_paths
+            for path in sorted(list(missing_paths)):
+                updated_lines.append(f"- {path}\n")
+
+        # Write the updated content back
         with open(clinerules_path, "w", encoding="utf-8") as f:
             f.writelines(updated_lines)
             
-        print(f"✓ Updated .clinerules with project path: {container_project_path}")
+        print(f"✓ Updated .clinerules [CODE_ROOT_DIRECTORIES] with:")
+        for path in sorted(list(required_paths)):
+             print(f"  - {path}")
+             
     except Exception as e:
         print(f"Warning: Could not update .clinerules: {e}")
 

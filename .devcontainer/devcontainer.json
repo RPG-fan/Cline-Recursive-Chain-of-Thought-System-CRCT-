@@ -25,5 +25,7 @@
   "remoteEnv": {
     "PATH": "${containerEnv:PATH}:/workspaces/CRCT System/cline_utils/bin"
   },
-  "overrideCommand": false
+  "overrideCommand": false,
+  "mounts": [
+  ]
 }
