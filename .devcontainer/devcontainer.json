@@ -1,0 +1,29 @@
+{
+  "name": "CRCT Dev Container",
+  "dockerFile": "../Dockerfile",
+  "context": "..",
+  "workspaceFolder": "/workspaces/CRCT System",
+  "updateRemoteUserUID": true,
+  "postCreateCommand": "...",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-vscode-remote.remote-containers",
+        "ms-azuretools.vscode-docker",
+        "saoudrizwan.claude-dev"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "editor.formatOnSave": true,
+        "files.trimTrailingWhitespace": true,
+        "python.linting.enabled": true
+      }
+    }
+  },
+  "remoteEnv": {
+    "PATH": "${containerEnv:PATH}:/workspaces/CRCT System/cline_utils/bin"
+  },
+  "overrideCommand": false
+}

@@ -1,0 +1,23 @@
+{
+    "folders": [
+        {
+            "name": "CRCT System",
+            "path": "."
+        },
+        {
+            "name": "Your Project",
+            "path": "/path/to/your/project"
+        }
+    ],
+    "settings": {
+        "editor.formatOnSave": true,
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "terminal.integrated.defaultProfile.linux": "bash"
+    },
+    "extensions": {
+        "recommendations": [
+            "ms-python.python",
+            "ms-vscode-remote.remote-containers"
+        ]
+    }
+}

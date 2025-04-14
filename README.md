@@ -21,28 +21,44 @@ This is **v7.0**, a basic but functional release of an ongoing refactor to impro
 
 ---
 
-## Quickstart
+## Quickstart (Recommended Approach)
 
-1. **Clone the Repo**: 
+1. **Clone CRCT and Configure Project**:
    ```bash
+   # Clone the repository
    git clone https://github.com/RPG-fan/Cline-Recursive-Chain-of-Thought-System-CRCT-.git
    cd Cline-Recursive-Chain-of-Thought-System-CRCT-
+   
+   # Install dependencies (optional, handled by container)
+   # pip install -r requirements.txt 
+   
+   # Configure CRCT to include your project
+   python cline_utils/create_crct_workspace.py 
    ```
+   - The script will prompt you for your project's folder path.
+   - It will add a mount for your project to `.devcontainer/devcontainer.json`.
+   - It will create a symlink in the CRCT root pointing to your project's container path.
+   - It will update `.clinerules` with the correct container path for your project.
 
-2. **Install Dependencies**:
+2. **Open CRCT Folder in VS Code**:
    ```bash
-   pip install -r requirements.txt
+   # Open the CRCT root folder (NOT a workspace file)
+   code . 
    ```
 
-3. **Set Up Cline Extension**:
-   - Open the project in VS Code with the Cline extension installed.
+3. **Reopen in Container**:
+   - When VS Code opens, click "Reopen in Container" when prompted (or use F1 > Dev Containers: Reopen in Container).
+   - The first time, Docker will build the container image (this might take a few minutes).
+   - Your project will appear as a symlink in the Explorer sidebar.
+
+4. **Configure Cline**:
    - Copy `cline_docs/prompts/core_prompt(put this in Custom Instructions).md` into the Cline system prompt field.
 
-4. **Start the System**:
+5. **Start the System**:
    - Type `Start.` in the Cline input to initialize the system.
-   - The LLM will bootstrap from `.clinerules`, creating missing files and guiding you through setup if needed.
+   - The LLM will bootstrap from `.clinerules` (using your configured code root), creating missing files and guiding you through setup if needed.
 
-*Note*: The Cline extension’s LLM automates most commands and updates to `cline_docs/`. Minimal user intervention is required (in theory!).
+*Note*: The Cline extension's LLM automates most commands and updates to `cline_docs/`. Minimal user intervention is required (in theory!).
 
 ---
 
@@ -86,24 +102,52 @@ cline/
 
 - **v7.0**: A basic, functional release with modular dependency tracking via `dependency_processor.py`. Includes templates for all `cline_docs/` files.
 - **Efficiency**: Achieves a ~1.9 efficiency ratio (90% fewer characters) for dependency tracking vs. full names—improving with scale.
-- **Ongoing Refactor**: I’m enhancing modularity and token efficiency further. The next version will refine dependency storage and extend savings to simpler projects.
+- **Ongoing Refactor**: I'm enhancing modularity and token efficiency further. The next version will refine dependency storage and extend savings to simpler projects.
 
 Feedback is welcome! Please report bugs or suggestions via GitHub Issues.
 
 ---
 
-## Getting Started (Optional - Existing Projects)
+## Using CRCT with Your Project (Single-Root Dev Container Approach)
 
-To test on an existing project:
-1. Copy your project into `src/`.
-2. Use these prompts to kickstart the LLM:
-   - `Perform initial setup and populate dependency trackers.`
-   - `Review the current state and suggest next steps.`
+CRCT now uses a single-root VS Code Dev Container setup to work directly with your project folder via mounts and symlinks:
 
-The system will analyze your codebase, initialize trackers, and guide you forward.
+1. **Configure Your Project**:
+   ```bash
+   # Clone CRCT if you haven't already
+   git clone https://github.com/RPG-fan/Cline-Recursive-Chain-of-Thought-System-CRCT-.git
+   cd Cline-Recursive-Chain-of-Thought-System-CRCT-
+   
+   # Run the setup script
+   python cline_utils/create_crct_workspace.py 
+   ```
+   - The script prompts for your project's absolute path.
+   - It adds a mount for your project to `.devcontainer/devcontainer.json`.
+   - It creates a symlink in the CRCT root (e.g., `YourProjectName`) pointing to the container mount path (`/workspaces/YourProjectName`).
+   - It updates `.clinerules` with the container path (`/workspaces/YourProjectName`).
+
+2. **Open CRCT Folder in VS Code**:
+   ```bash
+   # Open the CRCT root folder
+   code . 
+   ```
+
+3. **Reopen in Container**:
+   - When VS Code opens, click "Reopen in Container" when prompted (or use F1 > Dev Containers: Reopen in Container).
+   - The first time, Docker builds the container image.
+
+4. **Access Your Project**:
+   - Inside the container, your project will appear as a symlink in the Explorer sidebar within the CRCT folder structure.
+   - CRCT tools will access your project via the container path configured in `.clinerules` (e.g., `/workspaces/YourProjectName`).
+
+5. **Initialize CRCT**:
+   - Type `Start.` in the Cline input to initialize the system.
+   - CRCT analyzes your codebase (based on the configured code root), initializes trackers, and guides you forward.
+
+*Note*: This single-root approach avoids multi-root workspace complexities and ensures reliable container startup while still providing seamless access to your external project.
 
 ---
 
 ## Thanks!
 
-This is a labor of love to make Cline projects more manageable. I’d love to hear your thoughts—try it out and let me know what works (or doesn’t)!
+This is a labor of love to make Cline projects more manageable. I'd love to hear your thoughts—try it out and let me know what works (or doesn't)!
