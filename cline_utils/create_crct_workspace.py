@@ -13,6 +13,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Import the project analyzer for feature detection
+try:
+    from . import project_analyzer
+except ImportError:
+    # When run directly, handle relative import
+    import importlib.util
+    import os.path
+    spec = importlib.util.spec_from_file_location(
+        "project_analyzer",
+        os.path.join(os.path.dirname(__file__), "project_analyzer.py")
+    )
+    project_analyzer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(project_analyzer)
+
 DEVCONTAINER_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".devcontainer", "devcontainer.json")
 
 def read_devcontainer_json():
@@ -313,6 +327,42 @@ def open_in_vscode(crct_root_dir):
         print(f"  {crct_root_dir}")
         print("Then, click 'Reopen in Container' when prompted.")
 
+def add_features_to_devcontainer(feature_dict):
+    """
+    Add Dev Container Features to devcontainer.json.
+    
+    Args:
+        feature_dict (dict): Dictionary of feature IDs and their configurations.
+        
+    Returns:
+        bool: True if changes were made, False otherwise.
+    """
+    data = read_devcontainer_json()
+    if data is None:
+        return False
+    
+    # Get or create the features object
+    features = data.get("features", {})
+    
+    # Track if we make any changes
+    changes_made = False
+    
+    # Add each feature if not already present
+    for feature_id, config in feature_dict.items():
+        if feature_id not in features:
+            features[feature_id] = config
+            changes_made = True
+        
+    # Only update if changes were made
+    if changes_made:
+        data["features"] = features
+        write_devcontainer_json(data)
+        print(f"✓ Updated devcontainer.json with {len(feature_dict)} features")
+    else:
+        print("No new features needed in devcontainer.json")
+    
+    return changes_made
+
 def main():
     print("CRCT Dev Container Setup")
     print("------------------------")
@@ -344,6 +394,22 @@ def main():
     add_mount_to_devcontainer(project_root_dir, container_target_path)
     print("-" * 20)
 
+    # --- Detect and add required features ---
+    print("Detecting project requirements...")
+    required_features = project_analyzer.detect_project_features(project_root_dir)
+    features_updated = False
+    
+    if required_features:
+        feature_names = list(required_features.keys())
+        print(f"Detected {len(feature_names)} project requirements:")
+        for feature_id in feature_names:
+            print(f"  - {feature_id}")
+        print("Updating devcontainer.json with necessary features...")
+        features_updated = add_features_to_devcontainer(required_features)
+    else:
+        print("No specific project requirements detected.")
+    print("-" * 20)
+
     # --- Update .clinerules ---
     print("Updating .clinerules...")
     update_clinerules(crct_root_dir, project_dir_name)
@@ -363,12 +429,15 @@ def main():
     print(f"A symlink named '{relative_symlink_path}' pointing to your project's container location")
     print(f"('{container_target_path}') should now exist in the CRCT root directory:")
     print(f"  {os.path.join(crct_root_dir, relative_symlink_path)}")
+    
+    if features_updated:
+        print("\nNOTE: Dev Container features were added/updated. A container rebuild is required.")
+        print("VS Code should prompt you to rebuild when you 'Reopen in Container'.")
+        print("If not, use F1 > 'Dev Containers: Rebuild Container'.")
+    
     print("\nImportant Next Steps:")
     print("1. If VS Code is currently open in this CRCT folder, close it.")
     print("2. If you are currently inside the dev container, exit it.")
-    # print("3. The script will now attempt to open the CRCT folder in VS Code.") # Removed this line
-    # print("4. When prompted by VS Code, click 'Reopen in Container'.") # Removed this line
-    # print("   This rebuilds the container with your project mounted.") # Removed this line
     print("---------------------------------------------------------------------")
 
     # --- Open in VS Code ---

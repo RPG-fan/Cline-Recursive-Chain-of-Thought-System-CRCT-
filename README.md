@@ -125,6 +125,7 @@ CRCT now uses a single-root VS Code Dev Container setup to work directly with yo
    - It adds a mount for your project to `.devcontainer/devcontainer.json`.
    - It creates a symlink in the CRCT root (e.g., `YourProjectName`) pointing to the container mount path (`/workspaces/YourProjectName`).
    - It updates `.clinerules` with the container path (`/workspaces/YourProjectName`).
+   - **New**: It automatically detects your project's language/framework and adds appropriate Dev Container Features to support it.
 
 2. **Open CRCT Folder in VS Code**:
    ```bash
@@ -135,6 +136,7 @@ CRCT now uses a single-root VS Code Dev Container setup to work directly with yo
 3. **Reopen in Container**:
    - When VS Code opens, click "Reopen in Container" when prompted (or use F1 > Dev Containers: Reopen in Container).
    - The first time, Docker builds the container image.
+   - If project-specific features were detected, VS Code may prompt you to rebuild the container.
 
 4. **Access Your Project**:
    - Inside the container, your project will appear as a symlink in the Explorer sidebar within the CRCT folder structure.
