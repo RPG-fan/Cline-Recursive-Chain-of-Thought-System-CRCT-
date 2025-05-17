@@ -1433,7 +1433,7 @@ def update_tracker(output_file_suggestion: str, # Path suggestion (may be ignore
                     # Apply if forcing, suggestion isn't placeholder, and it's different
                     if dep_char != PLACEHOLDER_CHAR and existing_char_in_grid != dep_char:
                         should_apply_suggestion = True
-                        logger.debug(f"Force apply triggered for {row_key}->{col_key} ('{dep_char}') over ('{existing_char_in_grid}')")
+                        logger.debug(f"Force apply triggered for {source_key}->{target_key} ('{dep_char}') over ('{existing_char_in_grid}')")
                 elif existing_char_in_grid == PLACEHOLDER_CHAR and dep_char != PLACEHOLDER_CHAR:
                      # Apply if grid is placeholder and suggestion isn't
                      should_apply_suggestion = True

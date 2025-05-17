@@ -1,6 +1,6 @@
 # Active Context:
 
-**Purpose:** This file provides a concise overview of the current work focus, immediate next steps, and active decisions for the LLMRPG project. It is intended to be a frequently referenced, high-level summary to maintain project momentum and team alignment.
+**Purpose:** This file provides a concise overview of the current work focus, immediate next steps, and active decisions for the CRCT submodule project. It is intended to be a frequently referenced, high-level summary to maintain project momentum and team alignment.
 
 **Use Guidelines:**
 - **Current Work Focus:**  List the 2-3 *most critical* tasks currently being actively worked on. Keep descriptions concise and action-oriented.
@@ -18,10 +18,10 @@
 1. 
 2. 
 3. 
-4. 
 
 ## Active Decisions and Considerations:
 
+- 
 - 
 - 
 - 

@@ -1,0 +1,35 @@
+# CRCT System Parent Configuration
+# This file points to the actual .clinerules file in the .crct submodule
+
+[SUBMODULE_REFERENCE]
+clinerules_path: `.crct/.clinerules`
+notes: "This is a reference file. All CRCT system configuration is stored in the `.crct` submodule."
+
+[PATHS]
+memory_dir: "cline_docs"
+notes: "This overrides the memory_dir in .crct/.clinerules.config.json to ensure project-specific files are stored in the parent project's cline_docs directory, not copied from .crct/cline_docs"
+
+[SUBMODULE_EXCLUSIONS]
+# Directories that should not be copied from the submodule to the parent project
+excluded_directories:
+  - "prompts"
+  - "templates"
+notes: "These directories contain system files that should remain in the submodule and not be copied to the parent project"
+
+[INSTRUCTIONS]
+- Do not modify the [SUBMODULE_REFERENCE] section.
+- CRCT system files are stored in the `.crct` directory. Do not modify the contents, it is read-only by design.
+- To configure the CRCT system, you may extend this `.clinerules` file.
+- All CRCT system output, such as project-specific documentation is stored under a `cline_docs` directory, distinct from `.crct/cline_docs`.
+- Project-specific configuration can be added to the [PROJECT_CONFIGURATION] section below.
+- When using the CRCT system as a submodule, always check the GitOps configuration and perform GitOps operations at the beginning and end of task execution to ensure changes are properly tracked, committed, and pushed to the remote repository.
+
+[GITOPS_REMINDER]
+enabled: true
+reminder_message: "Remember to perform GitOps operations at the beginning and end of task execution when using this repo as a submodule."
+integration_doc: "cline_docs/prompts/gitops_integration.md"
+
+[PROJECT_CONFIGURATION]
+# Add project-specific configuration here
+memory_dir: "cline_docs"
+
