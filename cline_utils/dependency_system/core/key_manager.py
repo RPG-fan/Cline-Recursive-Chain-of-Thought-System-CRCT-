@@ -394,24 +394,34 @@ def generate_keys(root_paths: List[str], excluded_dirs: Optional[Set[str]] = Non
     unique_new_keys = list(dict.fromkeys(newly_generated_keys).keys())
     return path_to_key_info, unique_new_keys
 
-def load_global_key_map() -> Optional[Dict[str, KeyInfo]]:
+def load_global_key_map(key_map_path_override: Optional[str] = None) -> Optional[Dict[str, KeyInfo]]:
     """
-    Loads the persisted global path_to_key_info map from the JSON file
-    located alongside key_manager.py.
+    Loads the persisted global path_to_key_info map from the JSON file.
+    Uses key_map_path_override if provided, otherwise defaults to a path
+    alongside key_manager.py.
+
+    Args:
+        key_map_path_override: Optional explicit path to the global key map file.
 
     Returns:
         The loaded dictionary mapping normalized paths to KeyInfo objects,
         or None if the file doesn't exist or fails to load/parse.
     """
+    map_path_to_load = ""
     try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        map_path = normalize_path(os.path.join(script_dir, GLOBAL_KEY_MAP_FILENAME))
+        if key_map_path_override:
+            map_path_to_load = normalize_path(key_map_path_override)
+            logger.info(f"Attempting to load global key map from explicit path: {map_path_to_load}")
+        else:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            map_path_to_load = normalize_path(os.path.join(script_dir, GLOBAL_KEY_MAP_FILENAME))
+            logger.info(f"Attempting to load global key map from default path: {map_path_to_load}")
 
-        if not os.path.exists(map_path):
-            logger.error(f"Global key map file not found at {map_path}. Run project analysis ('analyze-project') first.")
+        if not os.path.exists(map_path_to_load):
+            logger.error(f"Global key map file not found at {map_path_to_load}. Run project analysis ('analyze-project') first.")
             return None
 
-        with open(map_path, 'r', encoding='utf-8') as f:
+        with open(map_path_to_load, 'r', encoding='utf-8') as f:
             loaded_data = json.load(f)
 
         # Convert dictionary data back into KeyInfo objects
@@ -423,33 +433,49 @@ def load_global_key_map() -> Optional[Dict[str, KeyInfo]]:
                 # Skip this entry or return None entirely? For now, skip.
                 continue # Skip this entry
 
-        logger.info(f"Successfully loaded global key map ({len(path_to_key_info)} entries) from: {map_path}")
+        logger.info(f"Successfully loaded global key map ({len(path_to_key_info)} entries) from: {map_path_to_load}")
         return path_to_key_info
 
     except json.JSONDecodeError as e:
-        logger.error(f"Error decoding JSON from global key map file {map_path}: {e}", exc_info=True)
+        logger.error(f"Error decoding JSON from global key map file {map_path_to_load}: {e}", exc_info=True)
         return None
     except IOError as e:
-        logger.error(f"I/O Error loading global key map file {map_path}: {e}", exc_info=True)
+        logger.error(f"I/O Error loading global key map file {map_path_to_load}: {e}", exc_info=True)
         return None
     except Exception as e:
-        logger.exception(f"Unexpected error loading global key map from {map_path}: {e}")
+        logger.exception(f"Unexpected error loading global key map from {map_path_to_load}: {e}")
         return None
 
-def load_old_global_key_map() -> Optional[Dict[str, KeyInfo]]:
-    """Loads the persisted PREVIOUS global path_to_key_info map."""
+def load_old_global_key_map(key_map_path_override: Optional[str] = None) -> Optional[Dict[str, KeyInfo]]:
+    """
+    Loads the persisted PREVIOUS global path_to_key_info map.
+    Uses key_map_path_override for the *current* map to derive the *old* map name,
+    or defaults to a path alongside key_manager.py.
+    """
+    old_map_path_to_load = ""
     try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        map_path = normalize_path(os.path.join(script_dir, OLD_GLOBAL_KEY_MAP_FILENAME)) # Target old map
-        if not os.path.exists(map_path):
-            logger.warning(f"Previous global key map file not found: {map_path}. This may be the first run.")
+        if key_map_path_override:
+            # Construct the old map path based on the override for the current map
+            # Assumes old map is in the same directory with OLD_GLOBAL_KEY_MAP_FILENAME suffix logic
+            # This is a bit indirect but maintains consistency if override is used.
+            # A more robust way might be to have a separate override for the old map path.
+            current_map_dir = os.path.dirname(normalize_path(key_map_path_override))
+            old_map_path_to_load = normalize_path(os.path.join(current_map_dir, OLD_GLOBAL_KEY_MAP_FILENAME))
+            logger.info(f"Attempting to load OLD global key map from derived path: {old_map_path_to_load}")
+        else:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            old_map_path_to_load = normalize_path(os.path.join(script_dir, OLD_GLOBAL_KEY_MAP_FILENAME))
+            logger.info(f"Attempting to load OLD global key map from default path: {old_map_path_to_load}")
+
+        if not os.path.exists(old_map_path_to_load):
+            logger.warning(f"Previous global key map file not found: {old_map_path_to_load}. This may be the first run.")
             return None # Return None gracefully if old map doesn't exist
-        with open(map_path, 'r', encoding='utf-8') as f: loaded_data = json.load(f)
+        with open(old_map_path_to_load, 'r', encoding='utf-8') as f: loaded_data = json.load(f)
         path_to_key_info: Dict[str, KeyInfo] = {}
         for path, info_dict in loaded_data.items():
             try: path_to_key_info[path] = KeyInfo(**info_dict)
             except TypeError as te: logger.error(f"Error converting OLD KeyInfo data for '{path}': {te}"); continue
-        logger.info(f"Loaded previous global key map ({len(path_to_key_info)} entries) from: {map_path}")
+        logger.info(f"Loaded previous global key map ({len(path_to_key_info)} entries) from: {old_map_path_to_load}")
         return path_to_key_info
     except Exception as e: logger.exception(f"Unexpected error loading previous global key map: {e}"); return None
 

@@ -1,0 +1,18 @@
+{
+  "paths": {
+    "code_root_dirs": ["../src"],
+    "doc_dir": "../docs",
+    "memory_dir": "../cline_docs"
+  },
+  "models": {
+    "doc_model_name": "all-mpnet-base-v2",
+    "code_model_name": "all-mpnet-base-v2"
+  },
+  "thresholds": {
+    "doc_similarity": 0.75,
+    "code_similarity": 0.75
+  },
+  "compute": {
+    "embedding_device": "auto"
+  }
+}

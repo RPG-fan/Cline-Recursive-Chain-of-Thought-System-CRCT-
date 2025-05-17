@@ -58,10 +58,17 @@ KEY_DEFINITIONS_START_MARKER = "---KEY_DEFINITIONS_START---"
 KEY_DEFINITIONS_END_MARKER = "---KEY_DEFINITIONS_END---"
 
 # --- Helper Functions ---
-def _load_global_map_or_exit() -> Dict[str, KeyInfo]:
-    """Loads the global key map, exiting if it fails."""
+def _load_global_map_or_exit(cli_args: Optional[argparse.Namespace] = None) -> Dict[str, KeyInfo]:
+    """Loads the global key map, exiting if it fails.
+    Uses explicit path from cli_args if provided.
+    """
     logger.info("Loading global key map...")
-    path_to_key_info = load_global_key_map()
+    key_map_path_override = None
+    if cli_args and hasattr(cli_args, 'global_key_map_path') and cli_args.global_key_map_path:
+        key_map_path_override = normalize_path(cli_args.global_key_map_path)
+        logger.info(f"Using explicit global key map path from CLI: {key_map_path_override}")
+
+    path_to_key_info = load_global_key_map(key_map_path_override=key_map_path_override)
     if path_to_key_info is None:
         print("Error: Global key map not found or failed to load.", file=sys.stderr)
         print("Please run 'analyze-project' first to generate the key map.", file=sys.stderr)
@@ -223,7 +230,7 @@ def handle_add_dependency(args: argparse.Namespace) -> int:
 
     # --- Load global map and config (needed for item type and checklist) ---
     # Load ONCE and use this instance throughout the function.
-    loaded_global_path_to_key_info = _load_global_map_or_exit() 
+    loaded_global_path_to_key_info = _load_global_map_or_exit(args) 
     if loaded_global_path_to_key_info is None: # Safeguard, though _load_global_map_or_exit should exit
         logger.critical("handle_add_dependency: global_path_to_key_info is None after _load_global_map_or_exit.")
         print("Critical Error: Global key map could not be loaded. Aborting add-dependency.", file=sys.stderr)
@@ -388,7 +395,7 @@ def handle_show_dependencies(args: argparse.Namespace) -> int:
     logger.info(f"Showing dependencies for key string: {target_key_str}")
     
     # --- Load CURRENT Global Map ---
-    current_global_map = _load_global_map_or_exit() # path_to_key_info
+    current_global_map = _load_global_map_or_exit(args) # path_to_key_info
    
     config = ConfigManager()
     project_root = get_project_root()
@@ -595,7 +602,7 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
 
     # 3. Load necessary data
     try:
-        current_global_map_cli = _load_global_map_or_exit() # Renamed for clarity
+        current_global_map_cli = _load_global_map_or_exit(args) # Renamed for clarity
         config_cli = ConfigManager()
         project_root_cli = get_project_root()
         # Use find_all_tracker_paths from tracker_io module
@@ -704,6 +711,10 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
 def main():
     """Parse arguments and dispatch to handlers."""
     parser = argparse.ArgumentParser(description="Dependency tracking system CLI")
+    parser.add_argument(
+        "--global-key-map-path",
+        help="Explicit path to the global_key_map.json file. Overrides config."
+    )
     subparsers = parser.add_subparsers(dest="command", help="Available commands", required=True)
 
     # --- Analysis Commands ---

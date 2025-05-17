@@ -8,13 +8,36 @@ current_phase: "Set-up/Maintenance"
 next_action: "Initialize Core Files"
 next_phase: "Set-up/Maintenance"
 
+[VIRTUAL_ENVIRONMENT]
+location: "../.venv"
+setup_required: false
+notes: "Using the existing virtual environment in the parent directory"
+
 ---
 
 [CODE_ROOT_DIRECTORIES]
-- src
+- ../src
 
 [DOC_DIRECTORIES]
-- docs
+- ../docs
+
+[GITOPS_WORKFLOW]
+enabled: true
+default_base_branch: dev
+branch_naming_convention: conventional_commits
+remote_name: origin
+auto_push: true
+task_to_branch_mapping:
+  Strategy_*: "chore/{task-name}"
+  Execution_feat_*: "feat/{task-name}"
+  Execution_fix_*: "fix/{task-name}"
+  Execution_refactor_*: "refactor/{task-name}"
+  Execution_test_*: "test/{task-name}"
+  Execution_docs_*: "docs/{task-name}"
+  Execution_style_*: "style/{task-name}"
+  Execution_perf_*: "perf/{task-name}"
+  Execution_chore_*: "chore/{task-name}"
+  Execution_*: "feat/{task-name}"  # Default for other Execution tasks
 
 [LEARNING_JOURNAL]
 - Regularly updating {memory_dir} and any instruction files help me to remember what I have done and what still needs to be done so I don't lose track.
@@ -39,6 +62,7 @@ next_phase: "Set-up/Maintenance"
 - Carefully distinguish between Strategy tasks (planning, defining, designing, exploring, reviewing, analyzing) and Execution tasks (implementing, creating code/scripts, integrating, coding, writing tests, modifying files).
 - Monitor and manage context window size to avoid exceeding limits and requiring premature handoffs.
 - When updating the HDTA Review Progress Tracker, accurately reflect whether the document's content has been *read and reviewed* in the current session, not just whether the file exists or was created. The status checkboxes should reflect *my* processing of the document's content.
+- The GitOps workflow integration enables transparent supply chain management by automatically creating feature branches, committing changes with conventional commit messages, and pushing to remote repositories. This maintains a clean Git history and facilitates code review processes.
 
 [Character_Definitions]
 
