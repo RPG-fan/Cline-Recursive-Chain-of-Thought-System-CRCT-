@@ -121,6 +121,23 @@ DEFAULT_CONFIG = {
         "implementation_plan_*.md",
         "*_task.md" # Future task file pattern (to be confirmed)
     ],
+    "file_exclusion_patterns": [
+        "**/bin/**",
+        "**/obj/**",
+        "**/*.dll",
+        "**/*.pdb",
+        "**/*.exe",
+        "**/node_modules/**",
+        "**/.git/**"
+    ],
+    "directory_exclusion_patterns": [
+        "bin",
+        "obj",
+        "packages",
+        "node_modules",
+        ".vs",
+        ".vscode"
+    ],
     "visualization": {
         "auto_generate_on_analyze": True, # Enable auto-generation by default
         "auto_diagram_output_dir": None   # Default to None, meaning derive from memory_dir
@@ -466,6 +483,38 @@ class ConfigManager:
         """Get the allowed dependency characters from configuration."""
         # Correctly fetch from the config dictionary, falling back to default
         return self.config.get("allowed_dependency_chars", DEFAULT_CONFIG["allowed_dependency_chars"])
+
+    def get_file_exclusion_patterns(self) -> List[str]:
+        """
+        Get list of file exclusion patterns from configuration.
+        
+        Returns:
+            List of file exclusion patterns (glob patterns)
+        """
+        from .cache_manager import cached
+
+        @cached("file_exclusion_patterns",
+                key_func=lambda self: f"file_exclusion_patterns:{os.path.getmtime(self.config_path) if os.path.exists(self.config_path) else 'missing'}")
+        def _get_file_exclusion_patterns(self) -> List[str]:
+            return self.config.get("file_exclusion_patterns", DEFAULT_CONFIG.get("file_exclusion_patterns", []))
+
+        return _get_file_exclusion_patterns(self)
+
+    def get_directory_exclusion_patterns(self) -> List[str]:
+        """
+        Get list of directory exclusion patterns from configuration.
+        
+        Returns:
+            List of directory exclusion patterns (glob patterns)
+        """
+        from .cache_manager import cached
+
+        @cached("directory_exclusion_patterns",
+                key_func=lambda self: f"directory_exclusion_patterns:{os.path.getmtime(self.config_path) if os.path.exists(self.config_path) else 'missing'}")
+        def _get_directory_exclusion_patterns(self) -> List[str]:
+            return self.config.get("directory_exclusion_patterns", DEFAULT_CONFIG.get("directory_exclusion_patterns", []))
+
+        return _get_directory_exclusion_patterns(self)
 
     def update_config(self, updates: Dict[str, Any]) -> bool:
         """

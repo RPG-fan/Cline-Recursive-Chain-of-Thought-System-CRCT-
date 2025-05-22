@@ -183,6 +183,57 @@ def is_path_excluded(path: str, excluded_paths: List[str]) -> bool:
             return True
     return False
 
+def matches_exclusion_patterns(path: str, patterns: List[str]) -> bool:
+    """
+    Check if a path matches any of the given glob exclusion patterns.
+    Supports patterns like "**/bin/**", "**/*.dll", etc.
+
+    Args:
+        path: Path to check (normalized)
+        patterns: List of glob patterns
+
+    Returns:
+        True if the path matches any pattern, False otherwise
+    """
+    if not patterns:
+        return False
+    
+    import fnmatch
+    from pathlib import Path
+    
+    norm_path = normalize_path(path)
+    
+    for pattern in patterns:
+        try:
+            # Handle different pattern types
+            if pattern.startswith('**/') and pattern.endswith('/**'):
+                # Pattern like "**/bin/**" - matches any path containing the directory
+                dir_name = pattern[3:-3]  # Remove "**/" and "/**"
+                if f'/{dir_name}/' in norm_path or norm_path.endswith(f'/{dir_name}'):
+                    return True
+            elif pattern.startswith('**/'):
+                # Pattern like "**/*.dll" - matches files at any depth
+                if fnmatch.fnmatch(norm_path, pattern) or fnmatch.fnmatch(os.path.basename(norm_path), pattern[3:]):
+                    return True
+            else:
+                # Standard glob pattern
+                if fnmatch.fnmatch(norm_path, pattern) or fnmatch.fnmatch(os.path.basename(norm_path), pattern):
+                    return True
+                    
+            # Also try pathlib.Path.match for more robust glob support
+            try:
+                path_obj = Path(norm_path)
+                if path_obj.match(pattern):
+                    return True
+            except (ValueError, TypeError):
+                # pathlib.Path.match can be picky about patterns
+                pass
+                
+        except Exception as e:
+            logger.warning(f"Error matching pattern '{pattern}' against path '{norm_path}': {e}")
+            continue
+    
+    return False
 
 def is_subpath(path: str, parent_path: str) -> bool:
     """

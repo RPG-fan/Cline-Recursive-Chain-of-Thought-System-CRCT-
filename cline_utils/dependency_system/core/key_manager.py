@@ -17,7 +17,7 @@ from collections import defaultdict
 
 # Ensure imports resolve correctly based on project structure
 try:
-    from cline_utils.dependency_system.utils.path_utils import get_project_root, normalize_path
+    from cline_utils.dependency_system.utils.path_utils import get_project_root, normalize_path, matches_exclusion_patterns
     from cline_utils.dependency_system.utils.config_manager import ConfigManager
 
 except ImportError:
@@ -112,11 +112,14 @@ def generate_keys(root_paths: List[str], excluded_dirs: Optional[Set[str]] = Non
     for root_path in root_paths:
         if not os.path.exists(root_path): raise FileNotFoundError(f"Root path '{root_path}' does not exist.")
 
-    config_manager = ConfigManager()
-    excluded_dirs_names = set(excluded_dirs) if excluded_dirs else config_manager.get_excluded_dirs()
-    excluded_extensions = set(excluded_extensions) if excluded_extensions else config_manager.get_excluded_extensions()
-    project_root = get_project_root()
-    absolute_excluded_dirs = {normalize_path(os.path.join(project_root, d)) for d in excluded_dirs_names}
+        config_manager = ConfigManager()
+        excluded_dirs_names = set(excluded_dirs) if excluded_dirs else config_manager.get_excluded_dirs()
+        excluded_extensions = set(excluded_extensions) if excluded_extensions else config_manager.get_excluded_extensions()
+        # Get the new pattern-based exclusions
+        file_exclusion_patterns = config_manager.get_file_exclusion_patterns()
+        directory_exclusion_patterns = config_manager.get_directory_exclusion_patterns()
+        project_root = get_project_root()
+        absolute_excluded_dirs = {normalize_path(os.path.join(project_root, d)) for d in excluded_dirs_names}
 
     if precomputed_excluded_paths is not None:
         exclusion_set_for_processing = precomputed_excluded_paths.union(absolute_excluded_dirs)
@@ -219,6 +222,14 @@ def generate_keys(root_paths: List[str], excluded_dirs: Optional[Set[str]] = Non
                         continue
                     if item_name.endswith("_module.md"):
                         logger.debug(f"Exclusion Check 4: Skipping mini-tracker '{item_name}' in '{norm_dir_path}'")
+                        continue
+
+                    # NEW: Check pattern-based exclusions
+                    if is_file and matches_exclusion_patterns(norm_item_path, file_exclusion_patterns):
+                        logger.debug(f"Exclusion Check 6: Skipping file '{item_name}' matching file exclusion pattern in '{norm_dir_path}'")
+                        continue
+                    if is_dir and matches_exclusion_patterns(norm_item_path, directory_exclusion_patterns):
+                        logger.debug(f"Exclusion Check 7: Skipping directory '{item_name}' matching directory exclusion pattern in '{norm_dir_path}'")
                         continue
 
                     # Skip items that are neither file nor directory
