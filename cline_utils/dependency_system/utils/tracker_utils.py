@@ -365,12 +365,12 @@ def get_global_map_cache_key_part(global_map: Dict[str, Any]) -> str:
 
 
 # --- MODIFIED AGGREGATION FUNCTION (Uses KEY#global_instance) ---
-@cached(
-    "aggregation_v2_gi",
-    # MODIFIED key_func - show_progress doesn't affect cache, so it's accepted but not included in key
-    key_func=lambda paths, pmi, cgptki, show_progress=True: f"agg_v2_gi:{':'.join(sorted(list(paths)))}:{hash(tuple(sorted(pmi.items())))}:{get_global_map_cache_key_part(cgptki)}",
-    ttl=300,
-)
+# @cached(
+#     "aggregation_v2_gi",
+#     # MODIFIED key_func - show_progress doesn't affect cache, so it's accepted but not included in key
+#     key_func=lambda paths, pmi, cgptki, show_progress=True: f"agg_v2_gi:{':'.join(sorted(list(paths)))}:{hash(tuple(sorted(pmi.items())))}:{get_global_map_cache_key_part(cgptki)}",
+#     ttl=300,
+# )
 def aggregate_all_dependencies(
     tracker_paths: Set[str],
     path_migration_info: PathMigrationInfo,
@@ -544,7 +544,9 @@ def aggregate_all_dependencies(
 
     # Run per-tracker aggregation in parallel
     tracker_list = list(tracker_paths)
-    processor = BatchProcessor(show_progress=show_progress, phase_name="Aggregating Dependencies")
+    processor = BatchProcessor(
+        show_progress=show_progress, phase_name="Aggregating Dependencies"
+    )
     per_tracker_results = processor.process_items(
         tracker_list, _aggregate_single_tracker
     )
