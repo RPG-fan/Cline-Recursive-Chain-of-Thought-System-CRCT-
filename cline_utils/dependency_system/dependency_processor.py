@@ -255,12 +255,33 @@ def command_handler_analyze_project(args: argparse.Namespace) -> int:
             f"All Suggestions before Tracker Update: {results.get('dependency_suggestion', {}).get('suggestions')}"
         )
 
+        # Helper function to make results JSON-serializable by removing AST objects
+        def make_serializable(obj):
+            """Recursively remove non-JSON-serializable objects from the results."""
+            if isinstance(obj, dict):
+                # Remove known non-serializable keys
+                cleaned = {
+                    k: make_serializable(v)
+                    for k, v in obj.items()
+                    if k not in ("_ast_tree", "_ts_tree")
+                }
+                return cleaned
+            elif isinstance(obj, list):
+                return [make_serializable(item) for item in obj]
+            elif isinstance(obj, (str, int, float, bool, type(None))):
+                return obj
+            else:
+                # Convert any other non-serializable objects to string representation
+                return str(obj)
+
         if args.output:
             output_path_abs = normalize_path(os.path.abspath(args.output))
             output_dir = os.path.dirname(output_path_abs)
             os.makedirs(output_dir, exist_ok=True) if output_dir else None
+            # Clean results before JSON serialization
+            serializable_results = make_serializable(results)
             with open(output_path_abs, "w", encoding="utf-8") as f:
-                json.dump(results, f, indent=2)
+                json.dump(serializable_results, f, indent=2)
             print(f"Analysis results saved to {output_path_abs}")
         elif results.get("status") == "success":
             print(
