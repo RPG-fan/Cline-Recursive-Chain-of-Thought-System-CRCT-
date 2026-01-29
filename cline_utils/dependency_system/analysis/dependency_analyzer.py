@@ -593,9 +593,7 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
                 f"Failed to emit ast_verified_links for {norm_file_path}: {e_links}"
             )
 
-        return (
-            analysis_result  # This result no longer contains _ast_tree for Python files
-        )
+        return analysis_result  # This result contains _ast_tree and _ts_tree for downstream use
     except Exception as e:
         logger.exception(f"Unexpected error analyzing {norm_file_path}: {e}")
         return {

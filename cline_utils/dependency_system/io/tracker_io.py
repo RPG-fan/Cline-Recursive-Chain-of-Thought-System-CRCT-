@@ -40,9 +40,7 @@ from cline_utils.dependency_system.core.key_manager import (
     load_old_global_key_map,
     sort_key_strings_hierarchically,
 )
-from cline_utils.dependency_system.core.key_manager import (
-    sort_keys as sort_key_info_objects,
-)  # Takes List[KeyInfo], sorts by tier then key_string
+
 from cline_utils.dependency_system.core.key_manager import (
     validate_key as validate_key_format,
 )
@@ -376,7 +374,7 @@ def validate_grid_ordered(
     return True
 
 
-def _write_mini_tracker_with_template_preservation(
+def write_mini_tracker_with_template_preservation(
     output_file: str,
     lines_from_old_file: List[str],  # For preserving header/footer
     key_info_list_to_write: List[KeyInfo],  # The KIs defining the new tracker content
@@ -514,7 +512,7 @@ def _write_mini_tracker_with_template_preservation(
         logger.debug(f"Successfully wrote mini tracker content to: {output_file}")
     except Exception as e_write_mini:
         logger.error(
-            f"Error during _write_mini_tracker_with_template_preservation for {output_file}: {e_write_mini}",
+            f"Error during write_mini_tracker_with_template_preservation for {output_file}: {e_write_mini}",
             exc_info=True,
         )
         # Consider if this should raise to stop cache invalidation etc. For now, just logs.
@@ -1420,7 +1418,10 @@ def update_tracker(
     keys_to_explicitly_remove: Optional[Set[str]] = None,
     use_old_map_for_migration: bool = True,
     apply_ast_overrides: bool = True,
-) -> None:  # Returns None, modifies files directly.
+    return_update: bool = False,
+) -> Optional[
+    Dict[str, Any]
+]:  # Returns Dict if return_update is True, else writes directly.
     # --- AST Override for Doc Tracker ---
     if tracker_type == "doc":
         apply_ast_overrides = False
@@ -1611,20 +1612,20 @@ def update_tracker(
             logger.error(
                 f"Mini Update Critical: No module dir from '{output_file_suggestion}'."
             )
-            return
+            return None
         module_path_for_mini = module_ki_obj_for_path.norm_path
         if not module_path_for_mini:
             logger.error(
                 f"Mini Update Critical: Module KI '{module_ki_obj_for_path.key_string}' empty norm_path."
             )
-            return
+            return None
         try:
             output_file = get_mini_tracker_path(module_path_for_mini)
         except ValueError as ve:
             logger.error(
                 f"Mini Update Critical: get_mini_tracker_path for '{module_path_for_mini}' fail: {ve}."
             )
-            return
+            return None
         logger.debug(
             f"Mini Tracker Update Cycle: Module='{module_path_for_mini}', File='{output_file}' (Key: {module_ki_obj_for_path.key_string})"
         )
@@ -1793,7 +1794,7 @@ def update_tracker(
         logger.critical(
             f"CRITICAL ERROR: output_file is empty after type-specific logic. Type: '{tracker_type}', Suggestion: '{output_file_suggestion}'. Aborting."
         )
-        return
+        return None
 
     final_key_info_list = sorted(
         relevant_key_infos_for_type,
@@ -2017,13 +2018,13 @@ def update_tracker(
         logger.critical(
             f"Path Migration Map build failed due to inconsistent global maps: {ve_migmap}. Aborting update for '{output_file_basename}'."
         )
-        return
+        return None
     except Exception as e_migmap_other:
         logger.critical(
             f"Unexpected error building migration map for '{output_file_basename}': {e_migmap_other}. Aborting update.",
             exc_info=True,
         )
-        return
+        return None
 
     if not tracker_exists_and_is_sound:  # Create new or rebuild from scratch
         logger.info(
@@ -2069,7 +2070,7 @@ def update_tracker(
                 logger.critical(
                     f"CRITICAL: module_path_for_mini is empty when trying to call create_mini_tracker for new/rebuild of '{output_file}'. Aborting."
                 )
-                return
+                return None
             # create_mini_tracker now handles its own grid creation correctly using the updated dependency_grid.create_initial_grid
             created_ok = create_mini_tracker(
                 module_path_for_mini,
@@ -2091,7 +2092,7 @@ def update_tracker(
             logger.error(
                 f"Failed to create/rebuild tracker {output_file}. Aborting update."
             )
-            return
+            return None
 
         _temp_global_key_counts_update = defaultdict(int)
         for _ki_global_update in path_to_key_info.values():
@@ -2127,7 +2128,7 @@ def update_tracker(
         logger.error(
             "CRITICAL: output_file is empty before backup step post-creation. Aborting update."
         )
-        return
+        return None
 
     # --- END OF SECTION: Read Existing Data, Build Migration Map, Create/Rebuild Tracker, Backup ---
 
@@ -2481,10 +2482,10 @@ def update_tracker(
 
         # Helper to get relationship char from a specified home tracker file
         # This helper needs to be robust.
-        @cached(
-            "home_tracker_rel_char",
-            key_func=lambda p1, p2, htf: f"htrc:{p1}:{p2}:{htf}:{(os.path.getmtime(htf) if os.path.exists(htf) else 0)}",
-        )
+        # @cached(
+        #     "home_tracker_rel_char",
+        #     key_func=lambda p1, p2, htf: f"htrc:{p1}:{p2}:{htf}:{(os.path.getmtime(htf) if os.path.exists(htf) else 0)}",
+        # )
         def get_char_from_home_tracker_cached(
             path1_norm: str, path2_norm: str, home_tracker_file_norm: str
         ) -> Optional[str]:
@@ -3024,7 +3025,10 @@ def update_tracker(
                 # aggregate_all_dependencies expects path_migration_info, which should be available
                 # It returns Dict[Tuple[current_source_key_str, current_target_key_str], Tuple[char, Set[origin_paths]]]
                 globally_aggregated_links_with_origins = aggregate_all_dependencies(
-                    all_tracker_paths_for_agg, path_migration_info, path_to_key_info, show_progress=False
+                    all_tracker_paths_for_agg,
+                    path_migration_info,
+                    path_to_key_info,
+                    show_progress=False,
                 )
 
                 global_authoritative_rels: Dict[Tuple[str, str], str] = {
@@ -3806,22 +3810,37 @@ def update_tracker(
     for ki_global_final_write in path_to_key_info.values():
         final_global_key_counts[ki_global_final_write.key_string] += 1
 
-    # Ensure final_key_info_list is used for definitions and grid keys
-    grid_keys_for_final_write = [ki.key_string for ki in final_key_info_list]
+    # --- Intercept for return_update mode ---
+    if return_update:
+        logger.debug(f"Returning prepared data for tracker: {output_file}")
+        return {
+            "tracker_type": tracker_type,
+            "output_file": output_file,
+            "key_info_list": final_key_info_list,
+            "grid_rows": final_grid_comp_ordered,
+            "last_key_edit": final_last_key_edit,
+            "last_grid_edit": final_last_grid_edit,
+            "module_path": module_path_for_mini if tracker_type == "mini" else None,
+            "existing_lines": (
+                lines_from_old_file if tracker_exists_and_is_sound else []
+            ),
+            "tracker_exists": tracker_exists_and_is_sound,
+            "path_to_key_info": path_to_key_info,
+        }
 
     if tracker_type == "mini":
         if not module_path_for_mini:
             logger.critical(
                 f"CRITICAL FINAL WRITE: module_path_for_mini is empty for mini-tracker '{output_file}'. Aborting."
             )
-            return  # Cannot format template correctly
+            return None  # Cannot format template correctly
 
         # Ensure lines_from_old_file is only used if tracker_exists_and_is_sound was true earlier
         # If tracker was rebuilt, lines_from_old_file would be empty.
         template_to_use = get_mini_tracker_data()["template"]
         markers_to_use = get_mini_tracker_data()["markers"]
 
-        _write_mini_tracker_with_template_preservation(
+        write_mini_tracker_with_template_preservation(
             output_file,
             (
                 lines_from_old_file if tracker_exists_and_is_sound else []
@@ -3850,7 +3869,7 @@ def update_tracker(
             logger.error(
                 f"Write main/doc tracker {output_file} failed during final write. Review logs."
             )
-            return  # Do not invalidate caches if write failed
+            return None  # Do not invalidate caches if write failed
 
     logger.debug(f"Tracker update process for '{output_file}' completed successfully.")
     # --- END OF SECTION: Final Write ---
@@ -3864,7 +3883,40 @@ def update_tracker(
         "aggregation_v2_gi", ".*"
     )  # Invalidate new GI aggregation cache
     logger.debug(f"Invalidated relevant caches for '{os.path.basename(output_file)}'.")
+    return None
     # --- END OF SECTION: Cache Invalidation ---
+
+
+def prepare_tracker_update(
+    output_file_suggestion: str,
+    path_to_key_info: Dict[str, KeyInfo],
+    tracker_type: str = "main",
+    suggestions_external: Optional[Dict[str, List[Tuple[str, str]]]] = None,
+    file_to_module: Optional[Dict[str, str]] = None,
+    new_keys: Optional[List[KeyInfo]] = None,
+    force_apply_suggestions: bool = False,
+    keys_to_explicitly_remove: Optional[Set[str]] = None,
+    use_old_map_for_migration: bool = True,
+    apply_ast_overrides: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """
+    Prepares a tracker update in memory by calling update_tracker in return_update mode.
+    This ensures that all processing logic (aggregation, migration, overrides) is identical
+    between synchronous writes and batched updates.
+    """
+    return update_tracker(
+        output_file_suggestion=output_file_suggestion,
+        path_to_key_info=path_to_key_info,
+        tracker_type=tracker_type,
+        suggestions_external=suggestions_external,
+        file_to_module=file_to_module,
+        new_keys=new_keys,
+        force_apply_suggestions=force_apply_suggestions,
+        keys_to_explicitly_remove=keys_to_explicitly_remove,
+        use_old_map_for_migration=use_old_map_for_migration,
+        apply_ast_overrides=apply_ast_overrides,
+        return_update=True,
+    )
 
 
 # --- remove_path_from_tracker (REFACTORED from remove_key_from_tracker) ---

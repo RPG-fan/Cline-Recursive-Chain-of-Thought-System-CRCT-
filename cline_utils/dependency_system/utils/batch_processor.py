@@ -12,10 +12,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
+from cline_utils.dependency_system.utils.phase_tracker import PhaseTracker
+
 # Removed cache import as caching batch processing itself is complex and often not desired
 # from cline_utils.dependency_system.utils.cache_manager import cached
 
-from cline_utils.dependency_system.utils.phase_tracker import PhaseTracker
 
 logger = logging.getLogger(__name__)
 
@@ -92,13 +93,19 @@ class BatchProcessor:
 
         # Use PhaseTracker if progress is enabled
         self.tracker = None
-        context_manager = PhaseTracker(total=self.total_items, phase_name=self.phase_name) if self.show_progress else None
-        
+        context_manager = (
+            PhaseTracker(total=self.total_items, phase_name=self.phase_name)
+            if self.show_progress
+            else None
+        )
+
         if context_manager:
             with context_manager as tracker:
                 self.tracker = tracker
                 for i in range(0, self.total_items, actual_batch_size):
-                    batch_indices = range(i, min(i + actual_batch_size, self.total_items))
+                    batch_indices = range(
+                        i, min(i + actual_batch_size, self.total_items)
+                    )
                     batch_items = [items[idx] for idx in batch_indices]
 
                     if not batch_items:
@@ -123,8 +130,8 @@ class BatchProcessor:
                     self.processed_items = items_processed_in_batches
                     tracker.update(len(batch_items))
         else:
-             # No progress bar logic
-             for i in range(0, self.total_items, actual_batch_size):
+            # No progress bar logic
+            for i in range(0, self.total_items, actual_batch_size):
                 batch_indices = range(i, min(i + actual_batch_size, self.total_items))
                 batch_items = [items[idx] for idx in batch_indices]
 
@@ -143,13 +150,13 @@ class BatchProcessor:
                         logger.error(
                             f"Calculated invalid global index {global_index} from batch index {original_idx} (batch start {i})"
                         )
-                
+
                 items_processed_in_batches += len(batch_items)
                 self.processed_items = items_processed_in_batches
 
         final_time = time.time() - self.start_time
         logger.debug(f"Processed {self.total_items} items in {final_time:.2f} seconds")
-        
+
         # Filter out potential None values if errors occurred and weren't replaced
         # Or raise an error if None is found, depending on desired strictness
         final_results = [res for res in results if res is not None]
@@ -344,7 +351,9 @@ def process_items(
     Convenience function to process items in parallel using BatchProcessor.
     Extra keyword arguments (**kwargs) are passed directly to the processor_func.
     """
-    processor = BatchProcessor(max_workers, batch_size, show_progress, phase_name=phase_name)
+    processor = BatchProcessor(
+        max_workers, batch_size, show_progress, phase_name=phase_name
+    )
     return processor.process_items(items, processor_func, **kwargs)
 
 

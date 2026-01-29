@@ -36,6 +36,12 @@ from cline_utils.dependency_system.utils.phase_tracker import PhaseTracker
 from cline_utils.dependency_system.utils.template_generator import (
     generate_final_review_checklist,
 )
+from cline_utils.dependency_system.utils.tracker_batch_collector import (
+    TrackerBatchCollector,
+    create_doc_tracker_update,
+    create_main_tracker_update,
+    create_mini_tracker_update,
+)
 from cline_utils.dependency_system.utils.tracker_utils import (
     aggregate_all_dependencies,
     get_key_global_instance_string,
@@ -849,13 +855,20 @@ def analyze_project(
             f"  - Potential Module Dir: {ki_dir_log.norm_path} (Key: {ki_dir_log.key_string})"
         )
 
-    # --- Update Mini Trackers ---
+    # --- Batch Update Trackers ---
+    # Using batch collector to minimize disk I/O by collecting all updates
+    # in memory and writing them all at once at the end
+    batch_collector = TrackerBatchCollector()
+
+    # --- Collect Mini Tracker Updates ---
     with PhaseTracker(
-        total=len(potential_mini_tracker_dirs), phase_name="Updating Mini Trackers"
+        total=len(potential_mini_tracker_dirs), phase_name="Preparing Mini Trackers"
     ) as tracker:
         for module_key_info_obj in potential_mini_tracker_dirs:
             norm_module_path = module_key_info_obj.norm_path
-            tracker.update(description=f"Updating {os.path.basename(norm_module_path)}")
+            tracker.update(
+                description=f"Preparing {os.path.basename(norm_module_path)}"
+            )
 
             if not norm_module_path:
                 logger.error(
@@ -883,27 +896,50 @@ def analyze_project(
                     module_path=norm_module_path,
                 )
                 logger.debug(
-                    f"Updating mini tracker for module '{norm_module_path}' (Key: {module_key_info_obj.key_string}) at: {mini_tracker_path_val}"
+                    f"Preparing mini tracker for module '{norm_module_path}' (Key: {module_key_info_obj.key_string})"
                 )
                 mini_tracker_paths_updated.add(norm_module_path)
+
                 try:
-                    tracker_io.update_tracker(
+                    # Prepare tracker update in memory (no disk I/O yet)
+                    prepared_data = tracker_io.prepare_tracker_update(
                         output_file_suggestion=mini_tracker_path_val,
                         path_to_key_info=path_to_key_info,
                         tracker_type="mini",
                         suggestions_external=all_global_instance_suggestions,
                         file_to_module=file_to_module,
                         new_keys=newly_generated_keys,
-                        # Force suggestion application so 'p' (and EMPTY) never block 's'/'S'
                         force_apply_suggestions=True,
                         use_old_map_for_migration=old_map_existed_before_gen,
                     )
-                    analysis_results["tracker_updates"]["mini"][
-                        norm_module_path
-                    ] = "success"
+
+                    if prepared_data:
+                        # Create TrackerUpdate and add to batch
+                        update = create_mini_tracker_update(
+                            output_file=prepared_data["output_file"],
+                            key_info_list=prepared_data["key_info_list"],
+                            grid_rows=prepared_data["grid_rows"],
+                            last_key_edit=prepared_data["last_key_edit"],
+                            last_grid_edit=prepared_data["last_grid_edit"],
+                            module_path=prepared_data["module_path"]
+                            or norm_module_path,
+                            path_to_key_info=path_to_key_info,
+                            existing_lines=prepared_data.get("existing_lines"),
+                            tracker_exists=prepared_data.get("tracker_exists", False),
+                        )
+                        batch_collector.add(update)
+                        analysis_results["tracker_updates"]["mini"][
+                            norm_module_path
+                        ] = "pending"
+                    else:
+                        analysis_results["tracker_updates"]["mini"][
+                            norm_module_path
+                        ] = "failure_preparation"
+                        analysis_results["status"] = "warning"
+
                 except Exception as mini_err:
                     logger.error(
-                        f"Error updating mini tracker {mini_tracker_path_val}: {mini_err}",
+                        f"Error preparing mini tracker {mini_tracker_path_val}: {mini_err}",
                         exc_info=True,
                     )
                     analysis_results["tracker_updates"]["mini"][
@@ -915,71 +951,147 @@ def analyze_project(
                     f"Skipping mini-tracker update for empty module directory: {norm_module_path}"
                 )
 
-    # --- Update Doc Tracker ---
-    doc_directories_rel = (
-        config.get_doc_directories()
-    )  # Ensure this is fetched correctly
+    # --- Collect Doc Tracker Update ---
+    doc_directories_rel = config.get_doc_directories()
     doc_tracker_path = (
         tracker_io.get_tracker_path(project_root, tracker_type="doc")
         if doc_directories_rel
         else None
     )
     if doc_tracker_path:
-        logger.info(f"Updating doc tracker: {doc_tracker_path}")
+        logger.info(f"Preparing doc tracker: {doc_tracker_path}")
         try:
-            tracker_io.update_tracker(
+            prepared_data = tracker_io.prepare_tracker_update(
                 output_file_suggestion=doc_tracker_path,
                 path_to_key_info=path_to_key_info,
                 tracker_type="doc",
                 suggestions_external=all_global_instance_suggestions,
                 file_to_module=file_to_module,
                 new_keys=newly_generated_keys,
-                # Force suggestion application so 'p' (and EMPTY) never block 's'/'S'
                 force_apply_suggestions=True,
                 use_old_map_for_migration=old_map_existed_before_gen,
             )
-            analysis_results["tracker_updates"]["doc"] = "success"
+
+            if prepared_data:
+                update = create_doc_tracker_update(
+                    output_file=prepared_data["output_file"],
+                    key_info_list=prepared_data["key_info_list"],
+                    grid_rows=prepared_data["grid_rows"],
+                    last_key_edit=prepared_data["last_key_edit"],
+                    last_grid_edit=prepared_data["last_grid_edit"],
+                    path_to_key_info=path_to_key_info,
+                )
+                batch_collector.add(update)
+                analysis_results["tracker_updates"]["doc"] = "pending"
+            else:
+                analysis_results["tracker_updates"]["doc"] = "failure_preparation"
+                analysis_results["status"] = "warning"
+
         except Exception as doc_err:
             logger.error(
-                f"Error updating doc tracker {doc_tracker_path}: {doc_err}",
+                f"Error preparing doc tracker {doc_tracker_path}: {doc_err}",
                 exc_info=True,
             )
-            # This part is reached if update_tracker itself raises an exception
             analysis_results["tracker_updates"]["doc"] = "failure"
             analysis_results["status"] = "warning"
-            # If the error from update_tracker is critical, consider setting status to "error"
-            # analysis_results["message"] = f"Doc tracker update failed: {doc_err}"
     else:
         logger.info(
             "Doc tracker update skipped: No doc directories configured or path determination failed."
         )
         analysis_results["tracker_updates"]["doc"] = "skipped_no_config"
 
-    # --- Update Main Tracker LAST (using aggregation) ---
+    # --- Collect Main Tracker Update LAST ---
     main_tracker_path = tracker_io.get_tracker_path(project_root, tracker_type="main")
-    logger.info(
-        f"Updating main tracker (with internal aggregation): {main_tracker_path}"
-    )
+    logger.info(f"Preparing main tracker: {main_tracker_path}")
     try:
-        tracker_io.update_tracker(
+        prepared_data = tracker_io.prepare_tracker_update(
             output_file_suggestion=main_tracker_path,
             path_to_key_info=path_to_key_info,
             tracker_type="main",
             suggestions_external=all_global_instance_suggestions,
             file_to_module=file_to_module,
             new_keys=newly_generated_keys,
-            # Force suggestion application so 'p' (and EMPTY) never block 's'/'S'
             force_apply_suggestions=True,
             use_old_map_for_migration=old_map_existed_before_gen,
         )
-        analysis_results["tracker_updates"]["main"] = "success"
+
+        if prepared_data:
+            update = create_main_tracker_update(
+                output_file=prepared_data["output_file"],
+                key_info_list=prepared_data["key_info_list"],
+                grid_rows=prepared_data["grid_rows"],
+                last_key_edit=prepared_data["last_key_edit"],
+                last_grid_edit=prepared_data["last_grid_edit"],
+                path_to_key_info=path_to_key_info,
+            )
+            batch_collector.add(update)
+            analysis_results["tracker_updates"]["main"] = "pending"
+        else:
+            analysis_results["tracker_updates"]["main"] = "failure_preparation"
+            analysis_results["status"] = "warning"
+
     except Exception as main_err:
         logger.error(
-            f"Error updating main tracker {main_tracker_path}: {main_err}",
+            f"Error preparing main tracker {main_tracker_path}: {main_err}",
             exc_info=True,
         )
         analysis_results["tracker_updates"]["main"] = "failure"
         analysis_results["status"] = "warning"
+
+    # --- Commit All Tracker Updates in a Single Batch ---
+    if not batch_collector.is_empty():
+        logger.info(f"Committing {len(batch_collector)} tracker updates in batch...")
+        try:
+            results = batch_collector.commit_all()
+
+            # Update analysis results based on commit outcomes
+            for file_path, success in results.items():
+                # Determine tracker type from file path
+                if "_module.md" in file_path:
+                    tracker_cat = "mini"
+                    # Find the module path for this mini tracker
+                    for path, status in analysis_results["tracker_updates"][
+                        "mini"
+                    ].items():
+                        if status == "pending":
+                            analysis_results["tracker_updates"]["mini"][path] = (
+                                "success" if success else "failure"
+                            )
+                            break
+                elif "doc_tracker.md" in file_path:
+                    tracker_cat = "doc"
+                    analysis_results["tracker_updates"]["doc"] = (
+                        "success" if success else "failure"
+                    )
+                else:
+                    tracker_cat = "main"
+                    analysis_results["tracker_updates"]["main"] = (
+                        "success" if success else "failure"
+                    )
+
+                if not success:
+                    logger.error(f"Failed to write {tracker_cat} tracker: {file_path}")
+                    analysis_results["status"] = "warning"
+
+            logger.info("Batch tracker update completed successfully")
+
+        except Exception as batch_err:
+            logger.error(f"Batch tracker update failed: {batch_err}", exc_info=True)
+            # Mark all pending updates as failed
+            for tracker_cat in ["mini", "doc", "main"]:
+                if isinstance(analysis_results["tracker_updates"][tracker_cat], dict):
+                    for path, status in analysis_results["tracker_updates"][
+                        tracker_cat
+                    ].items():
+                        if status == "pending":
+                            analysis_results["tracker_updates"][tracker_cat][
+                                path
+                            ] = "failure"
+                elif analysis_results["tracker_updates"][tracker_cat] == "pending":
+                    analysis_results["tracker_updates"][tracker_cat] = "failure"
+            analysis_results["status"] = "error"
+    else:
+        logger.info("No tracker updates to commit")
 
     # --- Template Generation ---
     logger.info("Starting template generation (e.g., final review checklist)...")
