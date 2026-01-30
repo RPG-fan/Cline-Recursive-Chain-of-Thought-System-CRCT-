@@ -25,13 +25,11 @@ from cline_utils.dependency_system.utils.cache_manager import (
     cached,
     clear_all_caches,
     file_modified,
+    get_project_root_cached as get_project_root,
+    normalize_path_cached as normalize_path,
 )
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
-from cline_utils.dependency_system.utils.path_utils import (
-    get_project_root,
-    is_subpath,
-    normalize_path,
-)
+from cline_utils.dependency_system.utils.path_utils import is_subpath
 from cline_utils.dependency_system.utils.phase_tracker import PhaseTracker
 from cline_utils.dependency_system.utils.template_generator import (
     generate_final_review_checklist,

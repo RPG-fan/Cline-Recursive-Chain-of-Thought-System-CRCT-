@@ -43,6 +43,7 @@ class BatchProcessor:
             show_progress: Whether to show progress information (prints to stdout)
             phase_name: Name of the phase for the progress tracker
         """
+        super().__init__()
         cpu_count = os.cpu_count() or 8
         # Increase parallelism: use 4x CPUs by default, cap at 48 to avoid runaway threads
         default_workers = min(4, (cpu_count * 4))

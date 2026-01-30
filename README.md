@@ -1,7 +1,13 @@
-# Cline Recursive Chain-of-Thought System (CRCT) - v8.0
+# Cline Recursive Chain-of-Thought System (CRCT) - v8.1
 
 Welcome to the **Cline Recursive Chain-of-Thought System (CRCT)**, a framework designed to manage context, dependencies, and tasks in large-scale Cline projects within VS Code. Built for the Cline extension, CRCT leverages a recursive, file-based approach with a modular dependency tracking system to maintain project state and efficiency as complexity increases.
 
+- Version **v8.1**: ⚡ **PERFORMANCE & STABILITY** - Batching and Caching Overhaul
+    - **Tracker Batch Collection**: New `TrackerBatchCollector` system for atomic, high-performance tracker writes with rollback support.
+    - **Advanced Caching**: Enhanced `@cached` decorator with dynamic file dependencies (`file_deps`), mtime-based invalidation, and automated path tracking.
+    - **Optimized I/O**: Refactored `tracker_io` with local lookup caching to eliminate redundant file parsing during updates.
+    - **Report Filtering**: `report_generator` now supports `EXCLUSION_PATTERNS` to eliminate false positives and groups multiple occurrences for cleaner analysis.
+    - **Windows Path Consistency**: Standardized on Uppercase drive letters for improved compatibility across different Python environments.
 - Version **v8.0**: 🚀 **MAJOR RELEASE** - Embedding & analysis system overhaul
     - **Symbol Essence Strings (SES)**: Revolutionary embedding architecture combining runtime + AST metadata for 10x better accuracy
     - **Qwen3 Reranker**: AI-powered semantic dependency scoring with automatic model download
@@ -81,12 +87,16 @@ Welcome to the **Cline Recursive Chain-of-Thought System (CRCT)**, a framework d
     - New template for Roadmap Summaries.
 - **Configurable Embedding Device**: Allows users to configure the embedding device (`cpu`, `cuda`, `mps`) via `.clinerules.config.json` for optimized performance on different hardware. (Note: *the system does not yet install the requirements for cuda or mps automatically, please install the requirements manually or with the help of the LLM.*)
 - **File Exclusion Patterns**: Users can now define file exclusion patterns in `.clinerules.config.json` to customize project analysis.
-- **Code Quality Analysis**: **(NEW in v8.0)**
-    - **Report Generator**: A new tool (`report_generator.py`) that performs AST-based code quality analysis.
-    - **Incomplete Code Detection**: Identifies `TODO`, `FIXME`, empty functions/classes, and `pass` statements using robust Tree-sitter parsing for Python, JavaScript, and TypeScript.
+- **Code Quality Analysis**: **(NEW in v8.0, Improved in v8.1)**
+    - **Report Generator**: A tool (`report_generator.py`) that performs AST-based code quality analysis.
+    - **Incomplete Code Detection**: Identifies `TODO`, `FIXME`, empty functions/classes, and `pass` statements using robust Tree-sitter parsing.
+    - **False Positive Filtering**: **(NEW in v8.1)** Added `EXCLUSION_PATTERNS` to filter out common false positives like `sql.Placeholder`.
+    - **Condensed Reporting**: **(NEW in v8.1)** Groups multiple occurrences of the same issue in a file for more readable reports.
     - **Unused Item Detection**: Integrates with Pyright to report unused variables, imports, and functions.
-    - **Actionable Reports**: Generates a detailed `code_analysis/issues_report.md` to guide cleanup efforts.
-- **Caching and Batch Processing**: Significantly improves performance.
+- **Advanced Caching and Batching**: **(MAJOR UPDATE in v8.1)**
+    - **Tracker Batching**: Collects all tracker updates in memory and writes them in a single operation, significantly reducing disk I/O.
+    - **Atomic Updates**: Features rollback support to maintain tracker integrity if a batch write fails.
+    - **Intelligent Invalidation**: Caches now automatically invalidate based on file modification times (mtime) and specific path arguments.
 - **Modular Dependency Tracking**:
     - Utilizes main trackers (`module_relationship_tracker.md`, `doc_tracker.md`) and module-specific mini-trackers (`{module_name}_module.md`).
     - Mini-tracker files also serve as the HDTA Domain Module documentation for their respective modules.
@@ -180,6 +190,7 @@ Cline-Recursive-Chain-of-Thought-System-CRCT-/
 │          phase_tracker.py        <NEW - progress bars>
 │          resource_validator.py   <NEW - system checks>
 │          symbol_map_merger.py    <NEW - runtime+AST merge>
+│          tracker_batch_collector.py <NEW in v8.1 - batch I/O>
 │          visualize_dependencies.py <NEW>
 │
 ├───docs/                         # Project documentation
@@ -193,6 +204,7 @@ Cline-Recursive-Chain-of-Thought-System-CRCT-/
 
 ## Current Status & Future Plans
 
+- **v8.1**: ⚡ **Performance Optimization** - Introduced batch tracker updates and advanced caching mechanisms to handle larger projects with lower I/O overhead.
 - **v8.0**: 🚀 **Major architecture evolution** - Symbol Essence Strings, Qwen3 reranker, hardware-adaptive models, runtime symbol inspection, enhanced UX with PhaseTracker. See [CHANGELOG.md](CHANGELOG.md) for complete details.
 - **v7.8**: Focus on **visual comprehension and planning robustness**. Introduced Mermaid dependency diagrams (`visualize-dependencies`, auto-generation via `analyze-project`). Overhauled the Strategy phase (`strategy_plugin.md`) for iterative, area-based roadmap planning, explicitly using visualizations. Refined HDTA templates, including a new `roadmap_summary_template.md`.
 - **v7.7**: Introduced `cleanup_consolidation` phase, added planning/review tracker templates.

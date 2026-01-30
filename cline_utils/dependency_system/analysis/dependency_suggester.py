@@ -33,9 +33,10 @@ from cline_utils.dependency_system.utils.cache_manager import (
     cache_manager,
     cached,
     clear_all_caches,
+    normalize_path_cached as normalize_path,
 )
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
-from cline_utils.dependency_system.utils.path_utils import get_file_type, normalize_path
+from cline_utils.dependency_system.utils.path_utils import get_file_type
 
 KEY_MANAGER_DIR = os.path.dirname(os.path.abspath(key_manager.__file__))
 
@@ -73,6 +74,7 @@ def clear_caches():
         load_project_symbol_map._cache.clear()  # type: ignore
 
 
+@cached("metadata", track_path_args=[0])
 def load_metadata(metadata_path: str) -> Dict[str, Any]:
     """
     Load metadata file with caching.
@@ -103,6 +105,7 @@ def load_metadata(metadata_path: str) -> Dict[str, Any]:
 @cached(
     "tsconfig_data",
     key_func=lambda start_dir, project_root_val: f"tsconfig:{normalize_path(start_dir)}:{normalize_path(project_root_val)}",
+    track_path_args=[0],
 )
 def _find_and_parse_tsconfig(
     start_dir: str, project_root_val: str

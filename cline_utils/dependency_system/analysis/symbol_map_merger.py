@@ -11,7 +11,7 @@ import logging
 import os
 from typing import Dict, Any, List
 
-from cline_utils.dependency_system.utils.path_utils import normalize_path, get_project_root
+from cline_utils.dependency_system.utils.cache_manager import get_project_root_cached as get_project_root
 
 logger = logging.getLogger(__name__)
 

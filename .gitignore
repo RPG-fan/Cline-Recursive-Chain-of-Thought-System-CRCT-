@@ -2,4 +2,4 @@
 *.pyc
 *venv*
 *embeddings*
-.genkit/traces_idx/genkit.metadata
+.kilocodemodes

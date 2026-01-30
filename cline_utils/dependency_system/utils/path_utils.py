@@ -28,23 +28,15 @@ def normalize_path(path: str) -> str:
     Returns:
         Normalized path
     """
-    from .cache_manager import cached  # Keep import near usage if re-enabled
-
-    @cached("path_normalization", key_func=lambda p: f"normalize:{p if p else 'empty'}")
     def _normalize_path(p: str) -> str:
         if not p:
             return ""
-        # Ensure absolute path before normpath for consistency, especially with relative inputs
-        # Use os.path.abspath cautiously if CWD is not guaranteed to be project root during execution
-        # Let's assume paths passed are either absolute or meant to be relative to CWD when called
-        # If relative paths need resolving against project_root, do it *before* calling normalize_path
-        # However, making it absolute generally prevents unexpected behavior.
         if not os.path.isabs(p):
             p = os.path.abspath(p)  # Make absolute based on CWD
         normalized = os.path.normpath(p).replace("\\", "/")
-        # Lowercase drive letter on Windows for consistency
+        # Uppercase drive letter on Windows for file operation compatibility
         if os.name == "nt" and re.match(r"^[a-zA-Z]:", normalized):
-            normalized = normalized[0].lower() + normalized[1:]
+            normalized = normalized[0].upper() + normalized[1:]
         # Remove trailing slash unless it's the root directory
         if len(normalized) > 1 and normalized.endswith("/"):
             normalized = normalized.rstrip("/")
@@ -147,11 +139,6 @@ def get_project_root() -> str:
     Returns:
         Path to the project root directory
     """
-    from .cache_manager import cached
-
-    @cached(
-        "project_root", key_func=lambda: f"project_root:{normalize_path(os.getcwd())}"
-    )  # Key depends only on starting CWD
     def _get_project_root() -> str:
         current_dir = os.path.abspath(os.getcwd())
         root_indicators = ["project_root.cfg"]  # Added config file
@@ -258,12 +245,6 @@ def is_valid_project_path(path: str) -> bool:
     Returns:
         True if the path is within the project root, False otherwise
     """
-    from .cache_manager import cached
-
-    @cached(
-        "valid_project_paths",
-        key_func=lambda p: f"valid_project_path:{normalize_path(p)}:{get_project_root()}",
-    )  # Key depends on path and project root value
     def _is_valid_project_path(p: str) -> bool:
         project_root = get_project_root()
         norm_p = normalize_path(p)

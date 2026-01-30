@@ -278,6 +278,7 @@ class ConfigManager:
         return cls._instance
 
     def __init__(self):
+        super().__init__()
         if self._initialized:
             return
         self._config: Optional[Dict[str, Any]] = None

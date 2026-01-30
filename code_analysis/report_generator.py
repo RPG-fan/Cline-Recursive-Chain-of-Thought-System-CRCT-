@@ -42,6 +42,21 @@ PATTERNS = {
     "placeholder": re.compile(r"placeholder", re.IGNORECASE),
 }
 
+# Patterns to exclude from false positive matches (e.g., sql.Placeholder, include_placeholder=False)
+EXCLUSION_PATTERNS = {
+    "placeholder": [
+        re.compile(r"_placeholder", re.IGNORECASE),  # _placeholder (variable suffix)
+        re.compile(r"placeholder_", re.IGNORECASE),  # placeholder_ (variable prefix)
+        re.compile(r"sql\.Placeholder", re.IGNORECASE),  # sql.Placeholder()
+        re.compile(r"placeholders\s*=", re.IGNORECASE),  # placeholders = ...
+        re.compile(r"placeholder\s*=", re.IGNORECASE),  # placeholder=False
+        re.compile(r"placeholder\s*:", re.IGNORECASE),  # placeholder: type hint
+        re.compile(r"Placeholder\(\)", re.IGNORECASE),  # Placeholder() call
+        re.compile(r"\.placeholder\.", re.IGNORECASE),  # .placeholder. (method calls)
+        re.compile(r'"placeholder"', re.IGNORECASE),  # "placeholder" (string literal)
+    ],
+}
+
 OUTPUT_FILE = "code_analysis/issues_report.md"
 PYRIGHT_OUTPUT = "pyright_output.json"
 
@@ -204,6 +219,17 @@ def scan_file(filepath):
                         continue
 
                     if pattern.search(line):
+                        # Check if this matches any exclusion pattern for this label
+                        excluded = False
+                        if label in EXCLUSION_PATTERNS:
+                            for excl_pattern in EXCLUSION_PATTERNS[label]:
+                                if excl_pattern.search(line):
+                                    excluded = True
+                                    break
+
+                        if excluded:
+                            continue
+
                         issues.append(
                             {
                                 "type": "Incomplete/Improper",
@@ -289,14 +315,32 @@ def generate_report(issues, unused):
 
         f.write("## Incomplete & Improper Items\n")
         if issues:
-            # Sort by file and line
-            issues.sort(key=lambda x: (x["file"], x["line"]))
+            # Sort by file, subtype, and content for grouping
+            issues.sort(
+                key=lambda x: (x["file"], x["subtype"], x["content"], x["line"])
+            )
 
+            # Group issues by (file, subtype, content)
+            grouped = {}
             for issue in issues:
-                f.write(
-                    f"- **{issue['subtype']}** in `{issue['file']}:{issue['line']}`\n"
-                )
-                f.write(f"  ```\n  {issue['content']}\n  ```\n")
+                key = (issue["file"], issue["subtype"], issue["content"])
+                if key not in grouped:
+                    grouped[key] = []
+                grouped[key].append(issue["line"])
+
+            # Sort groups by file and first line
+            sorted_groups = sorted(grouped.items(), key=lambda x: (x[0][0], x[1][0]))
+
+            for (filepath, subtype, content), lines in sorted_groups:
+                if len(lines) == 1:
+                    # Single occurrence - original format
+                    f.write(f"- **{subtype}** in `{filepath}:{lines[0]}`\n")
+                    f.write(f"  ```\n  {content}\n  ```\n")
+                else:
+                    # Multiple occurrences - condensed format
+                    lines_str = ", ".join(str(ln) for ln in sorted(lines))
+                    f.write(f"- **{subtype}** in `{filepath}` (lines: {lines_str})\n")
+                    f.write(f"  ```\n  {content}\n  ```\n")
         else:
             f.write("No incomplete items found.\n")
 

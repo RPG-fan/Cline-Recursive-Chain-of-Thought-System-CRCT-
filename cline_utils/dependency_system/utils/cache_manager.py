@@ -78,12 +78,13 @@ class Cache:
         eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
         enable_compression: bool = ENABLE_COMPRESSION,
     ):
+        super().__init__()
         self.name = name
-        self.data: Dict[str, Tuple[Any, float, Optional[float]]] = (
-            {}
-        )  # (value, access_time, expiry_time)
-        self.dependencies: Dict[str, List[str]] = {}  # key -> dependent keys
-        self.reverse_deps: Dict[str, List[str]] = {}  # key -> keys that depend on it
+        # Initialize dictionaries with explicit types for Pyright
+        self.data: Dict[str, Tuple[Any, float, Optional[float]]] = {}
+        self.dependencies: Dict[str, List[str]] = {}
+        self.reverse_deps: Dict[str, List[str]] = {}
+        self.metrics = CacheMetrics()  # This will call __post_init__ automatically
         self.creation_time = time.time()
         self.default_ttl = ttl
         self.max_size = CACHE_SIZES.get(name, max_size)
@@ -91,7 +92,6 @@ class Cache:
         self.enable_compression = enable_compression
 
         # Enhanced features
-        self.metrics = CacheMetrics()  # This will call __post_init__ automatically
         self._lock = threading.RLock()  # Thread safety
         self.compression_threshold = COMPRESSION_THRESHOLD
 
@@ -410,8 +410,10 @@ class CacheManager:
     """Manages multiple caches with persistence and cleanup."""
 
     def __init__(self, persist: bool = False):
+        super().__init__()
         self.caches: Dict[str, Cache] = {}
         self.persist = persist
+        self._last_cleanup_time = 0.0  # Throttling for cleanup()
         if persist:
             os.makedirs(CACHE_DIR, exist_ok=True)
             self._load_persistent_caches()
@@ -423,19 +425,23 @@ class CacheManager:
             logger.debug(f"Spun up new cache: {cache_name} with TTL {ttl}s")
         return self.caches[cache_name]
 
-    def cleanup(self) -> None:
-        """Remove expired caches."""
-        expired = [
-            name for name, cache in list(self.caches.items()) if cache.is_expired()
-        ]
-        for name in expired:
-            if self.persist:
-                self._save_cache(name)
-            if name in self.caches:
+    def cleanup(self, force: bool = False) -> None:
+        """Remove expired caches and items, with throttling."""
+        now = time.time()
+        if not force and (now - self._last_cleanup_time < 60):
+            return
+
+        self._last_cleanup_time = now
+        for name, cache in list(self.caches.items()):
+            # Clean up items within the cache
+            cache.cleanup_expired()
+            
+            # If the whole cache is now empty and expired, remove it
+            if cache.is_expired():
+                if self.persist:
+                    self._save_cache(name)
                 del self.caches[name]
                 logger.debug(f"Spun down expired cache: {name}")
-        for cache in list(self.caches.values()):
-            cache.cleanup_expired()
 
     def clear_all(self) -> None:
         if self.persist:
@@ -678,82 +684,165 @@ def cached(
     cache_name: str,
     key_func: Optional[Callable[..., str]] = None,
     ttl: Optional[int] = DEFAULT_TTL,
+    file_deps: Optional[Callable[..., List[str]]] = None,
+    check_mtime: bool = False,
+    track_path_args: Optional[List[int]] = None,
 ):
-    """Decorator for caching with dynamic dependencies and TTL."""
+    """
+    Decorator for caching with dynamic dependencies and TTL.
+
+    Args:
+        cache_name: Name of the cache to use.
+        key_func: Optional function to generate cache key from args/kwargs.
+        ttl: Time-to-live in seconds. None uses DEFAULT_TTL, 0 means no expiry.
+        file_deps: Optional callable that returns list of file paths whose
+                   modification times should invalidate this cache entry.
+                   Signature: file_deps(*args, **kwargs) -> List[str]
+        check_mtime: If True and file_deps is provided, incorporates file mtimes
+                     into the cache key, causing automatic invalidation when
+                     dependent files are modified.
+        track_path_args: Optional list of indices for arguments that are file paths
+            to be added as dependencies for cascading invalidation.
+    """
+
 
     def decorator(func: F) -> F:
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            # Prefer provided key_func; otherwise use a robust default that avoids __func__ checks
+            # --- Step 1: Generate base cache key ---
             if key_func is not None:
-                key = key_func(*args, **kwargs)
+                base_key = key_func(*args, **kwargs)
             else:
-                # Default key: function name + stringified args/kwargs (excluding "self"/"cls" heuristically)
+                # Default key: function name + stringified args/kwargs
+                # (excluding "self"/"cls" heuristically)
                 arg_list = list(args)
                 if (
                     arg_list
-                    and (arg_list[0].__class__.__name__ != "str")
-                    and hasattr(arg_list[0], "__class__")
+                    and hasattr(args[0], "__class__")
+                    # Only omit if it's an instance of a non-builtin class (likely self/cls)
+                    and type(args[0]).__module__ != "builtins"
+                    and not isinstance(args[0], (str, int, float, bool, list, dict, set, tuple))
                 ):
-                    # Heuristic: if first arg looks like an instance/class, omit it from cache key
-                    # This avoids fragile __func__ introspection that triggers Pylance errors.
+                    # Heuristic: if first arg looks like an instance/class, omit it
                     arg_list_for_key = arg_list[1:]
                 else:
                     arg_list_for_key = arg_list
                 d_key_parts = [str(a) for a in arg_list_for_key] + [
                     f"{k}={v}" for k, v in sorted(kwargs.items())
                 ]
-                key = f"{func.__name__}::{'|'.join(d_key_parts)}"
+                base_key = f"{func.__name__}::{'|'.join(d_key_parts)}"
+
+            # --- Step 2: Resolve file dependencies ---
+            dep_file_paths: List[str] = []
+            if file_deps is not None:
+                try:
+                    dep_file_paths = file_deps(*args, **kwargs)
+                    # Filter to only existing files
+                    dep_file_paths = [p for p in dep_file_paths if p and os.path.exists(p)]
+                except Exception as e:
+                    logger.debug(f"Error resolving file_deps for {func.__name__}: {e}")
+                    dep_file_paths = []
+
+            # --- Step 3: Build final cache key (optionally with mtimes) ---
+            key = base_key
+            if check_mtime and dep_file_paths:
+                mtime_list: List[str] = []
+                for fp in dep_file_paths:
+                    try:
+                        # Use absolute path to ensure sorting is consistent across different relative paths
+                        from .path_utils import normalize_path
+                        abs_path = normalize_path(fp)
+                        mtime = os.path.getmtime(fp)
+                        mtime_list.append(f"{abs_path}:{mtime:.6f}")
+                    except OSError:
+                        mtime_list.append(f"{fp}:missing")
+                
+                # Sort the mtime list to ensure order invariance
+                mtime_list.sort()
+                key = f"{base_key}|mtime:{hash('|'.join(mtime_list))}"
 
             cache_ttl_to_use = ttl if ttl is not None else DEFAULT_TTL
             cache = cache_manager.get_cache(cache_name, cache_ttl_to_use)
 
+            # --- Step 4: Check cache ---
             cached_val = cache.get(key)
             if cached_val is not None:
                 return cached_val
 
+            # --- Step 5: Execute function ---
             result = func(*args, **kwargs)
 
-            # Extract dependencies if function returns (value, [deps]) convention
-            dependencies_list_from_result: List[str] = []
-            value_to_cache: Any = result
-            if (
-                isinstance(result, tuple)
-                and len(result) == 2
-                and isinstance(result[1], list)
-            ):
-                value_to_cache, dependencies_list_from_result = result
-            elif func.__name__ in [
-                "load_embedding",
-                "load_metadata",
-                "analyze_file",
-                "analyze_project",
-                "get_file_type",
-            ]:
-                # Try to infer a file path dependency from first non-self/cls argument
-                actual_first_arg_for_dep: Optional[Any] = args[0] if args else None
-                if args:
-                    # If it appears to be a method, path arg is likely the second arg
-                    if hasattr(args[0], "__class__"):
-                        actual_first_arg_for_dep = args[1] if len(args) > 1 else None
-                if isinstance(actual_first_arg_for_dep, str) and os.path.exists(
-                    actual_first_arg_for_dep
-                ):
-                    from .path_utils import normalize_path
+            # --- Step 6: Build dependency list for cascading invalidation ---
+            dependencies_list: List[str] = []
 
-                    dependencies_list_from_result.append(
-                        f"file:{normalize_path(actual_first_arg_for_dep)}"
-                    )
+            # Add explicit file dependencies (normalized) from file_deps
+            if dep_file_paths:
+                from .path_utils import normalize_path
 
-            cache.set(
-                key, value_to_cache, dependencies_list_from_result, ttl=cache_ttl_to_use
-            )
+                for fp in dep_file_paths:
+                    norm_path = normalize_path(fp)
+                    dependencies_list.append(f"file:{norm_path}")
+
+            # Add dependencies from tracked path arguments
+            if track_path_args:
+                from .path_utils import normalize_path
+
+                for idx in track_path_args:
+                    if idx < len(args):
+                        path_arg = args[idx]
+                        if isinstance(path_arg, str) and os.path.exists(path_arg):
+                            norm_dep_path = normalize_path(path_arg)
+                            dependencies_list.append(f"file:{norm_dep_path}")
+
+            # --- Step 7: Store in cache ---
+            cache.set(key, result, dependencies_list, ttl=cache_ttl_to_use)
+            # Throttled cleanup
             cache_manager.cleanup()
-            return value_to_cache
+            return result
 
         return cast(F, wrapper)
 
     return decorator
+
+
+
+def _get_normalize_path_cache_key(p: str) -> str:
+    """Key generator for normalize_path_cached."""
+    return f"normalize:{p if p else 'empty'}"
+
+
+@cached("path_normalization", key_func=_get_normalize_path_cache_key)
+def normalize_path_cached(path: str) -> str:
+    """Cached version of normalize_path."""
+    from .path_utils import normalize_path
+
+    return normalize_path(path)
+
+
+def _get_project_root_cache_key() -> str:
+    """Key generator for get_project_root_cached."""
+    return f"project_root:{normalize_path_cached(os.getcwd())}"
+
+
+@cached("project_root", key_func=_get_project_root_cache_key)
+def get_project_root_cached() -> str:
+    """Cached version of get_project_root."""
+    from .path_utils import get_project_root
+
+    return get_project_root()
+
+
+def _get_is_valid_project_path_cache_key(p: str) -> str:
+    """Key generator for is_valid_project_path_cached."""
+    return f"valid_project_path:{normalize_path_cached(p)}:{get_project_root_cached()}"
+
+
+@cached("valid_project_paths", key_func=_get_is_valid_project_path_cache_key)
+def is_valid_project_path_cached(path: str) -> bool:
+    """Cached version of is_valid_project_path."""
+    from .path_utils import is_valid_project_path
+
+    return is_valid_project_path(path)
 
 
 def check_file_modified(file_path: str) -> bool:

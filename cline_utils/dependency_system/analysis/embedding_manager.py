@@ -31,12 +31,8 @@ except ImportError:
 
 import cline_utils.dependency_system.core.key_manager as key_manager_module
 from cline_utils.dependency_system.core.key_manager import KeyInfo
-from cline_utils.dependency_system.utils.cache_manager import cache_manager, cached
+from cline_utils.dependency_system.utils.cache_manager import cache_manager, cached, get_project_root_cached as get_project_root, normalize_path_cached as normalize_path
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
-from cline_utils.dependency_system.utils.path_utils import (
-    get_project_root,
-    normalize_path,
-)
 from cline_utils.dependency_system.utils.phase_tracker import PhaseTracker
 
 logger = logging.getLogger(__name__)
@@ -1595,8 +1591,55 @@ def _get_similarity_cache_key(key1: str, key2: str, *args, **kwargs) -> str:
     return f"sim_ses:{k1}:{k2}"
 
 
+def _get_similarity_file_deps(
+    key1_str: str,
+    key2_str: str,
+    embeddings_dir: str,
+    path_to_key_info: Dict[str, KeyInfo],
+    project_root: str,
+    *args,
+    **kwargs,
+) -> List[str]:
+    """
+    Returns the .npy file paths for the two keys.
+    Used by @cached decorator to track file dependencies and mtimes.
+    """
+    file_paths: List[str] = []
+
+    # Ensure embeddings_dir is an absolute path
+    if embeddings_dir and not os.path.isabs(embeddings_dir):
+        embeddings_dir = os.path.join(project_root, embeddings_dir)
+
+    for key_str in [key1_str, key2_str]:
+        npy_path: Optional[str] = None
+
+        # Try to resolve via path_to_key_info first
+        ki = next(
+            (k for k in path_to_key_info.values() if k.key_string == key_str), None
+        )
+        if ki:
+            rel = os.path.relpath(ki.norm_path, project_root)
+            npy_path = os.path.join(embeddings_dir, rel) + ".npy"
+        else:
+            # Fallback: Try direct key-to-filename mapping (for testing/simple cases)
+            # e.g., key "1A1" -> "embeddings_dir/1A1.npy"
+            direct_npy = os.path.join(embeddings_dir, f"{key_str}.npy")
+            if os.path.exists(direct_npy):
+                npy_path = direct_npy
+
+        if npy_path and os.path.exists(npy_path):
+            file_paths.append(npy_path)
+
+    return file_paths
+
+
+
 @cached(
-    "similarity_calculation", key_func=_get_similarity_cache_key, ttl=SIM_CACHE_TTL_SEC
+    "similarity_calculation",
+    key_func=_get_similarity_cache_key,
+    ttl=SIM_CACHE_TTL_SEC,
+    file_deps=_get_similarity_file_deps,
+    check_mtime=True,
 )
 def calculate_similarity(
     key1_str: str,
@@ -1652,7 +1695,8 @@ def calculate_similarity(
 
 @cached(
     "file_validation",
-    key_func=lambda file_path: f"is_valid_file:{normalize_path(file_path)}",
+    key_func=lambda file_path: f"is_valid:{normalize_path(str(file_path))}:{os.path.getmtime(ConfigManager().config_path) if os.path.exists(ConfigManager().config_path) else 0}",
+    track_path_args=[0],
 )
 def _is_valid_file(file_path: str) -> bool:
     """Check if a file is valid for processing (not excluded, size limit)."""

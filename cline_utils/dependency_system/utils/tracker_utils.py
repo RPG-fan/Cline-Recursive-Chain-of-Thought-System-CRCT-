@@ -15,9 +15,8 @@ from cline_utils.dependency_system.core.dependency_grid import (
 )
 from cline_utils.dependency_system.core.key_manager import KeyInfo, validate_key
 
-from .cache_manager import cached
+from .cache_manager import cached, normalize_path_cached as normalize_path
 from .config_manager import ConfigManager
-from .path_utils import normalize_path
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +203,7 @@ def read_grid_from_lines(lines: List[str]) -> Tuple[List[str], List[Tuple[str, s
 @cached(
     "tracker_data_structured",
     key_func=lambda tracker_path: f"tracker_data_structured:{normalize_path(tracker_path)}:{(os.path.getmtime(tracker_path) if os.path.exists(tracker_path) else 0)}",
+    track_path_args=[0],
 )
 def read_tracker_file_structured(tracker_path: str) -> Dict[str, Any]:
     """
@@ -365,12 +365,12 @@ def get_global_map_cache_key_part(global_map: Dict[str, Any]) -> str:
 
 
 # --- MODIFIED AGGREGATION FUNCTION (Uses KEY#global_instance) ---
-# @cached(
-#     "aggregation_v2_gi",
-#     # MODIFIED key_func - show_progress doesn't affect cache, so it's accepted but not included in key
-#     key_func=lambda paths, pmi, cgptki, show_progress=True: f"agg_v2_gi:{':'.join(sorted(list(paths)))}:{hash(tuple(sorted(pmi.items())))}:{get_global_map_cache_key_part(cgptki)}",
-#     ttl=300,
-# )
+@cached(
+    "aggregation_v2_gi",
+    # MODIFIED key_func - show_progress doesn't affect cache, so it's accepted but not included in key
+    key_func=lambda paths, pmi, cgptki, show_progress=True: f"agg_v2_gi:{':'.join(sorted(list(paths)))}:{hash(tuple(sorted(pmi.items())))}:{get_global_map_cache_key_part(cgptki)}",
+    ttl=300,
+)
 def aggregate_all_dependencies(
     tracker_paths: Set[str],
     path_migration_info: PathMigrationInfo,

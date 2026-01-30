@@ -15,7 +15,6 @@ import logging
 import os
 import re
 import shutil
-import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -26,23 +25,14 @@ from cline_utils.dependency_system.core.dependency_grid import (
     compress,
     create_initial_grid,
     decompress,
-    validate_grid,
 )
 
 # --- Core Imports ---
-from cline_utils.dependency_system.core.key_manager import KeyInfo
 from cline_utils.dependency_system.core.key_manager import (
-    get_key_from_path as get_key_string_from_path_global,
-)  # string from global map for a path
-from cline_utils.dependency_system.core.key_manager import (
+    KeyInfo,
     get_sortable_parts_for_key,
     load_global_key_map,
     load_old_global_key_map,
-    sort_key_strings_hierarchically,
-)
-
-from cline_utils.dependency_system.core.key_manager import (
-    validate_key as validate_key_format,
 )
 
 # --- IO Imports (Specific tracker data for paths/filters) ---
@@ -52,16 +42,15 @@ from cline_utils.dependency_system.io.update_mini_tracker import get_mini_tracke
 from cline_utils.dependency_system.utils.cache_manager import (
     cached,
     check_file_modified,
+    get_project_root_cached as get_project_root,
     invalidate_dependent_entries,
+    normalize_path_cached as normalize_path,
 )
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 
 # --- Utility Imports ---
 from cline_utils.dependency_system.utils.path_utils import (
-    get_project_root,
     is_subpath,
-    join_paths,
-    normalize_path,
 )
 from cline_utils.dependency_system.utils.tracker_utils import (
     aggregate_all_dependencies,
@@ -190,10 +179,22 @@ def build_path_migration_map(
 
 # --- Path Finding ---
 # Caching for get_tracker_path (consider config mtime)
-@cached(
-    "tracker_paths",
-    key_func=lambda project_root, tracker_type="main", module_path=None: f"tracker_path:{normalize_path(project_root)}:{tracker_type}:{normalize_path(module_path) if module_path else 'none'}:{(os.path.getmtime(ConfigManager().config_path) if ConfigManager().config_path and os.path.exists(ConfigManager().config_path) else 0)}",
-)
+def _get_tracker_paths_cache_key(
+    project_root: str, tracker_type: str = "main", module_path: Optional[str] = None
+) -> str:
+    """Key generator for get_tracker_path."""
+    config_path = ConfigManager().config_path
+    mtime = 0.0
+    if config_path and os.path.exists(config_path):
+        mtime = os.path.getmtime(config_path)
+    return (
+        f"tracker_path:{normalize_path(project_root)}:"
+        f"{tracker_type}:{normalize_path(module_path) if module_path else 'none'}:"
+        f"{mtime}"
+    )
+
+
+@cached("tracker_paths", key_func=_get_tracker_paths_cache_key)
 def get_tracker_path(
     project_root: str, tracker_type: str = "main", module_path: Optional[str] = None
 ) -> str:
@@ -2481,84 +2482,64 @@ def update_tracker(
         )
 
         # Helper to get relationship char from a specified home tracker file
-        # This helper needs to be robust.
-        # @cached(
-        #     "home_tracker_rel_char",
-        #     key_func=lambda p1, p2, htf: f"htrc:{p1}:{p2}:{htf}:{(os.path.getmtime(htf) if os.path.exists(htf) else 0)}",
-        # )
+        # Optimized to use structured data caching and avoid redundant stat/parsing.
+        local_home_tracker_cache: Dict[str, Dict[str, Any]] = {}
+
         def get_char_from_home_tracker_cached(
             path1_norm: str, path2_norm: str, home_tracker_file_norm: str
         ) -> Optional[str]:
-            if not os.path.exists(home_tracker_file_norm):
-                logger.debug(
-                    f"    Home tracker {home_tracker_file_norm} not found for char lookup."
-                )
+            if home_tracker_file_norm not in local_home_tracker_cache:
+                # read_tracker_file_structured is globally @cached with mtime check
+                structured = read_tracker_file_structured(home_tracker_file_norm)
+                if not structured["definitions_ordered"]:
+                    local_home_tracker_cache[home_tracker_file_norm] = {"valid": False}
+                    return None
+
+                # Build path -> index map once per tracker file
+                path_to_idx = {
+                    p_str: i
+                    for i, (_k_str, p_str) in enumerate(structured["definitions_ordered"])
+                }
+                local_home_tracker_cache[home_tracker_file_norm] = {
+                    "valid": True,
+                    "path_to_idx": path_to_idx,
+                    "grid_rows": structured["grid_rows_ordered"],
+                    "decompressed_rows_cache": {},  # Lazy cache for decompressed rows
+                    "def_count": len(structured["definitions_ordered"]),
+                }
+
+            cache_entry = local_home_tracker_cache[home_tracker_file_norm]
+            if not cache_entry["valid"]:
                 return None
-            try:
-                with open(home_tracker_file_norm, "r", encoding="utf-8") as hf:
-                    home_lines = hf.readlines()
-                home_defs_pairs = read_key_definitions_from_lines(
-                    home_lines
-                )  # List[(key_str, path_str)]
-                _home_col_hdrs, home_grid_rows_data = read_grid_from_lines(
-                    home_lines
-                )  # List[(row_label_str, comp_data_str)]
 
-                # Build path -> index map for the home tracker's definitions
-                home_path_to_def_idx_map: Dict[str, int] = {}
-                for i, (_k_str, p_str) in enumerate(home_defs_pairs):
-                    if (
-                        p_str not in home_path_to_def_idx_map
-                    ):  # Take first occurrence if path duplicated in defs (should not happen)
-                        home_path_to_def_idx_map[p_str] = i
+            path_to_idx = cache_entry["path_to_idx"]
+            idx1 = path_to_idx.get(path1_norm)
+            idx2 = path_to_idx.get(path2_norm)
 
-                idx1_in_home_defs = home_path_to_def_idx_map.get(path1_norm)
-                idx2_in_home_defs = home_path_to_def_idx_map.get(path2_norm)
-
-                if idx1_in_home_defs is not None and idx2_in_home_defs is not None:
-                    # Ensure the row we are looking for (idx1_in_home_defs) exists in the grid data read
-                    # The grid rows are ordered as per definitions.
-                    if idx1_in_home_defs < len(home_grid_rows_data):
-                        # The label of the grid row should match the key_string from definitions if consistent
-                        # home_grid_rows_data[idx1_in_home_defs] is (row_label_str, compressed_data_str)
-                        _row_label, compressed_row = home_grid_rows_data[
-                            idx1_in_home_defs
-                        ]
-                        # Optional: Check if _row_label matches home_defs_pairs[idx1_in_home_defs][0]
-
+            if idx1 is not None and idx2 is not None:
+                grid_rows = cache_entry["grid_rows"]
+                if idx1 < len(grid_rows):
+                    # Check lazy decompression cache
+                    decomp_rows_cache = cache_entry["decompressed_rows_cache"]
+                    if idx1 not in decomp_rows_cache:
+                        _row_label, compressed_row = grid_rows[idx1]
                         decomp_row_chars = decompress(compressed_row)
 
-                        # The decompressed row length must match the number of items in home_defs_pairs
-                        if len(decomp_row_chars) != len(home_defs_pairs):
+                        if len(decomp_row_chars) != cache_entry["def_count"]:
                             logger.warning(
-                                f"    Home tracker {os.path.basename(home_tracker_file_norm)}: Row for path '{path1_norm}' (def idx {idx1_in_home_defs}) has length {len(decomp_row_chars)}, expected {len(home_defs_pairs)}. Cannot get char."
+                                f"    Home tracker {os.path.basename(home_tracker_file_norm)}: Row for path '{path1_norm}' (idx {idx1}) has length {len(decomp_row_chars)}, expected {cache_entry['def_count']}. Cannot get char."
                             )
-                            return None
-
-                        if idx2_in_home_defs < len(decomp_row_chars):
-                            found_char = decomp_row_chars[idx2_in_home_defs]
-                            logger.debug(
-                                f"    Home tracker {os.path.basename(home_tracker_file_norm)}: Found '{found_char}' for {path1_norm} -> {path2_norm}"
-                            )
-                            return found_char
+                            decomp_rows_cache[idx1] = None
                         else:
-                            logger.debug(
-                                f"    Home tracker {os.path.basename(home_tracker_file_norm)}: Target path index {idx2_in_home_defs} out of bounds for decompressed row of '{path1_norm}'."
-                            )
-                    else:
-                        logger.debug(
-                            f"    Home tracker {os.path.basename(home_tracker_file_norm)}: Source path index {idx1_in_home_defs} out of bounds for grid data rows."
-                        )
-                else:
-                    logger.debug(
-                        f"    Home tracker {os.path.basename(home_tracker_file_norm)}: Path(s) not in definitions: p1({path1_norm})-{idx1_in_home_defs is not None}, p2({path2_norm})-{idx2_in_home_defs is not None}."
-                    )
+                            decomp_rows_cache[idx1] = decomp_row_chars
 
-            except Exception as e_home_read:
-                logger.warning(
-                    f"    Error reading/parsing home tracker {home_tracker_file_norm} for import: {e_home_read}",
-                    exc_info=False,
-                )  # Reduce noise
+                    decomp_row = decomp_rows_cache[idx1]
+                    if decomp_row and idx2 < len(decomp_row):
+                        found_char = decomp_row[idx2]
+                        logger.debug(
+                            f"    Home tracker {os.path.basename(home_tracker_file_norm)}: Found '{found_char}' for {path1_norm} -> {path2_norm}"
+                        )
+                        return found_char
             return None
 
         abs_doc_roots_set = {

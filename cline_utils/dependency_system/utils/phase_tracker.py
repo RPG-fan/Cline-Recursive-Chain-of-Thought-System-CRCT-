@@ -10,6 +10,7 @@ class PhaseTracker:
     """
 
     def __init__(self, total: int, phase_name: str = "Processing", unit: str = "items"):
+        super().__init__()
         self.total = total
         self.phase_name = phase_name
         self.unit = unit

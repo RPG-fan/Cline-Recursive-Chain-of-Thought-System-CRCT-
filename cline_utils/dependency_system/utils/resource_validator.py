@@ -135,6 +135,7 @@ class ResourceValidator:
         Args:
             strict_mode: If True, fail on warnings. If False, only fail on critical issues.
         """
+        super().__init__()
         self.strict_mode = strict_mode
         self.validation_results = {}
 

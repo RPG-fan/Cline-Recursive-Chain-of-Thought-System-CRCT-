@@ -46,6 +46,8 @@ from cline_utils.dependency_system.utils.cache_manager import (
     cache_manager,
     cached,
     invalidate_dependent_entries,
+    normalize_path_cached as normalize_path,
+    get_project_root_cached as get_project_root,
 )
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 
@@ -53,11 +55,7 @@ from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.path_utils import (
     get_file_type as util_get_file_type,
 )
-from cline_utils.dependency_system.utils.path_utils import (
-    get_project_root,
-    is_subpath,
-    normalize_path,
-)
+from cline_utils.dependency_system.utils.path_utils import is_subpath
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +311,7 @@ def _get_ts_node_text(node: Any, content_bytes: bytes) -> str:
 @cached(
     "file_analysis",
     key_func=lambda file_path, force=False: f"analyze_file:{normalize_path(str(file_path))}:{(os.path.getmtime(str(file_path)) if os.path.exists(str(file_path)) else 0)}:{force}",
+    track_path_args=[0],
 )
 def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
     """
