@@ -789,8 +789,31 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
 
         # Pass 2: ast.walk for detailed analysis
         for node in ast.walk(tree):
+            # ENHANCEMENT: Capture function-level imports into imports_map
+            # This enables resolution of calls like create_agent imported inside a function
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    # Only add if not already present (top-level imports take precedence)
+                    if (alias.asname or alias.name) not in imports_map:
+                        imports_map[alias.asname or alias.name] = alias.name
+            elif isinstance(node, ast.ImportFrom):
+                module_name = node.module or ""
+                relative_prefix = "." * node.level
+                full_import_source = f"{relative_prefix}{module_name}"
+                for alias in node.names:
+                    full_path = (
+                        f"{full_import_source}.{alias.name}"
+                        if full_import_source
+                        else alias.name
+                    )
+                    # Only add if not already present
+                    if (alias.asname or alias.name) not in imports_map:
+                        imports_map[alias.asname or alias.name] = full_path
+
             # Decorators (for all functions/classes, top-level or nested)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            elif isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
                 parent = getattr(node, "_parent", None)
                 target_type = "unknown"
                 is_top_level = parent is tree
@@ -1070,6 +1093,15 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
             elif isinstance(node, ast.Call):
                 target_full_name = _get_full_name_str(node.func)
                 potential_source = _get_source_object_str(node.func)
+
+                # ENHANCEMENT: If potential_source is None (direct call like ConfigManager()),
+                # try to resolve from imports_map to capture cross-file relationships
+                if potential_source is None and target_full_name:
+                    # For direct calls, the base name is the function/class being called
+                    base_name = target_full_name.split("(")[0].split(".")[0]
+                    if base_name in imports_map:
+                        potential_source = imports_map[base_name]
+
                 if target_full_name and _is_useful_call(
                     target_full_name, potential_source, imports_map
                 ):

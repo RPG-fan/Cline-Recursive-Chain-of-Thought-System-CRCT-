@@ -1593,9 +1593,9 @@ def suggest_semantic_dependencies_path_based(
                 else:  # code-code
                     threshold_s = config.get_threshold("code_similarity")  # 0.7
 
-                    # Only include candidates that would get 'S' or 's' assignments (not 'p' or 'n')
-                    # if confidence >= threshold_s:
-                    filtered_candidates.append((target_ki, confidence))
+                # Only include candidates that would get 'S' or 's' assignments (not 'p' or 'n')
+                # if confidence >= threshold_s:
+                filtered_candidates.append((target_ki, confidence))
 
             candidates_with_similarity = filtered_candidates
             logger.debug(

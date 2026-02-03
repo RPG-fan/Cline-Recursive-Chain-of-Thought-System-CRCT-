@@ -394,12 +394,16 @@ def get_performance_comparison(
     return comparison
 
 
-def get_historical_pairs(project_root: str) -> set[Tuple[str, str]]:
+def get_historical_pairs(
+    project_root: str, max_age_cycles: int = 5
+) -> set[Tuple[str, str]]:
     """
     Retrieve all source-target pairs from history files.
 
     Args:
         project_root: Project root directory
+        max_age_cycles: Only include pairs from the last N cycles (default 5).
+                        This prevents pairs from being excluded indefinitely.
 
     Returns:
         Set of (source, target) tuples
@@ -410,25 +414,47 @@ def get_historical_pairs(project_root: str) -> set[Tuple[str, str]]:
     if not os.path.exists(history_dir):
         return historical_pairs
 
+    # Find all cycle files and determine the current max cycle
+    cycle_files = []
     for filename in os.listdir(history_dir):
         if filename.startswith("cycle_") and filename.endswith(".json"):
-            filepath = os.path.join(history_dir, filename)
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+            match = re.match(r"cycle_(\d+)\.json", filename)
+            if match:
+                cycle_num = int(match.group(1))
+                cycle_files.append((cycle_num, os.path.join(history_dir, filename)))
 
-                    # Try to get from 'all_pairs' first (new format)
-                    if "all_pairs" in data:
-                        for pair in data["all_pairs"]:
-                            historical_pairs.add((pair["source"], pair["target"]))
-                    else:
-                        # Fallback to top/bottom lists (legacy format)
-                        for item in data.get("top_10_confident", []):
-                            historical_pairs.add((item["source"], item["target"]))
-                        for item in data.get("bottom_10_confident", []):
-                            historical_pairs.add((item["source"], item["target"]))
+    if not cycle_files:
+        return historical_pairs
 
-            except Exception as e:
-                logger.warning(f"Failed to load history from {filepath}: {e}")
+    # Sort by cycle number descending and keep only recent cycles
+    cycle_files.sort(reverse=True)
+    max_cycle = cycle_files[0][0]
+    min_cycle = max_cycle - max_age_cycles + 1  # e.g., if max=145 and age=5, min=141
 
+    for cycle_num, filepath in cycle_files:
+        # Skip cycles older than max_age_cycles
+        if cycle_num < min_cycle:
+            continue
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+                # Try to get from 'all_pairs' first (new format)
+                if "all_pairs" in data:
+                    for pair in data["all_pairs"]:
+                        historical_pairs.add((pair["source"], pair["target"]))
+                else:
+                    # Fallback to top/bottom lists (legacy format)
+                    for item in data.get("top_10_confident", []):
+                        historical_pairs.add((item["source"], item["target"]))
+                    for item in data.get("bottom_10_confident", []):
+                        historical_pairs.add((item["source"], item["target"]))
+
+        except Exception as e:
+            logger.warning(f"Failed to load history from {filepath}: {e}")
+
+    logger.debug(
+        f"Loaded {len(historical_pairs)} historical pairs from cycles {min_cycle}-{max_cycle}"
+    )
     return historical_pairs
