@@ -115,20 +115,73 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
             ```bash
             python -m cline_utils.dependency_system.dependency_processor show-placeholders --tracker <path_to_doc_tracker.md> --key <key_string>
             ```
-            *   **Plan Reading**: Identify the source file (for `key_string`) and relevant target files (for column keys needing verification). To improve efficiency, plan to read the source file and *multiple* relevant target files together in the next step. Suggest batch reading if files are co-located (e.g., "Suggest reading source file X and target files Y, Z from the same directory. Can you provide folder contents or should I read individually using `read_file`?"). Be mindful of context limits.
-            *   **Examine Files**: Use `read_file` to examine the content of the source file and the relevant target files/folders identified.
-            *   **Determine Relationship (CRITICAL STEP)**: Based on file contents, determine the **true functional or essential conceptual relationship** between the source (`key_string`) and each target key being verified.
-                *   **Go Beyond Similarity**: Suggestions ('s', 'S') might only indicate related topics, not a *necessary* dependency for operation or understanding.
-            *   **Focus on Functional Reliance**: Ask:
-                *   Does the code in the *row file* directly **import, call, or inherit from** code in the *column file*? (Leads to '<' or 'x').
-                *   Does the code in the *column file* directly **import, call, or inherit from** code in the *row file*? (Leads to '>' or 'x').
-                *   Does the documentation in the *row file* **require information or definitions** present *only* in the *column file* to be complete or accurate? (Leads to '<' or 'd').
-                *   Is the *row file* **essential documentation** for understanding or implementing the concepts/code in the *column file*? (Leads to 'd' or potentially '>').
-                *   Is there a **deep, direct conceptual link** where understanding or modifying one file *necessitates* understanding the other, even without direct code imports? (Consider '<', '>', 'x', or 'd' based on the nature of the link).
-            *   **Purpose of Dependencies**: Remember, these verified dependencies guide the **Strategy phase** (determining task order) and the **Execution phase** (loading minimal necessary context). A dependency should mean "You *need* to consider/load the related file to work effectively on this one."
-            *   **Assign 'n' if No True Dependency**: If the relationship is merely thematic, uses similar terms, or is indirect, assign 'n' (verified no dependency). *It is better to mark 'n' than to create a weak dependency.*
-            *   **State Reasoning (MANDATORY)**: Before using `add-dependency`, **clearly state your reasoning** for the chosen dependency character (`<`, `>`, `x`, `d`, or `n`) for *each specific relationship* you intend to set, based on your direct file analysis and the functional reliance criteria.
-        *   **Correct/Confirm Dependencies**: Use `add-dependency`, specifying `--tracker <path_to_doc_tracker.md>`. The `--source-key` is always the `key_string` you are iterating on. The `--target-key` is the column key whose relationship you determined. Set the `--dep-type` based on your reasoned analysis. Batch multiple targets *for the same source key* if they share the *same new dependency type*.
+            *   **Determine Verification Approach**: Assess the number of target files to verify for this key.
+                *   **Small number (≤10 files)**: Proceed with direct verification using `read_file` to examine source and target files, then determine relationships.
+                *   **Large number (>10 files)**: Use the **new_task tool** to delegate verification work. Group target files into manageable chunks of 5-10 files per task.
+            *   **Direct Verification (Small Number)**:
+                *   **Examine Files**: Use `read_file` to examine the content of the source file and the relevant target files/folders identified.
+                *   **Determine Relationship (CRITICAL STEP)**: Based on file contents, determine the **true functional or essential conceptual relationship** between the source (`key_string`) and each target key being verified.
+                    *   **Go Beyond Similarity**: Suggestions ('s', 'S') might only indicate related topics, not a *necessary* dependency for operation or understanding.
+                *   **Focus on Functional Reliance**: Ask:
+                    *   Does the code in the *row file* directly **import, call, or inherit from** code in the *column file*? (Leads to '<' or 'x').
+                    *   Does the code in the *column file* directly **import, call, or inherit from** code in the *row file*? (Leads to '>' or 'x').
+                    *   Does the documentation in the *row file* **require information or definitions** present *only* in the *column file* to be complete or accurate? (Leads to '<' or 'd').
+                    *   Is the *row file* **essential documentation** for understanding or implementing the concepts/code in the *column file*? (Leads to 'd' or potentially '>').
+                    *   Is there a **deep, direct conceptual link** where understanding or modifying one file *necessitates* understanding the other, even without direct code imports? (Consider '<', '>', 'x', or 'd' based on the nature of the link).
+                *   **Purpose of Dependencies**: Remember, these verified dependencies guide the **Strategy phase** (determining task order) and the **Execution phase** (loading minimal necessary context). A dependency should mean "You *need* to consider/load the related file to work effectively on this one."
+                *   **Assign 'n' if No True Dependency**: If the relationship is merely thematic, uses similar terms, or is indirect, assign 'n' (verified no dependency). *It is better to mark 'n' than to create a weak dependency.*
+                *   **State Reasoning (MANDATORY)**: Before using `add-dependency`, **clearly state your reasoning** for the chosen dependency character (`<`, `>`, `x`, `d`, or `n`) for *each specific relationship* you intend to set, based on your direct file analysis and the functional reliance criteria.
+            *   **Delegated Verification (Large Number - Using new_task)**:
+                *   **Group Target Files**: Divide the target files into chunks of 5-10 files each. Group by dependency type ('p', 's', 'S') or by logical similarity to improve efficiency.
+                *   **Create Verification Task**: For each chunk, use the `new_task` tool with the following structure:
+                    ```
+                    Dependency Verification Task for Key {key_string}
+
+                    Source File
+                    Key: {key_string}
+                    Path: {source_file_path}
+
+                    Task Objective
+                    Determine the dependency relationship between the source file and each target file listed below using the criteria from cline_docs/prompts/setup_maintenance_plugin.md.
+
+                    Dependency Criteria (from setup_maintenance_plugin.md)
+                    < (Row Requires Column): Row functionally relies on or requires Column for context/operation
+                    > (Column Requires Row): Column functionally relies on or requires Row for context/operation
+                    x (Mutual Requirement): Mutual functional reliance or deep conceptual link requiring co-consideration
+                    d (Documentation Link): Row is documentation essential for understanding/using Column, or vice-versa
+                    n (Verified No Dependency): Confirmed no functional requirement or essential conceptual link exists
+
+                    Target Files to Verify (Group {group_number})
+                    [List target keys and paths for this chunk]
+
+                    Instructions
+                    1. Read the source file: {source_file_path}
+                    2. For each target file above:
+                       a. Read the target file
+                       b. Analyze the functional relationship between source and target
+                       c. Determine the appropriate dependency character (<, >, x, d, or n)
+                       d. State your reasoning for the chosen dependency type
+                    3. Provide a summary of your findings in the format:
+                       Key {key_string} Dependency Verification Results:
+
+                       [Target Key] [Target Path] -> [Dependency Character]
+                       Reasoning: [Your reasoning]
+
+                       [Repeat for each target file]
+
+                    Important Notes
+                    - Focus on functional reliance and necessary knowledge, not just semantic similarity
+                    - A file mentioning another file's topic does not automatically create a dependency
+                    - Consider whether the source file would break or be incomplete without the target file
+                    - The source file is about "{brief_description}" - likely related to {relevant_context}
+
+                    Expected Output
+                    A clear summary of dependency determinations for all target files in this group with reasoning for each.
+                    ```
+                *   **Wait for Task Completion**: Allow the delegated task to complete and return results.
+                *   **Review Results**: Examine the returned dependency determinations and reasoning.
+                *   **Apply Dependencies**: Use `add-dependency` to apply the verified relationships from the task results.
+            *   **Correct/Confirm Dependencies**: Use `add-dependency`, specifying `--tracker <path_to_doc_tracker.md>`. The `--source-key` is always the `key_string` you are iterating on. The `--target-key` is the column key whose relationship you determined. Set the `--dep-type` based on your reasoned analysis. Batch multiple targets *for the same source key* if they share the *same new dependency type*.
               ```bash
               # Example: Set '>' from 1A2 (source) to 2B1#3 (target) in doc_tracker.md
               # Reasoning: docs/setup.md (1A2) details steps required BEFORE using API described in docs/api/users.md (2B1). Thus, 2B1 depends on 1A2.
@@ -154,10 +207,76 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
         *   Select the next mini-tracker path from the list. State which one you are processing.
         *   **Repeat Verification Steps**: Follow the same sub-procedure as in Stage 1 (Steps 2.A and 2.B), but substitute the current mini-tracker path for `<path_to_doc_tracker.md>` in all commands (`show-keys`, `add-dependency`).
             *   **Identify Keys**: Use `show-keys --tracker <mini_tracker_path>`. List keys needing checks.
-            *   **Verify Keys**: Iterate through keys needing checks. Use `show-placeholders` to get a targeted list of unverified dependencies *within this mini-tracker*. Examine source/target files (`read_file`). State reasoning based on functional/conceptual reliance. Use `add-dependency --tracker <mini_tracker_path> --source-key <key_string> --target-key <target_key> --dep-type <char>`.
+            *   **Verify Keys**: Iterate through keys needing checks. Use `show-placeholders` to get a targeted list of unverified dependencies *within this mini-tracker*.
             ```bash
             python -m cline_utils.dependency_system.dependency_processor show-placeholders --tracker <mini_tracker_path> --key <key_string>
             ```
+            *   **Determine Verification Approach**: Assess the number of target files to verify for this key.
+                *   **Small number (≤10 files)**: Proceed with direct verification using `read_file` to examine source and target files, then determine relationships.
+                *   **Large number (>10 files)**: Use the **new_task tool** to delegate verification work. Group target files into manageable chunks of 5-10 files per task.
+            *   **Direct Verification (Small Number)**:
+                *   **Examine Files**: Use `read_file` to examine the content of the source file and the relevant target files/folders identified.
+                *   **Determine Relationship (CRITICAL STEP)**: Based on file contents, determine the **true functional or essential conceptual relationship** between the source (`key_string`) and each target key being verified.
+                    *   **Go Beyond Similarity**: Suggestions ('s', 'S') might only indicate related topics, not a *necessary* dependency for operation or understanding.
+                *   **Focus on Functional Reliance**: Ask:
+                    *   Does the code in the *row file* directly **import, call, or inherit from** code in the *column file*? (Leads to '<' or 'x').
+                    *   Does the code in the *column file* directly **import, call, or inherit from** code in the *row file*? (Leads to '>' or 'x').
+                    *   Does the documentation in the *row file* **require information or definitions** present *only* in the *column file* to be complete or accurate? (Leads to '<' or 'd').
+                    *   Is the *row file* **essential documentation** for understanding or implementing the concepts/code in the *column file*? (Leads to 'd' or potentially '>').
+                    *   Is there a **deep, direct conceptual link** where understanding or modifying one file *necessitates* understanding the other, even without direct code imports? (Consider '<', '>', 'x', or 'd' based on the nature of the link).
+                *   **Purpose of Dependencies**: Remember, these verified dependencies guide the **Strategy phase** (determining task order) and the **Execution phase** (loading minimal necessary context). A dependency should mean "You *need* to consider/load the related file to work effectively on this one."
+                *   **Assign 'n' if No True Dependency**: If the relationship is merely thematic, uses similar terms, or is indirect, assign 'n' (verified no dependency). *It is better to mark 'n' than to create a weak dependency.*
+                *   **State Reasoning (MANDATORY)**: Before using `add-dependency`, **clearly state your reasoning** for the chosen dependency character (`<`, `>`, `x`, `d`, or `n`) for *each specific relationship* you intend to set, based on your direct file analysis and the functional reliance criteria.
+            *   **Delegated Verification (Large Number - Using new_task)**:
+                *   **Group Target Files**: Divide the target files into chunks of 5-10 files each. Group by dependency type ('p', 's', 'S') or by logical similarity to improve efficiency.
+                *   **Create Verification Task**: For each chunk, use the `new_task` tool with the following structure:
+                    ```
+                    Dependency Verification Task for Key {key_string}
+
+                    Source File
+                    Key: {key_string}
+                    Path: {source_file_path}
+
+                    Task Objective
+                    Determine the dependency relationship between the source file and each target file listed below using the criteria from cline_docs/prompts/setup_maintenance_plugin.md.
+
+                    Dependency Criteria (from setup_maintenance_plugin.md)
+                    < (Row Requires Column): Row functionally relies on or requires Column for context/operation
+                    > (Column Requires Row): Column functionally relies on or requires Row for context/operation
+                    x (Mutual Requirement): Mutual functional reliance or deep conceptual link requiring co-consideration
+                    d (Documentation Link): Row is documentation essential for understanding/using Column, or vice-versa
+                    n (Verified No Dependency): Confirmed no functional requirement or essential conceptual link exists
+
+                    Target Files to Verify (Group {group_number})
+                    [List target keys and paths for this chunk]
+
+                    Instructions
+                    1. Read the source file: {source_file_path}
+                    2. For each target file above:
+                       a. Read the target file
+                       b. Analyze the functional relationship between source and target
+                       c. Determine the appropriate dependency character (<, >, x, d, or n)
+                       d. State your reasoning for the chosen dependency type
+                    3. Provide a summary of your findings in the format:
+                       Key {key_string} Dependency Verification Results:
+
+                       [Target Key] [Target Path] -> [Dependency Character]
+                       Reasoning: [Your reasoning]
+
+                       [Repeat for each target file]
+
+                    Important Notes
+                    - Focus on functional reliance and necessary knowledge, not just semantic similarity
+                    - A file mentioning another file's topic does not automatically create a dependency
+                    - Consider whether the source file would break or be incomplete without the target file
+                    - The source file is about "{brief_description}" - likely related to {relevant_context}
+
+                    Expected Output
+                    A clear summary of dependency determinations for all target files in this group with reasoning for each.
+                    ```
+                *   **Wait for Task Completion**: Allow the delegated task to complete and return results.
+                *   **Review Results**: Examine the returned dependency determinations and reasoning.
+                *   **Apply Dependencies**: Use `add-dependency` to apply the verified relationships from the task results.
             *   **Foreign Keys**: Remember, when using `add-dependency` on a mini-tracker, the `--target-key` can be an external (foreign) key if it exists globally (Core Prompt Section VIII). Use this to link internal code to external docs or code in other modules if identified during analysis. State reasoning clearly.
               ```bash
               # Example: Set 'd' from internal code file 1Ba2 to external doc 1Aa6 in agents_module.md
@@ -177,7 +296,69 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
             ```bash
             python -m cline_utils.dependency_system.dependency_processor show-placeholders --tracker <path_to_module_relationship_tracker.md> --key <key_string>
             ```
-            *   **Determine Relationship & State Reasoning**: Base decision on aggregated dependencies from mini-trackers and high-level design intent.
+            *   **Determine Verification Approach**: Assess the number of target modules to verify for this key.
+                *   **Small number (≤10 modules)**: Proceed with direct verification using mini-tracker context and reading key module files/docs as needed, then determine relationships.
+                *   **Large number (>10 modules)**: Use the **new_task tool** to delegate verification work. Group target modules into manageable chunks of 5-10 modules per task.
+            *   **Direct Verification (Small Number)**:
+                *   **Examine Context**: Review the verified dependencies from mini-trackers (Stage 2) and the overall system architecture (`system_manifest.md`). Read key module files/docs (`read_file`) only if mini-tracker context is insufficient.
+                *   **Determine Relationship & State Reasoning**: Base decision on aggregated dependencies from mini-trackers and high-level design intent.
+                *   **Focus on Module-Level Reliance**: Ask:
+                    *   Does *any file within* module A directly **import, call, or inherit from** code in *any file within* module B? (Leads to '<' or 'x').
+                    *   Does *any file within* module B directly **import, call, or inherit from** code in *any file within* module A? (Leads to '>' or 'x').
+                    *   Is there a **deep, direct conceptual link** at the module level where understanding or modifying one module *necessitates* understanding the other? (Consider '<', '>', 'x', or 'd' based on the nature of the link).
+                *   **State Reasoning (MANDATORY)**: Before using `add-dependency`, **clearly state your reasoning** for the chosen dependency character (`<`, `>`, `x`, `d`, or `n`) for *each specific relationship* you intend to set, based on your analysis of module-level dependencies.
+            *   **Delegated Verification (Large Number - Using new_task)**:
+                *   **Group Target Modules**: Divide the target modules into chunks of 5-10 modules each. Group by dependency type ('p', 's', 'S') or by logical similarity to improve efficiency.
+                *   **Create Verification Task**: For each chunk, use the `new_task` tool with the following structure:
+                    ```
+                    Dependency Verification Task for Key {key_string}
+
+                    Source Module
+                    Key: {key_string}
+                    Path: {source_module_path}
+
+                    Task Objective
+                    Determine the dependency relationship between the source module and each target module listed below using the criteria from cline_docs/prompts/setup_maintenance_plugin.md.
+
+                    Dependency Criteria (from setup_maintenance_plugin.md)
+                    < (Row Requires Column): Row functionally relies on or requires Column for context/operation
+                    > (Column Requires Row): Column functionally relies on or requires Row for context/operation
+                    x (Mutual Requirement): Mutual functional reliance or deep conceptual link requiring co-consideration
+                    d (Documentation Link): Row is documentation essential for understanding/using Column, or vice-versa
+                    n (Verified No Dependency): Confirmed no functional requirement or essential conceptual link exists
+
+                    Target Modules to Verify (Group {group_number})
+                    [List target module keys and paths for this chunk]
+
+                    Instructions
+                    1. Review the source module: {source_module_path}
+                    2. For each target module above:
+                       a. Review the target module
+                       b. Analyze the functional relationship between source and target at the module level
+                       c. Consider the verified dependencies from mini-trackers (Stage 2) and the overall system architecture
+                       d. Determine the appropriate dependency character (<, >, x, d, or n)
+                       e. State your reasoning for the chosen dependency type
+                    3. Provide a summary of your findings in the format:
+                       Key {key_string} Dependency Verification Results:
+
+                       [Target Key] [Target Path] -> [Dependency Character]
+                       Reasoning: [Your reasoning]
+
+                       [Repeat for each target module]
+
+                    Important Notes
+                    - Focus on module-level functional reliance, not just individual file relationships
+                    - A module-level dependency often arises because *some file within* module A depends on *some file within* module B
+                    - Rely heavily on the verified dependencies established within mini-trackers during Stage 2
+                    - Consider the overall system architecture (system_manifest.md)
+                    - The source module is about "{brief_description}" - likely related to {relevant_context}
+
+                    Expected Output
+                    A clear summary of dependency determinations for all target modules in this group with reasoning for each.
+                    ```
+                *   **Wait for Task Completion**: Allow the delegated task to complete and return results.
+                *   **Review Results**: Examine the returned dependency determinations and reasoning.
+                *   **Apply Dependencies**: Use `add-dependency` to apply the verified relationships from the task results.
             *   **Correct/Confirm**: Use `add-dependency --tracker <path_to_module_relationship_tracker.md>` with appropriate arguments.
         *   **Final Check**: Run `show-keys --tracker <path_to_module_relationship_tracker.md>` again to confirm no checks needed remain.
     *   **MUP**: Perform MUP after verifying `module_relationship_tracker.md`. Update `last_action`. State: "Completed verification for module_relationship_tracker.md. Proceeding to Code-Documentation Cross-Reference."
@@ -200,19 +381,83 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
             *   Look for comments in the code referencing specific documentation.
             *   Ask questions like, "Does this documentation provide valuable or useful information for understanding how the code is intended to operate?", and "Does the code need to be aware of this information to perform its intended function?".
             *    Conceptual links and future planned directions should be considered as well. The more information available to inform how the code operates in relation to the systems, the higher quality the end result will be.
-        *   **Examine Relevant Docs**: Use `read_file` to examine the content of the potentially relevant documentation files.
-        *   **Determine Essential Documentation**: For each potential `doc_key_string`, decide if it provides *essential* context, definitions, specifications, or explanations required to understand, implement, or correctly use the code represented by `code_key_string`. This is more than just keyword similarity.
-        *   **Add Dependencies (Bi-directionally)**: If `doc_key_string` is essential for `code_key_string`:
-            *   **State Reasoning (Mandatory)**: Explain *why* the documentation is essential for the code.
-            *   **Add Code -> Doc Link**: Use `add-dependency` targeting the tracker most relevant to the *code file*.
-                ```bash
-                # Reasoning: [Explain why doc_key_string is essential for code_key_string]
-                python -m cline_utils.dependency_system.dependency_processor add-dependency --tracker <code_file_tracker_path> --source-key <code_key_string> --target-key <doc_key_string> --dep-type "<dep_char>"
+        *   **Determine Verification Approach**: Assess the number of potential documentation files to verify for this code key.
+            *   **Small number (≤10 docs)**: Proceed with direct verification using `read_file` to examine code and docs, then determine relationships.
+            *   **Large number (>10 docs)**: Use the **new_task tool** to delegate verification work. Group documentation files into manageable chunks of 5-10 files per task.
+        *   **Direct Verification (Small Number)**:
+            *   **Examine Relevant Docs**: Use `read_file` to examine the content of the potentially relevant documentation files.
+            *   **Determine Essential Documentation**: For each potential `doc_key_string`, decide if it provides *essential* context, definitions, specifications, or explanations required to understand, implement, or correctly use the code represented by `code_key_string`. This is more than just keyword similarity.
+            *   **Add Dependencies (Bi-directionally)**: If `doc_key_string` is essential for `code_key_string`:
+                *   **State Reasoning (Mandatory)**: Explain *why* the documentation is essential for the code.
+                *   **Add Code -> Doc Link**: Use `add-dependency` targeting the tracker most relevant to the *code file*.
+                    ```bash
+                    # Reasoning: [Explain why doc_key_string is essential for code_key_string]
+                    python -m cline_utils.dependency_system.dependency_processor add-dependency --tracker <code_file_tracker_path> --source-key <code_key_string> --target-key <doc_key_string> --dep-type "<dep_char>"
+                    ```
+                *   **Add Doc -> Code Link**: Use `add-dependency` targeting `doc_tracker.md`.
+                    ```bash
+                    # Reasoning: [Same reasoning as above, from doc's perspective]
+                    python -m cline_utils.dependency_system.dependency_processor add-dependency --tracker <path_to_doc_tracker.md> --source-key <doc_key_string> --target-key <code_key_string> --dep-type "<dep_char>"
+                    ```
+        *   **Delegated Verification (Large Number - Using new_task)**:
+            *   **Group Documentation Files**: Divide the potential documentation files into chunks of 5-10 files each. Group by logical similarity (e.g., same module, related functionality) to improve efficiency.
+            *   **Create Verification Task**: For each chunk, use the `new_task` tool with the following structure:
                 ```
-            *   **Add Doc -> Code Link**: Use `add-dependency` targeting `doc_tracker.md`.
+                Code-Documentation Cross-Reference Task for Code Key {code_key_string}
+
+                Source Code File
+                Key: {code_key_string}
+                Path: {code_file_path}
+
+                Task Objective
+                Determine which documentation files are essential for understanding or implementing the source code file, using the criteria from cline_docs/prompts/setup_maintenance_plugin.md.
+
+                Dependency Criteria (from setup_maintenance_plugin.md)
+                < (Row Requires Column): Row functionally relies on or requires Column for context/operation
+                > (Column Requires Row): Column functionally relies on or requires Row for context/operation
+                x (Mutual Requirement): Mutual functional reliance or deep conceptual link requiring co-consideration
+                d (Documentation Link): Row is documentation essential for understanding/using Column, or vice-versa
+                n (Verified No Dependency): Confirmed no functional requirement or essential conceptual link exists
+
+                Documentation Files to Review (Group {group_number})
+                [List documentation keys and paths for this chunk]
+
+                Instructions
+                1. Read the source code file: {code_file_path}
+                2. For each documentation file above:
+                   a. Read the documentation file
+                   b. Analyze whether the documentation provides essential context, definitions, specifications, or explanations required to understand, implement, or correctly use the code
+                   c. Consider:
+                      - Does the documentation provide valuable or useful information for understanding how the code is intended to operate?
+                      - Does the code need to be aware of this information to perform its intended function?
+                      - Are there conceptual links or future planned directions that should be considered?
+                   d. Determine if a dependency link should be added (typically 'd' for documentation links)
+                   e. State your reasoning for the decision
+                3. Provide a summary of your findings in the format:
+                   Code Key {code_key_string} Documentation Cross-Reference Results:
+
+                   [Doc Key] [Doc Path] -> [Dependency Character or "No Link"]
+                   Reasoning: [Your reasoning]
+
+                   [Repeat for each documentation file]
+
+                Important Notes
+                - Focus on essential documentation, not just keyword similarity
+                - The more information available to inform how the code operates in relation to the systems, the higher quality the end result will be
+                - Consider conceptual links and future planned directions
+                - The source code file is about "{brief_description}" - likely related to {relevant_context}
+
+                Expected Output
+                A clear summary of which documentation files are essential for the source code file with reasoning for each.
+                ```
+            *   **Wait for Task Completion**: Allow the delegated task to complete and return results.
+            *   **Review Results**: Examine the returned documentation determinations and reasoning.
+            *   **Apply Dependencies**: For each documentation file identified as essential, use `add-dependency` to add bi-directional links:
                 ```bash
-                # Reasoning: [Same reasoning as above, from doc's perspective]
-                python -m cline_utils.dependency_system.dependency_processor add-dependency --tracker <path_to_doc_tracker.md> --source-key <doc_key_string> --target-key <code_key_string> --dep-type "<dep_char>"
+                # Add Code -> Doc Link
+                python -m cline_utils.dependency_system.dependency_processor add-dependency --tracker <code_file_tracker_path> --source-key <code_key_string> --target-key <doc_key_string> --dep-type "d"
+                # Add Doc -> Code Link
+                python -m cline_utils.dependency_system.dependency_processor add-dependency --tracker <path_to_doc_tracker.md> --source-key <doc_key_string> --target-key <code_key_string> --dep-type "d"
                 ```
         *   Repeat for all relevant documentation keys for the current `code_key_string`.
     *   **C. Repeat for All Code Keys**: Continue Step 5.B until all relevant code keys have been reviewed against the documentation corpus.
@@ -234,10 +479,15 @@ graph TD
         C2 -- Yes --> C3[Identify Key(s)];
         C3 --> C4[For Each Key needing check:];
         C4 --> C5(Run show-placeholders --tracker doc_tracker.md --key [key]);
-        C5 --> C6(Plan Reading / Suggest Batch);
-        C6 --> C7(Read Source + Target Files);
+        C5 --> C6{Many Targets >10?};
+        C6 -- Yes --> C6a[Group Targets 5-10 per chunk];
+        C6a --> C6b[Create new_task for each chunk];
+        C6b --> C6c[Wait for task completion];
+        C6c --> C6d[Review results & apply dependencies];
+        C6 -- No --> C7(Read Source + Target Files);
         C7 --> C8(Determine Relationship & State Reasoning);
         C8 --> C9(Use add-dependency --tracker doc_tracker.md);
+        C6d --> C4;
         C9 --> C4;
         C4 -- All Keys Done --> C10[Final Check: show-keys];
         C2 -- No --> C10[doc_tracker Verified];
@@ -258,10 +508,15 @@ graph TD
         E8 -- Yes --> E9[Identify Key(s)];
         E9 --> E10[For Each Key needing check:];
         E10 --> E11(Run show-placeholders --tracker [mini_tracker] --key [key]);
-        E11 --> E12(Plan Reading / Suggest Batch);
-        E12 --> E13(Read Source + Target Files);
+        E11 --> E12{Many Targets >10?};
+        E12 -- Yes --> E12a[Group Targets 5-10 per chunk];
+        E12a --> E12b[Create new_task for each chunk];
+        E12b --> E12c[Wait for task completion];
+        E12c --> E12d[Review results & apply dependencies];
+        E12 -- No --> E13(Read Source + Target Files);
         E13 --> E14(Determine Relationship & State Reasoning - Consider Foreign Keys/External);
         E14 --> E15(Use add-dependency --tracker <mini_tracker>);
+        E12d --> E10;
         E15 --> E10;
         E10 -- All Keys Done --> E16[Final Check: show-keys];
         E8 -- No --> E16[Mini-Tracker Verified];
@@ -280,31 +535,43 @@ graph TD
         G2 -- Yes --> G3[Identify Key(s)];
         G3 --> G4[For Each Key needing check:];
         G4 --> G5(Run show-placeholders --tracker module_relationship_tracker.md --key [key]);
-        G5 --> G6(Plan Reading / Use Mini-Tracker Context / Read Key Module Files);
-        G6 --> G7(Determine Relationship & State Reasoning - Module Level);
-        G7 --> G8(Use add-dependency --tracker module_relationship_tracker.md);
-        G8 --> G4;
-        G4 -- All Keys Done --> G9[Final Check: show-keys];
-        G2 -- No --> G9[Main Tracker Verified];
+        G5 --> G6{Many Targets >10?};
+        G6 -- Yes --> G6a[Group Targets 5-10 per chunk];
+        G6a --> G6b[Create new_task for each chunk];
+        G6b --> G6c[Wait for task completion];
+        G6c --> G6d[Review results & apply dependencies];
+        G6 -- No --> G7(Plan Reading / Use Mini-Tracker Context / Read Key Module Files);
+        G7 --> G8(Determine Relationship & State Reasoning - Module Level);
+        G8 --> G9(Use add-dependency --tracker module_relationship_tracker.md);
+        G6d --> G4;
+        G9 --> G4;
+        G4 -- All Keys Done --> G10[Final Check: show-keys];
+        G2 -- No --> G10[Main Tracker Verified];
     end
 
     G --> Verify_main_tracker;
-    G9 --> H[MUP after Stage 3];
+    G10 --> H[MUP after Stage 3];
 
     H --> J[Stage 4: Code-Documentation Cross-Ref];
     subgraph CodeDocRef [Stage 4: Code-Doc Cross-Ref]
         J1[Identify Code & Doc Keys] --> J2[For Each Code Key:];
         J2 --> J3(Identify Potential Docs);
-        J3 --> J4(Read Code & Docs);
-        J4 --> J5(Determine Essential Docs & Reason);
-        J5 -- Yes --> J6(add-dependency -> tracker);
-        J6 --> J2;
-        J5 -- No --> J2;
-        J2 -- All Code Keys Done --> J7[Stage 4 Complete];
+        J3 --> J4{Many Docs >10?};
+        J4 -- Yes --> J4a[Group Docs 5-10 per chunk];
+        J4a --> J4b[Create new_task for each chunk];
+        J4b --> J4c[Wait for task completion];
+        J4c --> J4d[Review results & apply bi-directional links];
+        J4 -- No --> J5(Read Code & Docs);
+        J5 --> J6(Determine Essential Docs & Reason);
+        J6 -- Yes --> J7(add-dependency -> tracker);
+        J7 --> J2;
+        J6 -- No --> J2;
+        J4d --> J2;
+        J2 -- All Code Keys Done --> J8[Stage 4 Complete];
     end
 
     J --> CodeDocRef;
-    J7 --> K[MUP after Stage 4];
+    J8 --> K[MUP after Stage 4];
     K --> L[End Verification Process - Check All Exit Criteria (Section I)];
 
     style Verify_doc_tracker fill:#e6f7ff,stroke:#91d5ff
@@ -312,7 +579,115 @@ graph TD
     style Verify_main_tracker fill:#fffbe6,stroke:#ffe58f
 ```
 
-## V. Locating and Understanding Mini-Trackers
+## V. Using the new_task Tool for Dependency Verification
+
+**Purpose**: The `new_task` tool enables efficient delegation of dependency verification work when dealing with large numbers of files to verify. This approach improves efficiency by parallelizing verification work and managing context window usage more effectively.
+
+**When to Use new_task**:
+- **Large Number of Targets**: When a key has more than 10 target files/modules to verify
+- **Context Management**: When reading all source and target files would exceed context limits
+- **Efficiency**: When verification work can be logically grouped into independent chunks
+
+**Guidelines for Using new_task**:
+
+1. **Grouping Strategy**:
+   - Group target files/modules into chunks of 5-10 items
+   - Group by dependency type ('p', 's', 'S') when possible
+   - Group by logical similarity (same directory, related functionality)
+   - Ensure each chunk is independent and can be verified separately
+
+2. **Task Structure**:
+   - **Source File Information**: Always include the source key and path
+   - **Task Objective**: Clearly state the verification goal
+   - **Dependency Criteria**: Include the full criteria from setup_maintenance_plugin.md
+   - **Target Files List**: Provide the complete list of target keys and paths for the chunk
+   - **Instructions**: Provide step-by-step instructions for the task
+   - **Expected Output**: Specify the exact format for results
+
+3. **Task Template**:
+   ```
+   Dependency Verification Task for Key {key_string}
+
+   Source File
+   Key: {key_string}
+   Path: {source_file_path}
+
+   Task Objective
+   Determine the dependency relationship between the source file and each target file listed below using the criteria from cline_docs/prompts/setup_maintenance_plugin.md.
+
+   Dependency Criteria (from setup_maintenance_plugin.md)
+   < (Row Requires Column): Row functionally relies on or requires Column for context/operation
+   > (Column Requires Row): Column functionally relies on or requires Row for context/operation
+   x (Mutual Requirement): Mutual functional reliance or deep conceptual link requiring co-consideration
+   d (Documentation Link): Row is documentation essential for understanding/using Column, or vice-versa
+   n (Verified No Dependency): Confirmed no functional requirement or essential conceptual link exists
+
+   Target Files to Verify (Group {group_number})
+   [List target keys and paths for this chunk]
+
+   Instructions
+   1. Read the source file: {source_file_path}
+   2. For each target file above:
+      a. Read the target file
+      b. Analyze the functional relationship between source and target
+      c. Determine the appropriate dependency character (<, >, x, d, or n)
+      d. State your reasoning for the chosen dependency type
+   3. Provide a summary of your findings in the format:
+      Key {key_string} Dependency Verification Results:
+
+      [Target Key] [Target Path] -> [Dependency Character]
+      Reasoning: [Your reasoning]
+
+      [Repeat for each target file]
+
+   Important Notes
+   - Focus on functional reliance and necessary knowledge, not just semantic similarity
+   - A file mentioning another file's topic does not automatically create a dependency
+   - Consider whether the source file would break or be incomplete without the target file
+   - The source file is about "{brief_description}" - likely related to {relevant_context}
+
+   Expected Output
+   A clear summary of dependency determinations for all target files in this group with reasoning for each.
+   ```
+
+4. **Post-Task Processing**:
+   - **Wait for Completion**: Allow each delegated task to complete before proceeding
+   - **Review Results**: Examine the returned dependency determinations and reasoning
+   - **Apply Dependencies**: Use `add-dependency` commands to apply the verified relationships
+   - **Batch Applications**: Group multiple `add-dependency` commands for the same source key and dependency type
+
+5. **Best Practices**:
+   - **Clear Context**: Provide relevant context about the source file in the task instructions
+   - **Consistent Format**: Use the same output format across all tasks for easier processing
+   - **Reasoning Quality**: Emphasize the importance of clear, detailed reasoning in task instructions
+   - **Independent Chunks**: Ensure each chunk can be verified without dependencies on other chunks
+
+6. **Example Workflow**:
+   ```
+   1. Run show-placeholders for key 1A3
+   2. Identify 196 target files to verify (3 'S', 2 's', 191 'p')
+   3. Group into 20 chunks of ~10 files each
+   4. Create 20 new_task instances, one for each chunk
+   5. Wait for all tasks to complete
+   6. Review all returned results
+   7. Apply dependencies using add-dependency commands
+   8. Run show-keys to confirm verification complete
+   ```
+
+**Benefits of Using new_task**:
+- **Parallel Processing**: Multiple verification tasks can run concurrently
+- **Context Management**: Each task operates within its own context window
+- **Improved Efficiency**: Large verification workloads become manageable
+- **Better Focus**: Each task focuses on a specific, manageable set of files
+- **Scalability**: The approach scales to handle very large projects
+
+**Important Notes**:
+- The `new_task` tool should be used judiciously - not every verification requires delegation
+- Small numbers of targets (≤10) can be verified directly without creating new tasks
+- Always review task results before applying dependencies to ensure accuracy
+- The task instructions must be clear and comprehensive to ensure quality results
+
+## VI. Locating and Understanding Mini-Trackers
 
 **Purpose**: Mini-trackers (`{dirname}_module.md`) serve a dual role:
 1.  **HDTA Domain Module**: They contain the descriptive text for the module (purpose, components, etc.), managed manually during Strategy.
@@ -330,7 +705,7 @@ graph TD
 *   **Creation/Update**: The `analyze-project` command (run in Section II.4 and potentially before Section III) automatically creates `{dirname}_module.md` files for detected modules if they don't exist, or updates the dependency grid within them if they do. It populates the grid with keys and initial placeholders/suggestions.
 *   **Verification**: The detailed verification process in **Section III** is used to resolve placeholders ('p', 's', 'S') within these mini-trackers *after* `doc_tracker.md` is verified and *before* `module_relationship_tracker.md` is verified. Use the list compiled above to iterate through the mini-trackers during that stage.
 
-## VI. Set-up/Maintenance Plugin - MUP Additions
+## VII. Set-up/Maintenance Plugin - MUP Additions
 
 After performing the Core MUP steps (Core Prompt Section VI):
 1.  **Update `system_manifest.md` (If Changed)**: If Set-up actions modified the project structure significantly (e.g., adding a major module requiring a mini-tracker), ensure `system_manifest.md` reflects this, potentially adding the new module.
