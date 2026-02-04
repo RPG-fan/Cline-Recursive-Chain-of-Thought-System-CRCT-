@@ -523,6 +523,32 @@ def generate_mermaid_diagram(
     for ki_hier in all_kis_for_hierarchy.values():
         parent_norm_path_to_child_key_infos[ki_hier.parent_path].append(ki_hier)
 
+    # --- NEW: Precompute renderable directories to avoid empty subgraphs (ELK crash fix) ---
+    ki_to_gi: Dict[str, str] = {}
+    for gi_key, ki_val in all_kis_for_hierarchy.items():
+        ki_to_gi[ki_val.norm_path] = gi_key
+
+    renderable_dirs: Set[str] = set()
+
+    def _dir_has_renderable_descendant(dir_norm_path: str) -> bool:
+        gi_dir = ki_to_gi.get(dir_norm_path)
+        if gi_dir in renderable_dirs:
+            return True
+        children = parent_norm_path_to_child_key_infos.get(dir_norm_path, [])
+        for child in children:
+            child_gi = get_key_global_instance_string(
+                child, global_path_to_key_info_map
+            )
+            if not child_gi or child_gi not in all_kis_for_hierarchy:
+                continue
+            if not child.is_directory and child_gi in nodes_to_render_gi:
+                renderable_dirs.add(gi_dir)
+                return True
+            if child.is_directory and _dir_has_renderable_descendant(child.norm_path):
+                renderable_dirs.add(gi_dir)
+                return True
+        return False
+
     # --- Generate Mermaid String (Nodes and Subgraphs, using KEY#GI as node IDs) ---
     mermaid_string_parts = ["flowchart TB"]
     # classDef module - for subgraph titles (text color, font-weight) and fallback directory nodes
@@ -624,6 +650,9 @@ def generate_mermaid_diagram(
                 node_display_key = child_key_gi_str  # Use full KEY#GI for display
 
             if child_ki_rec.is_directory:
+                # Skip empty subgraphs (prevents ELK crash)
+                if not _dir_has_renderable_descendant(child_ki_rec.norm_path):
+                    continue
                 # Ensure unique subgraph ID, especially if base keys are duplicated
                 subgraph_id_counter += 1
                 mermaid_subgraph_id = f"sg_{re.sub(r'[^a-zA-Z0-9_]', '_', child_ki_rec.key_string)}_{subgraph_id_counter}"
