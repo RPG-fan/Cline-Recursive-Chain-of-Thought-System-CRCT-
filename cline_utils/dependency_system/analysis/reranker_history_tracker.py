@@ -17,7 +17,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from cline_utils.dependency_system.utils.path_utils import normalize_path
+from cline_utils.dependency_system.utils.path_utils import get_file_type, normalize_path
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,14 @@ SCANS_LOG_FILENAME = "cline_utils/dependency_system/analysis/reranker_scans.json
 # Regex pattern for parsing suggestions.log
 # Format: h:/path/file1.ext -> h:/path/file2.ext ('TYPE') conf: 0.XXX (rel: ext->ext)
 SUGGESTION_PATTERN = re.compile(
-    r"(h:/[^\s]+)\s+->\s+(h:/[^\s]+)\s+\('([^']+)'\)\s+conf:\s+([\d.]+)\s+\(rel:\s+([^)]+)\)"
+    r"([a-zA-Z]:/[^\s]+)\s+->\s+([a-zA-Z]:/[^\s]+)\s+\('([^']+)'\)\s+conf:\s+([\d.]+)\s+\(rel:\s+([^)]+)\)",
+    re.IGNORECASE,
+)
+# Format: h:/path/file1.ext -> h:/path/file2.ext promoted to '<' (score: 0.XXX)
+# Format: h:/path/file1.ext -> h:/path/file2.ext promoted to '<' (conf: 0.XXX, rel: md->py)
+PROMOTED_PATTERN = re.compile(
+    r"([a-zA-Z]:/[^\s]+)\s+->\s+([a-zA-Z]:/[^\s]+)\s+promoted to\s+'([^']+)'\s+\((?:score|conf):\s*([\d.]+)(?:,\s*rel:\s*([^)]+))?\)",
+    re.IGNORECASE,
 )
 
 
@@ -45,6 +52,7 @@ class RerankerAssignment:
         confidence: float,
         relationship: str,
     ):
+        super().__init__()
         self.source = source
         self.target = target
         self.rel_type = rel_type  # S, s, etc.
@@ -97,6 +105,35 @@ def parse_suggestions_log(log_path: str) -> List[RerankerAssignment]:
                     except ValueError:
                         logger.debug(f"Invalid confidence value: {conf_str}")
                         continue
+                else:
+                    promoted_match = PROMOTED_PATTERN.search(line)
+                    if promoted_match:
+                        (
+                            source,
+                            target,
+                            rel_type,
+                            conf_str,
+                            relationship,
+                        ) = promoted_match.groups()
+                        try:
+                            confidence = float(conf_str)
+                        except ValueError:
+                            logger.debug(f"Invalid confidence value: {conf_str}")
+                            continue
+
+                        if not relationship:
+                            relationship = (
+                                f"{get_file_type(source)}->{get_file_type(target)}"
+                            )
+
+                        assignment = RerankerAssignment(
+                            source=source,
+                            target=target,
+                            rel_type=rel_type,
+                            confidence=confidence,
+                            relationship=relationship,
+                        )
+                        assignments.append(assignment)
 
         logger.debug(f"Parsed {len(assignments)} reranker assignments from {log_path}")
         return assignments
@@ -317,7 +354,10 @@ def track_reranker_performance(cycle_number: int, project_root: str) -> bool:
 
     # If we have assignments but no scans (legacy/fallback), use assignments as scans
     if not scanned_pairs and assignments:
-        scanned_pairs = [{"source": a.source, "target": a.target} for a in assignments]
+        scanned_pairs = [
+            {"source": a.source, "target": a.target, "confidence": a.confidence}
+            for a in assignments
+        ]
 
     # Save cycle data
     success = save_cycle_data(cycle_number, assignments, scanned_pairs, project_root)

@@ -116,7 +116,7 @@ DEFAULT_CONFIG = {
         "doc_similarity": 0.65,
         "code_similarity": 0.7,
         "doc_code_similarity": 0.68,  # Threshold for doc<->code relations
-        "reranker_promotion_threshold": 0.92,  # Threshold for < promotion
+        "reranker_promotion_threshold": 0.9,  # Threshold for < promotion
         "reranker_strong_semantic_threshold": 0.78,  # Threshold for S
         "reranker_weak_semantic_threshold": 0.65,  # Threshold for s
     },
@@ -386,7 +386,6 @@ class ConfigManager:
         Returns:
             Path to the configuration file
         """
-        from .cache_manager import cached
 
         def _get_config_path(self) -> str:
             if self._config_path is None:
@@ -589,7 +588,7 @@ class ConfigManager:
             Threshold value
         """
         thresholds = self.config.get("thresholds", DEFAULT_CONFIG["thresholds"])
-        return thresholds.get(threshold_type, 0.7)
+        return thresholds.get(threshold_type, 0.65)
 
     def get_model_name(self, model_type: str) -> str:
         """

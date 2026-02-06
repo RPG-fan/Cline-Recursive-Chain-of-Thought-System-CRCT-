@@ -33,6 +33,8 @@ from cline_utils.dependency_system.utils.cache_manager import (
     cache_manager,
     cached,
     clear_all_caches,
+)
+from cline_utils.dependency_system.utils.cache_manager import (
     normalize_path_cached as normalize_path,
 )
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
@@ -217,7 +219,7 @@ def suggest_dependencies(
     path_to_key_info: Dict[str, KeyInfo],
     project_root: str,
     file_analysis_results: Dict[str, Any],
-    threshold: float = 0.7,
+    threshold: float = 0.65,
     shared_scan_counter: Any = None,
 ) -> Tuple[List[Tuple[str, str]], List[Dict[str, str]]]:  # MODIFIED return type
     """
@@ -1476,6 +1478,7 @@ def suggest_semantic_dependencies_path_based(
             return []
 
     config = ConfigManager()
+    promotion_threshold = config.get_threshold("reranker_promotion_threshold")
     embeddings_dir_rel = config.get_path(
         "embeddings_dir", "cline_utils/dependency_system/analysis/embeddings"
     )
@@ -1664,11 +1667,12 @@ def suggest_semantic_dependencies_path_based(
                         )
                         os.makedirs(os.path.dirname(scans_file), exist_ok=True)
                         with open(scans_file, "a", encoding="utf-8") as f:
-                            for cand_ki, _ in top_candidates:
+                            for cand_ki, cand_conf in top_candidates:
                                 json.dump(
                                     {
                                         "source": source_key_info.norm_path,
                                         "target": cand_ki.norm_path,
+                                        "confidence": float(cand_conf),
                                     },
                                     f,
                                 )
@@ -1798,43 +1802,42 @@ def suggest_semantic_dependencies_path_based(
                                     )
                                     threshold_s_weak_semantic = threshold
 
-                                # Determine directionality for high-confidence assignments
-                                def determine_dependency_direction(
-                                    src_path: str, tgt_path: str
-                                ) -> str:
-                                    """
-                                    Determine dependency direction based on file types and content flow.
-                                    Returns: 'x' (bidirectional), '<' (source depends on target), '>' (target depends on source)
-                                    """
-                                    src_type = get_file_type(src_path)
-                                    tgt_type = get_file_type(tgt_path)
-
-                                    # Doc -> Code: Documentation describes code ='>')
-                                    if src_type == "doc" and tgt_type == "code":
-                                        return ">"
-                                    # Code -> Doc: Code is documented by doc (='<')
-                                    elif src_type == "code" and tgt_type == "doc":
-                                        return "<"
-                                    # Same type: Check for mutual references (bidirectional)
-                                    elif src_type == tgt_type:
-                                        # For same-type relationships, default to bidirectional
-                                        # Could be enhanced with AST analysis for code->code
-                                        return "x"
-                                    else:
-                                        # Default bidirectional for mixed types
-                                        return "x"
-
                                 assigned_char_semantic: Optional[str] = None
 
-                                # HIGH CONFIDENCE (≥0.95): Promote to verified directional characters
-                                if rerank_score >= 0.95:
-                                    # Determine direction and assign verified character
+                                # HIGH CONFIDENCE: Promote to verified dependency character
+                                if rerank_score >= promotion_threshold:
+
+                                    def _classify_role(path: str) -> str:
+                                        ext = os.path.splitext(path)[1].lower()
+                                        if ext in [".md", ".rst", ".txt"]:
+                                            return "doc"
+                                        return "code"
+
+                                    def determine_dependency_direction(
+                                        src_path: str, tgt_path: str
+                                    ) -> str:
+                                        """
+                                        Determine dependency direction based on file roles.
+                                        Returns: 'x' (bidirectional), '<' (source depends on target), '>' (target depends on source)
+                                        """
+                                        src_role = _classify_role(src_path)
+                                        tgt_role = _classify_role(tgt_path)
+
+                                        # Doc -> Code: Documentation describes code ='>')
+                                        if src_role == "doc" and tgt_role == "code":
+                                            return ">"
+                                        # Code -> Doc: Code is documented by doc (='<')
+                                        elif src_role == "code" and tgt_role == "doc":
+                                            return "<"
+                                        # Same role: default to bidirectional
+                                        return "x"
+
                                     direction = determine_dependency_direction(
                                         source_key_info.norm_path, target_ki.norm_path
                                     )
                                     assigned_char_semantic = direction
                                     logger.debug(
-                                        f"HIGH CONFIDENCE (>=0.95): {source_key_info.norm_path} -> {target_ki.norm_path} "
+                                        f"HIGH CONFIDENCE (>= {promotion_threshold:.2f}): {source_key_info.norm_path} -> {target_ki.norm_path} "
                                         f"promoted to '{direction}' (score: {rerank_score:.3f})"
                                     )
                                 elif rerank_score >= threshold_S_strong_semantic:
@@ -1886,33 +1889,36 @@ def suggest_semantic_dependencies_path_based(
                 threshold_S_strong_semantic = config.get_threshold("code_similarity")
                 threshold_s_weak_semantic = threshold
 
-            # Helper function for determining direction (same as in reranking path)
-            def determine_fallback_dependency_direction(
-                src_path: str, tgt_path: str
-            ) -> str:
-                """Determine dependency direction for high-confidence fallback assignments."""
-                src_type = get_file_type(src_path)
-                tgt_type = get_file_type(tgt_path)
-
-                if src_type == "doc" and tgt_type == "code":
-                    return ">"
-                elif src_type == "code" and tgt_type == "doc":
-                    return "<"
-                elif src_type == tgt_type:
-                    return "x"
-                else:
-                    return "x"
-
             assigned_char_semantic: Optional[str] = None
 
-            # HIGH CONFIDENCE (≥0.95): Promote to verified directional characters
-            if confidence >= 0.95:
+            # HIGH CONFIDENCE: Promote to verified dependency character
+            if confidence >= promotion_threshold:
+
+                def _classify_role(path: str) -> str:
+                    ext = os.path.splitext(path)[1].lower()
+                    if ext in [".md", ".rst", ".txt"]:
+                        return "doc"
+                    return "code"
+
+                def determine_fallback_dependency_direction(
+                    src_path: str, tgt_path: str
+                ) -> str:
+                    """Determine dependency direction for high-confidence fallback assignments."""
+                    src_role = _classify_role(src_path)
+                    tgt_role = _classify_role(tgt_path)
+
+                    if src_role == "doc" and tgt_role == "code":
+                        return ">"
+                    elif src_role == "code" and tgt_role == "doc":
+                        return "<"
+                    return "x"
+
                 direction = determine_fallback_dependency_direction(
                     source_key_info.norm_path, target_ki.norm_path
                 )
                 assigned_char_semantic = direction
                 logger.debug(
-                    f"HIGH CONFIDENCE (>=0.95) [fallback]: {source_key_info.norm_path} -> {target_ki.norm_path} "
+                    f"HIGH CONFIDENCE (>= {promotion_threshold:.2f}) [fallback]: {source_key_info.norm_path} -> {target_ki.norm_path} "
                     f"promoted to '{direction}' (conf: {confidence:.3f}, rel: {source_type}->{target_type})"
                 )
             elif confidence >= threshold_S_strong_semantic:
@@ -1924,7 +1930,9 @@ def suggest_semantic_dependencies_path_based(
                 initial_suggestions.append(
                     (target_ki.norm_path, assigned_char_semantic)
                 )
-                if confidence < 0.95:  # Only log non-promoted assignments
+                if (
+                    confidence < promotion_threshold
+                ):  # Only log non-promoted assignments
                     logger.debug(
                         f"Initial semantic: {source_key_info.norm_path} -> {target_ki.norm_path} ('{assigned_char_semantic}') conf: {confidence:.3f} (rel: {source_type}->{target_type})"
                     )

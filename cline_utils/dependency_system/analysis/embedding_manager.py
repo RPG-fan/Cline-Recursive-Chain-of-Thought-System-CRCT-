@@ -31,7 +31,13 @@ except ImportError:
 
 import cline_utils.dependency_system.core.key_manager as key_manager_module
 from cline_utils.dependency_system.core.key_manager import KeyInfo
-from cline_utils.dependency_system.utils.cache_manager import cache_manager, cached, get_project_root_cached as get_project_root, normalize_path_cached as normalize_path
+from cline_utils.dependency_system.utils.cache_manager import cache_manager, cached
+from cline_utils.dependency_system.utils.cache_manager import (
+    get_project_root_cached as get_project_root,
+)
+from cline_utils.dependency_system.utils.cache_manager import (
+    normalize_path_cached as normalize_path,
+)
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.phase_tracker import PhaseTracker
 
@@ -551,8 +557,6 @@ def _encode_text(text: str, model_config: Dict[str, Any]) -> np.ndarray:
 
 
 # --- SES (Symbol Essence String) Logic ---
-
-
 def _load_project_symbol_map() -> Dict[str, Dict[str, Any]]:
     """Loads the project_symbol_map.json."""
     try:
@@ -653,7 +657,7 @@ def generate_symbol_essence_string(
                         }
                         if filtered_annot:
                             annot_str = ", ".join(
-                                f"{k}={v}" for k, v in list(filtered_annot.items())[:3]
+                                f"{k}={v}" for k, v in list(filtered_annot.items())
                             )
                             parts.append(f"    TYPES: {annot_str}")
 
@@ -694,7 +698,7 @@ def generate_symbol_essence_string(
                     if attr_accesses:
                         significant_attrs = [
                             a for a in attr_accesses if a not in ["self", "__class__"]
-                        ][:5]
+                        ]
                         if significant_attrs:
                             parts.append(
                                 f"    ACCESSES: {', '.join(significant_attrs)}"
@@ -730,7 +734,7 @@ def generate_symbol_essence_string(
                 }
                 if filtered_annot:
                     annot_str = ", ".join(
-                        f"{k}={v}" for k, v in list(filtered_annot.items())[:3]
+                        f"{k}={v}" for k, v in list(filtered_annot.items())
                     )
                     parts.append(f"    TYPES: {annot_str}")
 
@@ -753,7 +757,7 @@ def generate_symbol_essence_string(
                         "set",
                         "tuple",
                     ]
-                ][:10]
+                ]
                 if significant_globals:
                     parts.append(f"    GLOBALS: {', '.join(significant_globals)}")
 
@@ -767,7 +771,7 @@ def generate_symbol_essence_string(
                 unique_calls.add(src)
 
         if unique_calls:
-            sorted_calls = sorted(list(unique_calls))[:15]  # Limit to top 15
+            sorted_calls = sorted(list(unique_calls))
             parts.append(f"CALLS: {', '.join(sorted_calls)}")
 
     # 5. Incoming Connections (CALLED_BY) - from imports analysis
@@ -796,7 +800,7 @@ def generate_symbol_essence_string(
                     break
 
         if called_by:
-            sorted_called_by = sorted(list(called_by))[:10]  # Limit to top 10
+            sorted_called_by = sorted(list(called_by))
             parts.append(f"CALLED_BY: {', '.join(sorted_called_by)}")
 
     # Join and truncate if needed
@@ -1631,7 +1635,6 @@ def _get_similarity_file_deps(
             file_paths.append(npy_path)
 
     return file_paths
-
 
 
 @cached(
