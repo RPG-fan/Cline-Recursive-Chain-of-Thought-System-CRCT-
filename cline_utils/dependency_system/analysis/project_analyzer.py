@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
 from cline_utils.dependency_system.analysis import embedding_manager
@@ -22,10 +23,12 @@ from cline_utils.dependency_system.utils.batch_processor import (
 )
 from cline_utils.dependency_system.utils.cache_manager import (
     cache_manager,
-    cached,
     clear_all_caches,
-    file_modified,
+)
+from cline_utils.dependency_system.utils.cache_manager import (
     get_project_root_cached as get_project_root,
+)
+from cline_utils.dependency_system.utils.cache_manager import (
     normalize_path_cached as normalize_path,
 )
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
@@ -46,6 +49,7 @@ from cline_utils.dependency_system.utils.tracker_utils import (
 )
 from cline_utils.dependency_system.utils.visualize_dependencies import (
     generate_mermaid_diagram,
+    render_mermaid_to_image,
 )
 
 logger = logging.getLogger(__name__)
@@ -907,7 +911,7 @@ def analyze_project(
                         suggestions_external=all_global_instance_suggestions,
                         file_to_module=file_to_module,
                         new_keys=newly_generated_keys,
-                        force_apply_suggestions=True,
+                        force_apply_suggestions=False,
                         use_old_map_for_migration=old_map_existed_before_gen,
                     )
 
@@ -966,7 +970,7 @@ def analyze_project(
                 suggestions_external=all_global_instance_suggestions,
                 file_to_module=file_to_module,
                 new_keys=newly_generated_keys,
-                force_apply_suggestions=True,
+                force_apply_suggestions=False,
                 use_old_map_for_migration=old_map_existed_before_gen,
             )
 
@@ -1009,7 +1013,7 @@ def analyze_project(
             suggestions_external=all_global_instance_suggestions,
             file_to_module=file_to_module,
             new_keys=newly_generated_keys,
-            force_apply_suggestions=True,
+            force_apply_suggestions=False,
             use_old_map_for_migration=old_map_existed_before_gen,
         )
 
@@ -1200,6 +1204,10 @@ def analyze_project(
                 project_aggregated_links = {}
 
             total_diagrams = 1 + len(module_keys_unique)  # 1 for overview + N modules
+
+            # List to collect rendering tasks for parallel execution
+            diagram_render_tasks: List[Tuple[str, str]] = []
+
             with PhaseTracker(
                 total=total_diagrams, phase_name="Generating Diagrams"
             ) as diagram_tracker:
@@ -1210,6 +1218,7 @@ def analyze_project(
                     auto_diagram_output_dir_abs, overview_filename
                 )
                 # Pass path_migration_info to generate_mermaid_diagram
+                # render=False to defer rendering
                 overview_mermaid_code = generate_mermaid_diagram(
                     focus_keys_list_input=[],
                     global_path_to_key_info_map=path_to_key_info,
@@ -1217,6 +1226,7 @@ def analyze_project(
                     all_tracker_paths_list=list(current_tracker_paths),
                     config_manager_instance=config,
                     pre_aggregated_links=project_aggregated_links,
+                    render=False,
                 )
                 if (
                     overview_mermaid_code
@@ -1227,6 +1237,12 @@ def analyze_project(
                         f.write(overview_mermaid_code)
                     logger.debug(f"Project overview diagram saved to {overview_path}")
                     analysis_results["auto_visualization"]["overview"] = "success"
+
+                    # Queue for parallel rendering
+                    overview_svg_path = overview_path.replace(".mermaid", ".svg")
+                    diagram_render_tasks.append(
+                        (overview_mermaid_code, overview_svg_path)
+                    )
                 else:
                     logger.warning(
                         f"Skipping save for project overview diagram (no data or failed generation). Error: {overview_mermaid_code if overview_mermaid_code and 'Error:' in overview_mermaid_code[:20] else 'No data'}"
@@ -1237,66 +1253,100 @@ def analyze_project(
                 diagram_tracker.update()
 
                 # --- Generate Per-Module Diagrams ---
-            module_keys_to_visualize = []
-            for key_info_obj_analyzer in path_to_key_info.values():
-                if key_info_obj_analyzer.is_directory:
-                    is_top_level_module_dir_analyzer = any(
-                        key_info_obj_analyzer.norm_path == acr_path_analyzer
-                        or key_info_obj_analyzer.parent_path == acr_path_analyzer
-                        for acr_path_analyzer in abs_code_roots
-                    )
-                    if is_top_level_module_dir_analyzer:
-                        module_keys_to_visualize.append(
-                            key_info_obj_analyzer.key_string
+                module_keys_to_visualize = []
+                for key_info_obj_analyzer in path_to_key_info.values():
+                    if key_info_obj_analyzer.is_directory:
+                        is_top_level_module_dir_analyzer = any(
+                            key_info_obj_analyzer.norm_path == acr_path_analyzer
+                            or key_info_obj_analyzer.parent_path == acr_path_analyzer
+                            for acr_path_analyzer in abs_code_roots
                         )
-            module_keys_unique = sorted(list(set(module_keys_to_visualize)))
-            logger.debug(
-                f"Identified module keys for auto-visualization: {module_keys_unique}"
-            )
-            analysis_results["auto_visualization"]["modules"] = {
-                mk: "skipped" for mk in module_keys_unique
-            }
-            for module_key_str in module_keys_unique:
-                diagram_tracker.update(
-                    description=f"Generating module {module_key_str}"
+                        if is_top_level_module_dir_analyzer:
+                            module_keys_to_visualize.append(
+                                key_info_obj_analyzer.key_string
+                            )
+                module_keys_unique = sorted(list(set(module_keys_to_visualize)))
+                logger.debug(
+                    f"Identified module keys for auto-visualization: {module_keys_unique}"
                 )
-                logger.debug(f"Generating diagram for module: {module_key_str}...")
-                module_diagram_filename = (
-                    f"module_{module_key_str}_dependencies.mermaid".replace(
-                        "/", "_"
-                    ).replace("\\", "_")
-                )
-                module_diagram_path = os.path.join(
-                    auto_diagram_output_dir_abs, module_diagram_filename
-                )
-                module_mermaid_code = generate_mermaid_diagram(
-                    focus_keys_list_input=[module_key_str],
-                    global_path_to_key_info_map=path_to_key_info,
-                    path_migration_info=path_migration_info,
-                    all_tracker_paths_list=list(current_tracker_paths),
-                    config_manager_instance=config,
-                    pre_aggregated_links=project_aggregated_links,
-                )
-                if (
-                    module_mermaid_code
-                    and "// No relevant data" not in module_mermaid_code
-                    and "Error:" not in module_mermaid_code[:20]
-                ):
-                    with open(module_diagram_path, "w", encoding="utf-8") as f:
-                        f.write(module_mermaid_code)
-                    logger.debug(
-                        f"Module {module_key_str} diagram saved to {module_diagram_path}"
+                analysis_results["auto_visualization"]["modules"] = {
+                    mk: "skipped" for mk in module_keys_unique
+                }
+                for module_key_str in module_keys_unique:
+                    diagram_tracker.update(
+                        description=f"Generating module {module_key_str}"
                     )
-                    analysis_results["auto_visualization"]["modules"][
-                        module_key_str
-                    ] = "success"
-                else:
-                    logger.warning(
-                        f"Skipping save for module {module_key_str} diagram (no data or failed generation). Error: {module_mermaid_code if module_mermaid_code and 'Error:' in module_mermaid_code[:20] else 'No data'}"
+                    logger.debug(f"Generating diagram for module: {module_key_str}...")
+                    module_diagram_filename = (
+                        f"module_{module_key_str}_dependencies.mermaid".replace(
+                            "/", "_"
+                        ).replace("\\", "_")
                     )
-                    analysis_results["auto_visualization"]["modules"][
-                        module_key_str
-                    ] = "nodata_or_failed"
+                    module_diagram_path = os.path.join(
+                        auto_diagram_output_dir_abs, module_diagram_filename
+                    )
+                    # render=False to defer rendering
+                    module_mermaid_code = generate_mermaid_diagram(
+                        focus_keys_list_input=[module_key_str],
+                        global_path_to_key_info_map=path_to_key_info,
+                        path_migration_info=path_migration_info,
+                        all_tracker_paths_list=list(current_tracker_paths),
+                        config_manager_instance=config,
+                        pre_aggregated_links=project_aggregated_links,
+                        render=False,
+                    )
+                    if (
+                        module_mermaid_code
+                        and "// No relevant data" not in module_mermaid_code
+                        and "Error:" not in module_mermaid_code[:20]
+                    ):
+                        with open(module_diagram_path, "w", encoding="utf-8") as f:
+                            f.write(module_mermaid_code)
+                        logger.debug(
+                            f"Module {module_key_str} diagram saved to {module_diagram_path}"
+                        )
+                        analysis_results["auto_visualization"]["modules"][
+                            module_key_str
+                        ] = "success"
+
+                        # Queue for parallel rendering
+                        module_svg_path = module_diagram_path.replace(
+                            ".mermaid", ".svg"
+                        )
+                        diagram_render_tasks.append(
+                            (module_mermaid_code, module_svg_path)
+                        )
+                    else:
+                        logger.warning(
+                            f"Skipping save for module {module_key_str} diagram (no data or failed generation). Error: {module_mermaid_code if module_mermaid_code and 'Error:' in module_mermaid_code[:20] else 'No data'}"
+                        )
+                        analysis_results["auto_visualization"]["modules"][
+                            module_key_str
+                        ] = "nodata_or_failed"
+
+            # --- Execute Parallel Rendering ---
+            if diagram_render_tasks:
+                logger.info(
+                    f"Rendering {len(diagram_render_tasks)} diagrams in parallel using ProcessPoolExecutor..."
+                )
+                # Use ProcessPoolExecutor for better isolation on Windows
+                # to avoid file locking conflicts when multiple mmdc processes
+                # try to write SVG files concurrently
+                max_workers = min(os.cpu_count() or 4, len(diagram_render_tasks))
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(render_mermaid_to_image, code, path): path
+                        for code, path in diagram_render_tasks
+                    }
+
+                    for future in as_completed(futures):
+                        path = futures[future]
+                        try:
+                            future.result()
+                            # logger.debug(f"Successfully rendered: {path}") # Optional logging
+                        except Exception as e:
+                            logger.error(f"Failed to render diagram {path}: {e}")
+
         except Exception as viz_err:
             logger.error(
                 f"Error during automatic diagram generation: {viz_err}", exc_info=True

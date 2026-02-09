@@ -34,7 +34,7 @@ CACHE_SIZES = {
 
 # Advanced cache configuration
 ENABLE_COMPRESSION = True
-COMPRESSION_THRESHOLD = 1024  # Only compress items larger than 1KB
+COMPRESSION_THRESHOLD = 512000  # Only compress items larger than 500KB
 COMPRESSION_MIN_SAVINGS = 0.1  # 10% minimum savings
 
 
@@ -108,7 +108,7 @@ class Cache:
         with self._lock:
             if key not in self.data:
                 self.metrics.misses += 1
-                logger.debug(f"Cache '{self.name}': Miss for key '{key}'")
+                # logger.debug(f"Cache '{self.name}': Miss for key '{key}'")
                 return None
 
             # Get value and metadata
@@ -118,7 +118,7 @@ class Cache:
             if expiry and time.time() > expiry:
                 self._remove_key(key)
                 self.metrics.misses += 1
-                logger.debug(f"Cache '{self.name}': Miss (expired) for key '{key}'")
+                # logger.debug(f"Cache '{self.name}': Miss (expired) for key '{key}'")
                 return None
 
             # Update access information
@@ -127,7 +127,7 @@ class Cache:
             self.metrics.last_access[key] = current_time
             self.metrics.access_count[key] = self.metrics.access_count.get(key, 0) + 1
             self.metrics.hits += 1
-            logger.debug(f"Cache '{self.name}': Hit for key '{key}'")
+            # logger.debug(f"Cache '{self.name}': Hit for key '{key}'")
 
             # Decompress if necessary
             if isinstance(value, bytes) and self.enable_compression:
@@ -435,7 +435,7 @@ class CacheManager:
         for name, cache in list(self.caches.items()):
             # Clean up items within the cache
             cache.cleanup_expired()
-            
+
             # If the whole cache is now empty and expired, remove it
             if cache.is_expired():
                 if self.persist:
@@ -705,7 +705,6 @@ def cached(
             to be added as dependencies for cascading invalidation.
     """
 
-
     def decorator(func: F) -> F:
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -721,7 +720,9 @@ def cached(
                     and hasattr(args[0], "__class__")
                     # Only omit if it's an instance of a non-builtin class (likely self/cls)
                     and type(args[0]).__module__ != "builtins"
-                    and not isinstance(args[0], (str, int, float, bool, list, dict, set, tuple))
+                    and not isinstance(
+                        args[0], (str, int, float, bool, list, dict, set, tuple)
+                    )
                 ):
                     # Heuristic: if first arg looks like an instance/class, omit it
                     arg_list_for_key = arg_list[1:]
@@ -738,7 +739,9 @@ def cached(
                 try:
                     dep_file_paths = file_deps(*args, **kwargs)
                     # Filter to only existing files
-                    dep_file_paths = [p for p in dep_file_paths if p and os.path.exists(p)]
+                    dep_file_paths = [
+                        p for p in dep_file_paths if p and os.path.exists(p)
+                    ]
                 except Exception as e:
                     logger.debug(f"Error resolving file_deps for {func.__name__}: {e}")
                     dep_file_paths = []
@@ -751,12 +754,13 @@ def cached(
                     try:
                         # Use absolute path to ensure sorting is consistent across different relative paths
                         from .path_utils import normalize_path
+
                         abs_path = normalize_path(fp)
                         mtime = os.path.getmtime(fp)
                         mtime_list.append(f"{abs_path}:{mtime:.6f}")
                     except OSError:
                         mtime_list.append(f"{fp}:missing")
-                
+
                 # Sort the mtime list to ensure order invariance
                 mtime_list.sort()
                 key = f"{base_key}|mtime:{hash('|'.join(mtime_list))}"
@@ -803,7 +807,6 @@ def cached(
         return cast(F, wrapper)
 
     return decorator
-
 
 
 def _get_normalize_path_cache_key(p: str) -> str:

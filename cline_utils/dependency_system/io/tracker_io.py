@@ -42,16 +42,20 @@ from cline_utils.dependency_system.io.update_mini_tracker import get_mini_tracke
 from cline_utils.dependency_system.utils.cache_manager import (
     cached,
     check_file_modified,
+)
+from cline_utils.dependency_system.utils.cache_manager import (
     get_project_root_cached as get_project_root,
+)
+from cline_utils.dependency_system.utils.cache_manager import (
     invalidate_dependent_entries,
+)
+from cline_utils.dependency_system.utils.cache_manager import (
     normalize_path_cached as normalize_path,
 )
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 
 # --- Utility Imports ---
-from cline_utils.dependency_system.utils.path_utils import (
-    is_subpath,
-)
+from cline_utils.dependency_system.utils.path_utils import is_subpath
 from cline_utils.dependency_system.utils.tracker_utils import (
     aggregate_all_dependencies,
     find_all_tracker_paths,
@@ -2498,7 +2502,9 @@ def update_tracker(
                 # Build path -> index map once per tracker file
                 path_to_idx = {
                     p_str: i
-                    for i, (_k_str, p_str) in enumerate(structured["definitions_ordered"])
+                    for i, (_k_str, p_str) in enumerate(
+                        structured["definitions_ordered"]
+                    )
                 }
                 local_home_tracker_cache[home_tracker_file_norm] = {
                     "valid": True,
@@ -2968,9 +2974,14 @@ def update_tracker(
                                         src_local_idx
                                     ] = reciprocal_char_to_set
                                     suggestion_applied_flag = True
-                                    logger.debug(
-                                        f"    Reciprocal Applied: {tgt_ki_in_this_tracker.norm_path} -> {src_ki_in_this_tracker.norm_path} = '{reciprocal_char_to_set}'"
-                                    )
+                                    if force_apply_suggestions:
+                                        print(
+                                            f"    Reciprocal Applied: {tgt_ki_in_this_tracker.norm_path} -> {src_ki_in_this_tracker.norm_path} = '{reciprocal_char_to_set}'"
+                                        )
+                                    else:
+                                        logger.debug(
+                                            f"    Reciprocal Applied: {tgt_ki_in_this_tracker.norm_path} -> {src_ki_in_this_tracker.norm_path} = '{reciprocal_char_to_set}'"
+                                        )
                                 # If forced, this reciprocal action also contributes to metadata timestamp update via any_forced_suggestion_processed_for_metadata
                                 # No need to update applied_manual_... vars again as the primary direction covers the intent.
 
@@ -3139,7 +3150,7 @@ def update_tracker(
         # If force_apply_suggestions is true (e.g. from CLI add-dependency), we skip pruning
         # to ensure explicitly added foreign keys (even if weakly linked otherwise) are not immediately removed.
         if not force_apply_suggestions:
-            logger.info(
+            logger.debug(
                 f"Mini Tracker ({os.path.basename(output_file)}): Performing final pruning of foreign keys on fully processed grid (force_apply_suggestions is False)..."
             )
 
@@ -3238,7 +3249,7 @@ def update_tracker(
                 num_pruned_val = len(original_final_key_info_list_before_pruning) - len(
                     paths_to_keep_after_pruning_set
                 )
-                logger.info(
+                logger.debug(
                     f"Mini Pruning for '{os.path.basename(output_file)}': Pruned {num_pruned_val} foreign key-path instances that no longer had significant file-to-file links with internal items satisfying priority >= {pruning_priority_threshold}."
                 )
 

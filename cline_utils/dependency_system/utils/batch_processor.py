@@ -14,6 +14,15 @@ from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from cline_utils.dependency_system.utils.phase_tracker import PhaseTracker
 
+# VRAM-aware imports
+try:
+    import torch
+
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    torch = None
+
 # Removed cache import as caching batch processing itself is complex and often not desired
 # from cline_utils.dependency_system.utils.cache_manager import cached
 
@@ -33,6 +42,7 @@ class BatchProcessor:
         batch_size: Optional[int] = None,
         show_progress: bool = True,
         phase_name: str = "Processing",
+        respect_vram_limits: bool = False,
     ):
         """
         Initialize the batch processor.
@@ -42,11 +52,33 @@ class BatchProcessor:
             batch_size: Size of batches to process (defaults to adaptive sizing)
             show_progress: Whether to show progress information (prints to stdout)
             phase_name: Name of the phase for the progress tracker
+            respect_vram_limits: If True, limit workers based on available VRAM (default: False)
+                Should only be set to True for GPU-intensive tasks like reranking.
         """
         super().__init__()
         cpu_count = os.cpu_count() or 8
-        # Increase parallelism: use 4x CPUs by default, cap at 48 to avoid runaway threads
-        default_workers = min(4, (cpu_count * 4))
+        # Increase parallelism: use 4x CPUs by default, cap at 25 to avoid runaway threads
+        default_workers = min(25, (cpu_count * 4))
+
+        # VRAM-aware worker limiting - ONLY apply if explicitly requested
+        if respect_vram_limits and TORCH_AVAILABLE and torch.cuda.is_available():
+            try:
+                from cline_utils.dependency_system.utils.resource_validator import (
+                    get_vram_manager,
+                )
+
+                vram_manager = get_vram_manager()
+                vram_recommended = vram_manager.get_recommended_max_workers()
+                original_default = default_workers
+                default_workers = min(default_workers, vram_recommended)
+                if default_workers < original_default:
+                    logger.info(
+                        f"VRAM-aware worker limit applied: {default_workers} workers "
+                        f"(CPU limit: {original_default}, VRAM limit: {vram_recommended})"
+                    )
+            except Exception as e:
+                logger.warning(f"Could not apply VRAM-aware worker limits: {e}")
+
         # Ensure max_workers is at least 1
         self.max_workers = max(1, max_workers or default_workers)
         self.batch_size = batch_size
@@ -55,6 +87,7 @@ class BatchProcessor:
         self.total_items = 0
         self.processed_items = 0
         self.start_time = 0.0
+        self.tracker = None  # Initialize tracker attribute
 
     # <<< MODIFIED: Accept **kwargs >>>
     def process_items(

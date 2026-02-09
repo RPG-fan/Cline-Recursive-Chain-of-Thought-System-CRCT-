@@ -1,6 +1,6 @@
 """
 System resource validation utilities for project analyzer.
-Validates available memory, disk space, and other resources before analysis.
+Validates available memory, disk space, VRAM, and other resources before analysis.
 """
 
 import datetime
@@ -10,11 +10,24 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..core.exceptions_enhanced import DiskSpaceError, MemoryLimitError, log_and_reraise
 from ..utils.path_utils import normalize_path
+
+# Try to import torch for VRAM management
+try:
+    import torch
+
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    torch = None
 
 logger = logging.getLogger(__name__)
 
@@ -704,7 +717,636 @@ class ResourceValidator:
         return suggestions
 
 
+# =============================================================================
+# VRAM RESOURCE MANAGEMENT
+# =============================================================================
+
+
+class AllocationStatus(Enum):
+    """Status of a VRAM allocation request."""
+
+    GRANTED = "granted"
+    DENIED = "denied"
+    PENDING = "pending"
+    RELEASED = "released"
+
+
+@dataclass
+class VRAMAllocation:
+    """Represents a single VRAM allocation."""
+
+    allocation_id: str
+    size_gb: float
+    requested_at: float
+    granted_at: Optional[float] = None
+    released_at: Optional[float] = None
+    status: AllocationStatus = field(default=AllocationStatus.PENDING)
+    worker_id: Optional[str] = None
+    batch_id: Optional[str] = None
+
+
+class VRAMResourceManager:
+    """
+    Thread-safe singleton for managing VRAM allocations across all workers.
+
+    Solves the race condition problem by providing atomic allocation requests
+    instead of the problematic check-then-allocate pattern. Integrates with
+    ResourceValidator to provide comprehensive resource management.
+
+    Key Features:
+    - Singleton pattern ensures global coordination across all workers
+    - Atomic allocation requests prevent race conditions
+    - Blocking mode with timeout for backpressure
+    - Statistics tracking for monitoring and tuning
+    - Integration with ResourceValidator for unified resource checks
+    """
+
+    _instance: Optional["VRAMResourceManager"] = None
+    _instance_lock: threading.Lock = threading.Lock()
+
+    # Default configuration
+    DEFAULT_RESERVATION_PERCENT = 0.10  # 10% system reservation
+    DEFAULT_SAFETY_BUFFER_GB = 0.5  # Minimum buffer per allocation
+    MIN_VRAM_FOR_OPERATION_GB = 0.1  # Absolute minimum to proceed
+
+    # Model footprint estimates (GB)
+    MODEL_FOOTPRINTS = {
+        "qwen3_reranker_0.6b": 0.07,
+        "qwen3_embedding_4b": 3.5,
+        "mpnet_base": 0.5,
+    }
+
+    def __new__(cls, *args, **kwargs) -> "VRAMResourceManager":
+        """Ensure singleton pattern."""
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(
+        self,
+        reservation_percent: float = DEFAULT_RESERVATION_PERCENT,
+        safety_buffer_gb: float = DEFAULT_SAFETY_BUFFER_GB,
+    ):
+        """
+        Initialize the VRAM resource manager.
+
+        Args:
+            reservation_percent: Percentage of total VRAM to reserve for system/OS
+            safety_buffer_gb: Minimum buffer to maintain per allocation
+        """
+        super().__init__()
+        # Avoid re-initialization
+        if hasattr(self, "_initialized") and self._initialized:
+            return
+
+        # Core synchronization primitives
+        self._allocation_lock = threading.RLock()
+        self._condition = threading.Condition(self._allocation_lock)
+
+        # Configuration
+        self._reservation_percent = reservation_percent
+        self._safety_buffer_gb = safety_buffer_gb
+
+        # State tracking
+        self._active_allocations: Dict[str, VRAMAllocation] = {}
+        self._allocation_counter = 0
+        self._total_allocated_gb = 0.0
+        self._peak_allocated_gb = 0.0
+
+        # Statistics
+        self._stats = {
+            "total_requests": 0,
+            "granted": 0,
+            "denied": 0,
+            "deferred": 0,
+            "released": 0,
+            "peak_concurrent_gb": 0.0,
+        }
+
+        # Batch scheduling state
+        self._batch_queue: List[Dict[str, Any]] = []
+        self._batch_counter = 0
+
+        self._initialized = True
+        logger.debug(
+            f"VRAMResourceManager initialized (reservation={reservation_percent:.0%}, buffer={safety_buffer_gb}GB)"
+        )
+
+    def _get_physical_vram_gb(self) -> float:
+        """Get total physical VRAM in GB."""
+        if not TORCH_AVAILABLE or not torch.cuda.is_available():
+            return 0.0
+        try:
+            _, total_memory = torch.cuda.mem_get_info(0)
+            return total_memory / (1024**3)
+        except Exception as e:
+            logger.warning(f"Failed to get physical VRAM: {e}")
+            return 0.0
+
+    def _get_available_vram_gb(self) -> float:
+        """Get actually free VRAM in GB (not accounting for reservations)."""
+        if not TORCH_AVAILABLE or not torch.cuda.is_available():
+            return 0.0
+        try:
+            torch.cuda.synchronize()
+            free_memory, _ = torch.cuda.mem_get_info(0)
+            return free_memory / (1024**3)
+        except Exception as e:
+            logger.warning(f"Failed to get available VRAM: {e}")
+            return 0.0
+
+    def get_reserved_vram_gb(self) -> float:
+        """
+        Calculate system-wide reserved VRAM amount.
+        This is the amount we always keep free for system stability.
+        """
+        physical = self._get_physical_vram_gb()
+        if physical == 0:
+            return 0.0
+        return max(
+            physical * self._reservation_percent,
+            self.MODEL_FOOTPRINTS.get("qwen3_reranker_0.6b", 0.07)
+            + self._safety_buffer_gb,
+        )
+
+    def get_available_for_allocation(self) -> float:
+        """
+        Get VRAM available for new allocations.
+        Accounts for: active allocations + system reservation
+
+        Returns:
+            Available VRAM in GB for new allocations
+        """
+        with self._allocation_lock:
+            free_vram = self._get_available_vram_gb()
+            reserved = self.get_reserved_vram_gb()
+
+            # Available = free - reserved - already_allocated
+            available = free_vram - reserved - self._total_allocated_gb
+            return max(0.0, available)
+
+    def get_model_footprint(self, model_name: str) -> float:
+        """Get the estimated VRAM footprint for a model.
+
+        Args:
+            model_name: Name of the model to get footprint for.
+
+        Returns:
+            Estimated VRAM footprint in GB.
+        """
+        # First, check if we can get actual measured size from the model itself
+        if model_name == "qwen3_reranker_0.6b":
+            try:
+                # Use torch directly to measure VRAM without importing from embedding_manager
+                # This avoids a circular import cycle
+                if TORCH_AVAILABLE and torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    # Get actual memory usage - this will be the model's footprint if loaded
+                    model_memory_gb = torch.cuda.memory_allocated() / (1024**3)
+                    if model_memory_gb > 0.1:  # If we have valid measurement
+                        logger.debug(
+                            f"Using actual measured footprint for {model_name}: {model_memory_gb:.2f}GB"
+                        )
+                        return model_memory_gb
+            except Exception as e:
+                logger.debug(f"Failed to get actual model footprint: {e}")
+
+        # Fallback to configured or default values
+        return self.MODEL_FOOTPRINTS.get(model_name, 1.0)
+
+    def request_allocation(
+        self,
+        size_gb: float,
+        worker_id: Optional[str] = None,
+        batch_id: Optional[str] = None,
+        blocking: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Atomically request VRAM allocation.
+
+        This is the core method that prevents race conditions. Instead of checking
+        available memory and then allocating (which creates a race window), this
+        method performs an atomic check-and-allocate operation.
+
+        Args:
+            size_gb: Amount of VRAM requested in GB
+            worker_id: Identifier for the requesting worker
+            batch_id: Identifier for the batch this allocation belongs to
+            blocking: If True, wait until allocation is possible
+            timeout: Maximum wait time in seconds (None = forever)
+
+        Returns:
+            Tuple of (granted: bool, allocation_id: Optional[str])
+            If granted is True, allocation_id can be used to release the allocation later.
+        """
+        with self._condition:
+            self._stats["total_requests"] += 1
+
+            # Generate unique allocation ID
+            allocation_id = (
+                f"alloc_{self._allocation_counter}_{int(time.time() * 1000)}"
+            )
+            self._allocation_counter += 1
+
+            allocation = VRAMAllocation(
+                allocation_id=allocation_id,
+                size_gb=size_gb,
+                requested_at=time.time(),
+                worker_id=worker_id,
+                batch_id=batch_id,
+            )
+
+            # Check if we can grant immediately
+            if self._can_allocate(size_gb):
+                self._grant_allocation(allocation)
+                logger.debug(
+                    f"VRAM allocation granted: {allocation_id} ({size_gb:.2f}GB)"
+                )
+                return True, allocation_id
+
+            # Can't allocate now
+            if not blocking:
+                self._stats["denied"] += 1
+                logger.debug(
+                    f"VRAM allocation denied: {size_gb:.2f}GB (available: {self.get_available_for_allocation():.2f}GB)"
+                )
+                return False, None
+
+            # Blocking mode: wait for availability
+            self._stats["deferred"] += 1
+            allocation.status = AllocationStatus.PENDING
+            self._active_allocations[allocation_id] = allocation
+
+            wait_start = time.time()
+            while not self._can_allocate(size_gb):
+                remaining = None
+                if timeout:
+                    elapsed = time.time() - wait_start
+                    remaining = timeout - elapsed
+                    if remaining <= 0:
+                        # Timeout - remove from pending
+                        if allocation_id in self._active_allocations:
+                            del self._active_allocations[allocation_id]
+                        self._stats["denied"] += 1
+                        logger.warning(
+                            f"VRAM allocation timeout after {timeout}s: {allocation_id}"
+                        )
+                        return False, None
+
+                self._condition.wait(timeout=remaining)
+
+            # Granted after waiting
+            self._grant_allocation(allocation)
+            logger.debug(
+                f"VRAM allocation granted after wait: {allocation_id} ({size_gb:.2f}GB)"
+            )
+            return True, allocation_id
+
+    def _can_allocate(self, size_gb: float) -> bool:
+        """
+        Check if allocation can be granted without exceeding limits.
+        Must be called while holding _allocation_lock.
+        """
+        available = self.get_available_for_allocation()
+        return available >= (size_gb + self._safety_buffer_gb)
+
+    def _grant_allocation(self, allocation: VRAMAllocation) -> None:
+        """
+        Grant an allocation and update tracking.
+        Must be called while holding _allocation_lock.
+        """
+        allocation.status = AllocationStatus.GRANTED
+        allocation.granted_at = time.time()
+        self._active_allocations[allocation.allocation_id] = allocation
+        self._total_allocated_gb += allocation.size_gb
+
+        self._stats["granted"] += 1
+        self._peak_allocated_gb = max(self._peak_allocated_gb, self._total_allocated_gb)
+
+    def release_allocation(self, allocation_id: str) -> bool:
+        """
+        Release a previously granted allocation.
+
+        Args:
+            allocation_id: The ID returned by request_allocation
+
+        Returns:
+            True if released successfully, False if not found
+        """
+        with self._condition:
+            allocation = self._active_allocations.get(allocation_id)
+            if not allocation:
+                logger.warning(
+                    f"Attempted to release unknown allocation: {allocation_id}"
+                )
+                return False
+
+            if allocation.status == AllocationStatus.GRANTED:
+                self._total_allocated_gb -= allocation.size_gb
+
+            allocation.status = AllocationStatus.RELEASED
+            allocation.released_at = time.time()
+            del self._active_allocations[allocation_id]
+
+            self._stats["released"] += 1
+
+            # Notify waiting threads
+            self._condition.notify_all()
+
+            logger.debug(f"VRAM allocation released: {allocation_id}")
+            return True
+
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        Get current allocation statistics.
+
+        Returns:
+            Dictionary with statistics including:
+            - total_requests, granted, denied, deferred, released
+            - current_allocated_gb, peak_allocated_gb
+            - available_for_allocation_gb, physical_vram_gb, reserved_vram_gb
+            - active_allocations count
+        """
+        with self._allocation_lock:
+            return {
+                **self._stats,
+                "current_allocated_gb": self._total_allocated_gb,
+                "peak_allocated_gb": self._peak_allocated_gb,
+                "available_for_allocation_gb": self.get_available_for_allocation(),
+                "physical_vram_gb": self._get_physical_vram_gb(),
+                "reserved_vram_gb": self.get_reserved_vram_gb(),
+                "active_allocations": len(self._active_allocations),
+            }
+
+    def get_active_allocations(self) -> List[VRAMAllocation]:
+        """Get list of currently active allocations."""
+        with self._allocation_lock:
+            return list(self._active_allocations.values())
+
+    def get_recommended_max_workers(
+        self, model_name: str = "qwen3_reranker_0.6b"
+    ) -> int:
+        """
+        Calculate recommended maximum workers based on available VRAM.
+
+        Args:
+            model_name: Name of the model being used (determines footprint)
+
+        Returns:
+            Recommended maximum number of workers
+        """
+        with self._allocation_lock:
+            available = self.get_available_for_allocation()
+
+            # Get model footprint
+            model_footprint = self.get_model_footprint(model_name)
+
+            # Calculate workers: available VRAM / model footprint
+            if model_footprint <= 0:
+                return 1
+
+            max_workers = int(available / model_footprint)
+
+            # Cap at reasonable limits (but allow more workers if VRAM allows)
+            return max(1, min(max_workers, 16))
+
+    def should_pause_for_backpressure(
+        self, threshold_gb: Optional[float] = None
+    ) -> bool:
+        """
+        Check if batch processing should pause due to VRAM pressure.
+
+        Args:
+            threshold_gb: Optional override for backpressure threshold
+
+        Returns:
+            True if processing should pause
+        """
+        if threshold_gb is None:
+            threshold_gb = self._safety_buffer_gb
+
+        available = self.get_available_for_allocation()
+        return available < threshold_gb
+
+    def wait_for_available_vram(
+        self, required_gb: float, timeout: Optional[float] = None
+    ) -> bool:
+        """
+        Wait until the specified amount of VRAM is available.
+
+        Args:
+            required_gb: Amount of VRAM required
+            timeout: Maximum wait time in seconds
+
+        Returns:
+            True if VRAM became available, False if timeout
+        """
+        with self._condition:
+            wait_start = time.time()
+            while self.get_available_for_allocation() < required_gb:
+                remaining = None
+                if timeout:
+                    elapsed = time.time() - wait_start
+                    remaining = timeout - elapsed
+                    if remaining <= 0:
+                        return False
+                self._condition.wait(timeout=remaining)
+            return True
+
+
+class VRAMBatchScheduler:
+    """
+    Scheduler for coordinating VRAM-intensive batch operations.
+
+    This class manages a queue of batch operations that require VRAM,
+    ensuring that batches are executed in order and that VRAM constraints
+    are respected. It provides backpressure mechanisms to prevent VRAM
+    exhaustion.
+
+    Use this for reranker batch operations to ensure proper coordination
+    across multiple workers.
+    """
+
+    def __init__(self, vram_manager: Optional[VRAMResourceManager] = None):
+        """
+        Initialize the batch scheduler.
+
+        Args:
+            vram_manager: VRAMResourceManager instance (creates default if None)
+        """
+        super().__init__()
+        self._vram_manager = vram_manager or VRAMResourceManager()
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._pending_batches: List[Dict[str, Any]] = []
+        self._running_batches: Set[str] = set()
+        self._batch_counter = 0
+        self._paused = False
+
+    def submit_batch(
+        self,
+        batch_func: callable,
+        batch_args: tuple = (),
+        batch_kwargs: Optional[Dict[str, Any]] = None,
+        vram_required_gb: float = 1.0,
+        priority: int = 1,
+        blocking: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Submit a batch operation for execution.
+
+        Args:
+            batch_func: Function to execute for the batch
+            batch_args: Positional arguments for batch_func
+            batch_kwargs: Keyword arguments for batch_func
+            vram_required_gb: Amount of VRAM required for this batch
+            priority: Priority (higher = executed earlier)
+            blocking: If True, wait until batch can be executed
+            timeout: Maximum wait time if blocking
+
+        Returns:
+            Tuple of (submitted: bool, batch_id: Optional[str])
+        """
+        batch_kwargs = batch_kwargs or {}
+
+        with self._lock:
+            self._batch_counter += 1
+            batch_id = f"batch_{self._batch_counter}_{int(time.time() * 1000)}"
+
+            batch_info = {
+                "batch_id": batch_id,
+                "func": batch_func,
+                "args": batch_args,
+                "kwargs": batch_kwargs,
+                "vram_required_gb": vram_required_gb,
+                "priority": priority,
+                "submitted_at": time.time(),
+                "status": "pending",
+            }
+
+            # Insert based on priority (higher first)
+            insert_idx = len(self._pending_batches)
+            for i, existing in enumerate(self._pending_batches):
+                if existing["priority"] < priority:
+                    insert_idx = i
+                    break
+            self._pending_batches.insert(insert_idx, batch_info)
+
+            if not blocking:
+                logger.debug(
+                    f"Batch {batch_id} submitted (VRAM: {vram_required_gb:.2f}GB, priority: {priority})"
+                )
+                return True, batch_id
+
+            # Blocking mode: wait for batch to complete
+            wait_start = time.time()
+            while batch_info["status"] in ("pending", "running"):
+                if timeout:
+                    elapsed = time.time() - wait_start
+                    if elapsed >= timeout:
+                        return False, batch_id
+
+                self._condition.wait(timeout=1.0)
+
+            return batch_info["status"] == "completed", batch_id
+
+    def execute_next_batch(self) -> Optional[Dict[str, Any]]:
+        """
+        Execute the next pending batch if VRAM is available.
+
+        Returns:
+            Batch result if a batch was executed, None otherwise
+        """
+        with self._lock:
+            if self._paused or not self._pending_batches:
+                return None
+
+            # Check if we should apply backpressure
+            if self._vram_manager.should_pause_for_backpressure():
+                logger.debug("Pausing batch execution due to VRAM pressure")
+                return None
+
+            # Get next batch
+            batch_info = self._pending_batches.pop(0)
+            batch_id = batch_info["batch_id"]
+            vram_required = batch_info["vram_required_gb"]
+
+            # Request VRAM allocation
+            allocated, alloc_id = self._vram_manager.request_allocation(
+                size_gb=vram_required,
+                batch_id=batch_id,
+                blocking=False,
+            )
+
+            if not allocated:
+                # Put back in queue and try later
+                batch_info["status"] = "pending"
+                self._pending_batches.insert(0, batch_info)
+                return None
+
+            # Execute batch
+            batch_info["status"] = "running"
+            batch_info["allocation_id"] = alloc_id
+            batch_info["started_at"] = time.time()
+            self._running_batches.add(batch_id)
+
+        # Execute outside lock
+        try:
+            logger.debug(f"Executing batch {batch_id} (VRAM: {vram_required:.2f}GB)")
+            result = batch_info["func"](*batch_info["args"], **batch_info["kwargs"])
+            batch_info["result"] = result
+            batch_info["status"] = "completed"
+            batch_info["completed_at"] = time.time()
+        except Exception as e:
+            logger.error(f"Batch {batch_id} failed: {e}")
+            batch_info["error"] = str(e)
+            batch_info["status"] = "failed"
+            batch_info["failed_at"] = time.time()
+        finally:
+            # Release VRAM
+            self._vram_manager.release_allocation(alloc_id)
+
+            with self._lock:
+                self._running_batches.discard(batch_id)
+                self._condition.notify_all()
+
+        return batch_info
+
+    def pause(self) -> None:
+        """Pause batch execution (backpressure)."""
+        with self._lock:
+            self._paused = True
+            logger.info("Batch execution paused")
+
+    def resume(self) -> None:
+        """Resume batch execution."""
+        with self._lock:
+            self._paused = False
+            self._condition.notify_all()
+            logger.info("Batch execution resumed")
+
+    def get_queue_status(self) -> Dict[str, Any]:
+        """Get current queue status."""
+        with self._lock:
+            return {
+                "paused": self._paused,
+                "pending_batches": len(self._pending_batches),
+                "running_batches": len(self._running_batches),
+                "pending_vram_gb": sum(
+                    b["vram_required_gb"] for b in self._pending_batches
+                ),
+            }
+
+
+# =============================================================================
 # Convenience functions
+# =============================================================================
+
+
 def quick_resource_check(project_path: str) -> bool:
     """Quick check if basic resources are available for analysis."""
     try:
@@ -746,3 +1388,13 @@ def validate_and_get_optimal_settings(project_path: str) -> Dict[str, Any]:
         settings["enable_parallel"] = False
 
     return settings
+
+
+def get_vram_manager() -> VRAMResourceManager:
+    """Get the global VRAM resource manager instance."""
+    return VRAMResourceManager()
+
+
+def get_batch_scheduler() -> VRAMBatchScheduler:
+    """Get the global VRAM batch scheduler instance."""
+    return VRAMBatchScheduler()

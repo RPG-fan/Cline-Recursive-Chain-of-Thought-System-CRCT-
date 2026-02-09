@@ -230,7 +230,8 @@ def generate_mermaid_diagram(
     path_migration_info: PathMigrationInfo,
     all_tracker_paths_list: List[str],
     config_manager_instance: ConfigManager,
-    pre_aggregated_links: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]] = None,
+    pre_aggregated_links: Optional[Dict[Tuple[str, str], Tuple[str, set[str]]]] = None,
+    render: bool = True,
 ) -> Optional[str]:
     """
     Core logic to generate a Mermaid string for given focus keys or overall project.
@@ -453,7 +454,7 @@ def generate_mermaid_diagram(
     # --- Final Edge Filtering (using KEY#GI strings) ---
     final_edges_to_draw_gi = []
     for k1_gi, k2_gi, char_val in edges_within_scope_gi:
-        if char_val == "p":
+        if char_val in ("p", "s"):
             continue  # Skip placeholder links
 
         info1 = resolve_key_global_instance_to_ki(k1_gi, global_path_to_key_info_map)
@@ -569,7 +570,7 @@ def generate_mermaid_diagram(
     mermaid_string_parts.append("  classDef focusNode stroke:#007bff,stroke-width:3px;")
 
     mermaid_string_parts.append(
-        "  linkStyle default stroke:#CCCCCC,stroke-width:1px"
+        "  linkStyle default stroke:#CCCCCC,stroke-width:1px,stroke-linecap:round,stroke-linejoin:round;"
     )  # Light gray links
 
     # --- Node Styling Helper ---
@@ -596,6 +597,8 @@ def generate_mermaid_diagram(
     mermaid_rendered_node_ids = set()
     dir_gi_to_mermaid_subgraph_id: Dict[str, str] = {}
     subgraph_id_counter = 0
+    safe_id_map: Dict[str, str] = {}
+    safe_id_counts: Dict[str, int] = {}
 
     # Pre-calculate global counts for display formatting of node labels
     global_key_string_counts = defaultdict(int)
@@ -603,6 +606,19 @@ def generate_mermaid_diagram(
         global_key_string_counts[ki_count.key_string] += 1
 
     mermaid_string_parts.append("\n  %% -- Nodes and Subgraphs --")
+
+    def _get_safe_mermaid_id(key_gi: str) -> str:
+        if key_gi in safe_id_map:
+            return safe_id_map[key_gi]
+        base = re.sub(r"[^a-zA-Z0-9_]", "_", key_gi)
+        if base not in safe_id_counts:
+            safe_id_counts[base] = 0
+            safe_id_map[key_gi] = base
+            return base
+        safe_id_counts[base] += 1
+        safe_id = f"{base}_{safe_id_counts[base]}"
+        safe_id_map[key_gi] = safe_id
+        return safe_id
 
     def _generate_mermaid_structure_recursive_gi(
         parent_norm_path_rec: Optional[str], depth_indent_str_rec: str
@@ -642,7 +658,7 @@ def generate_mermaid_diagram(
                 continue
 
             item_basename_rec = os.path.basename(child_ki_rec.norm_path)
-            mermaid_node_id = child_key_gi_str  # Use KEY#GI directly as ID, unquoted
+            mermaid_node_id = _get_safe_mermaid_id(child_key_gi_str)
 
             # Determine label: Show full KEY#GI only if base key is globally duplicated
             node_display_key = child_ki_rec.key_string
@@ -745,12 +761,12 @@ def generate_mermaid_diagram(
     # Dependencies Edge Drawing (using KEY#GI strings as node IDs)
     mermaid_string_parts.append("\n  %% -- Dependencies --")
     dep_char_to_style = {
-        "<": ("-->", "relies on"),
-        ">": ("-->", "required by"),  # Note: '>' is converted to target<--source
-        "x": ("<-->", "mutual"),
+        "<": ("-->", "needs"),
+        ">": ("-->", "needs"),  # Note: '>' is converted to target<--source
+        "x": ("<-->", "both"),
         "d": ("-.->", "docs"),
-        "s": ("-.->", "semantic (weak)"),
-        "S": ("==>", "semantic (strong)"),
+        "s": ("-.->", "s"),
+        "S": ("==>", "S"),
     }
     # Sort edges for consistent output
     sorted_final_edges_gi = sorted(
@@ -774,8 +790,12 @@ def generate_mermaid_diagram(
         ):
             continue  # Skip edges if nodes aren't rendered
 
-        node1_mermaid_id = dir_gi_to_mermaid_subgraph_id.get(k1_gi, k1_gi)
-        node2_mermaid_id = dir_gi_to_mermaid_subgraph_id.get(k2_gi, k2_gi)
+        node1_mermaid_id = dir_gi_to_mermaid_subgraph_id.get(
+            k1_gi, _get_safe_mermaid_id(k1_gi)
+        )
+        node2_mermaid_id = dir_gi_to_mermaid_subgraph_id.get(
+            k2_gi, _get_safe_mermaid_id(k2_gi)
+        )
 
         arrow_style, label_text = dep_char_to_style.get(
             dep_char, ("-->", dep_char)
@@ -785,9 +805,14 @@ def generate_mermaid_diagram(
         # If dep_char is '>', reverse the arrow direction for display (B --> A becomes A <-- B)
         # But the label "required by" still implies original source requires target.
         # For '<', it's "relies on", so source --> target is correct.
-        mermaid_string_parts.append(
-            f'  {source_node_id_draw} {arrow_style}|"{label_text}"| {target_node_id_draw}'
-        )
+        if label_text == "":
+            mermaid_string_parts.append(
+                f"  {source_node_id_draw} {arrow_style} {target_node_id_draw}"
+            )
+        else:
+            mermaid_string_parts.append(
+                f'  {source_node_id_draw} {arrow_style}|"{label_text}"| {target_node_id_draw}'
+            )
 
     final_mermaid_string = "\n".join(mermaid_string_parts)
 
@@ -814,7 +839,8 @@ def generate_mermaid_diagram(
 
     output_image_file = os.path.join(output_dir, f"{base_filename}.svg")
 
-    render_mermaid_to_image(final_mermaid_string, output_image_file)
+    if render:
+        render_mermaid_to_image(final_mermaid_string, output_image_file)
 
     return final_mermaid_string
 

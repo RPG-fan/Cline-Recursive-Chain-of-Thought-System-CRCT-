@@ -45,7 +45,13 @@ from cline_utils.dependency_system.io.tracker_io import (
     remove_path_from_tracker,
     update_tracker,
 )
-from cline_utils.dependency_system.utils.cache_manager import clear_all_caches, normalize_path_cached as normalize_path, get_project_root_cached as get_project_root
+from cline_utils.dependency_system.utils.cache_manager import clear_all_caches
+from cline_utils.dependency_system.utils.cache_manager import (
+    get_project_root_cached as get_project_root,
+)
+from cline_utils.dependency_system.utils.cache_manager import (
+    normalize_path_cached as normalize_path,
+)
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 
 # --- Utility Imports ---

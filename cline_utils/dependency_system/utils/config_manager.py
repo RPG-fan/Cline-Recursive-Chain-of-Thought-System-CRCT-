@@ -203,11 +203,32 @@ DEFAULT_CONFIG = {
         "allow_partial_analysis": True,  # Allow analysis with limited resources
         "resource_check_enabled": True,  # Enable pre-analysis resource checks
     },
+    # VRAM resource management for GPU-accelerated operations
+    "vram": {
+        # Percentage of total VRAM to reserve for system/OS
+        "reservation_percent": 0.10,
+        # Absolute minimum buffer per allocation (GB)
+        "safety_buffer_gb": 0.5,
+        # Maximum workers per GB of available VRAM (after reservation)
+        "max_workers_per_vram_gb": 2.3,
+        # Model footprints (GB) - used for capacity planning
+        "model_footprints": {
+            "qwen3_reranker_0.6b": 0.7,
+            "qwen3_embedding_4b": 3.5,
+            "mpnet_base": 0.5,
+        },
+        # Enable VRAM coordination (disable for debugging)
+        "enable_vram_coordination": True,
+        # Timeout for blocking allocation requests (seconds)
+        "allocation_timeout_seconds": 300,
+        # Backpressure: pause batch submission when VRAM < this threshold (GB)
+        "backpressure_threshold_gb": 0.5,
+    },
     # Enhanced output configuration
     "output": {
         "auto_generate_diagrams": True,  # Auto-generate dependency diagrams
         "diagram_output_dir": "dependency_diagrams",  # Directory for diagrams
-        "max_diagram_nodes": 100,  # Maximum nodes in diagrams
+        "max_diagram_nodes": 1000,  # Maximum nodes in diagrams
         "log_level": "INFO",  # Logging level
         "log_format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         "log_file_enabled": True,  # Enable log file output
@@ -286,6 +307,10 @@ class ConfigManager:
         self._environment_overrides: Dict[str, Any] = {}
         self._config_files_loaded: List[str] = []
         self._resource_validation_results: Optional[Dict[str, Any]] = None
+        # Instance-level caches for frequently accessed values
+        self._threshold_cache: Dict[str, float] = {}
+        self._model_name_cache: Dict[str, str] = {}
+        self._path_cache: Dict[str, str] = {}
 
         self._load_and_merge_config()
 
@@ -365,18 +390,23 @@ class ConfigManager:
         Returns:
             Configuration dictionary
         """
-        from .cache_manager import cached
-
-        @cached(
-            "config_data",
-            key_func=lambda self: f"config:{os.path.getmtime(self.config_path) if os.path.exists(self.config_path) else 'missing'}",
+        # Use cached value if available and config file hasn't changed
+        config_mtime = (
+            os.path.getmtime(self.config_path)
+            if os.path.exists(self.config_path)
+            else None
         )
-        def _get_config(self) -> Dict[str, Any]:
-            # Always reload if this function is called (cache miss/invalidation)
-            self._load_and_merge_config()
-            return self._config
+        cache_key = f"config:{config_mtime}"
 
-        return _get_config(self)
+        if (
+            not hasattr(self, "_config_cache")
+            or getattr(self, "_config_cache_key", None) != cache_key
+        ):
+            self._load_and_merge_config()
+            self._config_cache = self._config
+            self._config_cache_key = cache_key
+
+        return self._config_cache
 
     @property
     def config_path(self) -> str:
@@ -587,8 +617,11 @@ class ConfigManager:
         Returns:
             Threshold value
         """
-        thresholds = self.config.get("thresholds", DEFAULT_CONFIG["thresholds"])
-        return thresholds.get(threshold_type, 0.65)
+        # Use instance-level cache to avoid repeated config lookups
+        if threshold_type not in self._threshold_cache:
+            thresholds = self.config.get("thresholds", DEFAULT_CONFIG["thresholds"])
+            self._threshold_cache[threshold_type] = thresholds.get(threshold_type, 0.65)
+        return self._threshold_cache[threshold_type]
 
     def get_model_name(self, model_type: str) -> str:
         """
@@ -600,8 +633,13 @@ class ConfigManager:
         Returns:
             Model name
         """
-        models = self.config.get("models", DEFAULT_CONFIG["models"])
-        return models.get(model_type, "all-mpnet-base-v2")
+        # Use instance-level cache
+        if model_type not in self._model_name_cache:
+            models = self.config.get("models", DEFAULT_CONFIG["models"])
+            self._model_name_cache[model_type] = models.get(
+                model_type, "all-mpnet-base-v2"
+            )
+        return self._model_name_cache[model_type]
 
     def get_path(self, path_type: str, default_path: Optional[str] = None) -> str:
         """
@@ -614,18 +652,24 @@ class ConfigManager:
         Returns:
             Path from configuration or default
         """
-        paths = self.config.get("paths", DEFAULT_CONFIG["paths"])
-        path = paths.get(
-            path_type,
-            (
-                default_path
-                if default_path
-                else DEFAULT_CONFIG["paths"].get(path_type, "")
-            ),
-        )
-        if path_type == "embeddings_dir":
-            return normalize_path(os.path.join(get_project_root(), path))
-        return normalize_path(path)
+        # Use instance-level cache
+        cache_key = (path_type, default_path)
+        if cache_key not in self._path_cache:
+            paths = self.config.get("paths", DEFAULT_CONFIG["paths"])
+            path = paths.get(
+                path_type,
+                (
+                    default_path
+                    if default_path
+                    else DEFAULT_CONFIG["paths"].get(path_type, "")
+                ),
+            )
+            if path_type == "embeddings_dir":
+                path = normalize_path(os.path.join(get_project_root(), path))
+            else:
+                path = normalize_path(path)
+            self._path_cache[cache_key] = path
+        return self._path_cache[cache_key]
 
     def get_code_root_directories(self) -> List[str]:
         """

@@ -1470,7 +1470,7 @@ def suggest_semantic_dependencies_path_based(
     shared_scan_counter: Any = None,
 ) -> List[Tuple[str, str]]:  # Output: List[(target_norm_path, char)]
     # Check global limit FIRST to avoid unnecessary processing
-    GLOBAL_SCAN_LIMIT = 20
+    GLOBAL_SCAN_LIMIT = 80
     if shared_scan_counter is not None:
         # Non-blocking check (value access is atomic enough for this optimization)
         if shared_scan_counter.value >= GLOBAL_SCAN_LIMIT:
@@ -1605,8 +1605,8 @@ def suggest_semantic_dependencies_path_based(
                 f"Pre-reranking filter: {len(candidates_with_similarity)} candidates remaining from original collection"
             )
 
-            # Check global scan limit to ensure "curated selection" of ~20 files per run
-            GLOBAL_SCAN_LIMIT = 20
+            # Check global scan limit to ensure "curated selection" of ~80 files per run
+            GLOBAL_SCAN_LIMIT = 80
 
             # Use shared counter if available (preferred for parallel execution)
             if shared_scan_counter is not None:

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 HISTORY_DIR = "cline_utils/dependency_system/analysis/reranker_history"
-MAX_CYCLES_TO_KEEP = 5
+MAX_CYCLES_TO_KEEP = 10
 SUGGESTIONS_LOG_FILENAME = "suggestions.log"
 SCANS_LOG_FILENAME = "cline_utils/dependency_system/analysis/reranker_scans.jsonl"
 
@@ -373,6 +373,16 @@ def track_reranker_performance(cycle_number: int, project_root: str) -> bool:
             except Exception as e:
                 logger.warning(f"Failed to remove scans log {scans_path}: {e}")
 
+        # Generate performance history report
+        try:
+            report = generate_performance_history_report(project_root, save_report=True)
+            if "error" not in report:
+                logger.info(
+                    f"Performance history report generated for cycles {report.get('cycle_range', {})}"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to generate performance history report: {e}")
+
         logger.info(
             f"Reranker performance tracking completed for cycle {cycle_number}. Found {len(assignments)} assignments and {len(scanned_pairs)} scanned pairs."
         )
@@ -435,7 +445,7 @@ def get_performance_comparison(
 
 
 def get_historical_pairs(
-    project_root: str, max_age_cycles: int = 5
+    project_root: str, max_age_cycles: int = 10
 ) -> set[Tuple[str, str]]:
     """
     Retrieve all source-target pairs from history files.
@@ -498,3 +508,465 @@ def get_historical_pairs(
         f"Loaded {len(historical_pairs)} historical pairs from cycles {min_cycle}-{max_cycle}"
     )
     return historical_pairs
+
+
+def generate_performance_history_report(
+    project_root: str, save_report: bool = True
+) -> Dict:
+    """
+    Generate a comprehensive performance history report analyzing reranker
+    performance across all available cycles.
+
+    Args:
+        project_root: Project root directory
+        save_report: Whether to save the report to the history directory
+
+    Returns:
+        Dictionary containing the complete performance report
+    """
+    history_dir = normalize_path(os.path.join(project_root, HISTORY_DIR))
+
+    if not os.path.exists(history_dir):
+        return {"error": "No history data available"}
+
+    # Load all cycle data
+    cycle_data = {}
+    for filename in os.listdir(history_dir):
+        if filename.startswith("cycle_") and filename.endswith(".json"):
+            match = re.match(r"cycle_(\d+)\.json", filename)
+            if match:
+                cycle_num = int(match.group(1))
+                filepath = os.path.join(history_dir, filename)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        cycle_data[cycle_num] = json.load(f)
+                except Exception as e:
+                    logger.warning(f"Failed to load cycle data from {filepath}: {e}")
+
+    if not cycle_data:
+        return {"error": "No cycle data loaded"}
+
+    sorted_cycles = sorted(cycle_data.keys())
+    report = {
+        "report_timestamp": datetime.now().isoformat(),
+        "cycles_analyzed": len(sorted_cycles),
+        "cycle_range": {"start": sorted_cycles[0], "end": sorted_cycles[-1]},
+        "summary": {},
+        "trends": {},
+        "cycle_comparison": {},
+        "consistency_analysis": {},
+        "recommendations": [],
+    }
+
+    # Calculate summary statistics across all cycles
+    all_confidences = []
+    all_suggestion_counts = []
+    all_std_devs = []
+    all_medians = []
+    relationship_type_aggregates = defaultdict(list)
+    relationship_category_aggregates = defaultdict(list)
+
+    for cycle_num in sorted_cycles:
+        data = cycle_data[cycle_num]
+        metrics = data.get("metrics", {})
+
+        all_confidences.append(metrics.get("avg_confidence", 0))
+        all_suggestion_counts.append(data.get("total_suggestions", 0))
+        all_std_devs.append(metrics.get("std_dev_confidence", 0))
+        all_medians.append(metrics.get("median_confidence", 0))
+
+        # Aggregate relationship types
+        for rel_type, count in metrics.get("relationship_types", {}).items():
+            relationship_type_aggregates[rel_type].append(count)
+
+        # Aggregate relationship categories
+        for rel_cat, count in metrics.get("relationship_categories", {}).items():
+            relationship_category_aggregates[rel_cat].append(count)
+
+    # Summary statistics
+    report["summary"] = {
+        "avg_confidence_across_cycles": (
+            round(statistics.mean(all_confidences), 4) if all_confidences else 0
+        ),
+        "median_confidence_across_cycles": (
+            round(statistics.median(all_confidences), 4) if all_confidences else 0
+        ),
+        "avg_suggestions_per_cycle": (
+            round(statistics.mean(all_suggestion_counts), 1)
+            if all_suggestion_counts
+            else 0
+        ),
+        "total_suggestions_all_cycles": sum(all_suggestion_counts),
+        "confidence_range": {
+            "min": round(min(all_confidences), 4) if all_confidences else 0,
+            "max": round(max(all_confidences), 4) if all_confidences else 0,
+        },
+        "avg_std_dev": round(statistics.mean(all_std_devs), 4) if all_std_devs else 0,
+        "avg_median_confidence": (
+            round(statistics.mean(all_medians), 4) if all_medians else 0
+        ),
+    }
+
+    # Trend analysis
+    if len(sorted_cycles) >= 2:
+        # Calculate period-over-period changes
+        confidence_changes = []
+        suggestion_changes = []
+
+        for i in range(1, len(sorted_cycles)):
+            prev_cycle = sorted_cycles[i - 1]
+            curr_cycle = sorted_cycles[i]
+
+            prev_conf = cycle_data[prev_cycle]["metrics"].get("avg_confidence", 0)
+            curr_conf = cycle_data[curr_cycle]["metrics"].get("avg_confidence", 0)
+            if prev_conf > 0:
+                confidence_changes.append((curr_conf - prev_conf) / prev_conf * 100)
+
+            prev_sugg = cycle_data[prev_cycle].get("total_suggestions", 0)
+            curr_sugg = cycle_data[curr_cycle].get("total_suggestions", 0)
+            if prev_sugg > 0:
+                suggestion_changes.append((curr_sugg - prev_sugg) / prev_sugg * 100)
+
+        report["trends"] = {
+            "confidence_trend_direction": (
+                "improving" if all_confidences[-1] > all_confidences[0] else "declining"
+            ),
+            "confidence_trend_pct": (
+                round(
+                    (all_confidences[-1] - all_confidences[0])
+                    / all_confidences[0]
+                    * 100,
+                    2,
+                )
+                if all_confidences[0] > 0
+                else 0
+            ),
+            "suggestions_trend_direction": (
+                "increasing"
+                if all_suggestion_counts[-1] > all_suggestion_counts[0]
+                else "decreasing"
+            ),
+            "suggestions_trend_pct": (
+                round(
+                    (all_suggestion_counts[-1] - all_suggestion_counts[0])
+                    / all_suggestion_counts[0]
+                    * 100,
+                    2,
+                )
+                if all_suggestion_counts[0] > 0
+                else 0
+            ),
+            "avg_confidence_change_per_cycle_pct": (
+                round(statistics.mean(confidence_changes), 2)
+                if confidence_changes
+                else 0
+            ),
+            "avg_suggestion_change_per_cycle_pct": (
+                round(statistics.mean(suggestion_changes), 2)
+                if suggestion_changes
+                else 0
+            ),
+            "confidence_trend_series": [round(c, 4) for c in all_confidences],
+            "suggestions_trend_series": all_suggestion_counts,
+        }
+
+    # Most recent vs previous cycle comparison
+    if len(sorted_cycles) >= 2:
+        latest_cycle = sorted_cycles[-1]
+        prev_cycle = sorted_cycles[-2]
+
+        latest_data = cycle_data[latest_cycle]
+        prev_data = cycle_data[prev_cycle]
+
+        latest_conf = latest_data["metrics"].get("avg_confidence", 0)
+        prev_conf = prev_data["metrics"].get("avg_confidence", 0)
+        conf_diff = latest_conf - prev_conf
+
+        latest_sugg = latest_data.get("total_suggestions", 0)
+        prev_sugg = prev_data.get("total_suggestions", 0)
+        sugg_diff = latest_sugg - prev_sugg
+
+        report["cycle_comparison"] = {
+            "latest_cycle": latest_cycle,
+            "previous_cycle": prev_cycle,
+            "confidence_comparison": {
+                "latest": round(latest_conf, 4),
+                "previous": round(prev_conf, 4),
+                "difference": round(conf_diff, 4),
+                "pct_change": (
+                    round(conf_diff / prev_conf * 100, 2) if prev_conf > 0 else 0
+                ),
+                "assessment": (
+                    "higher" if conf_diff > 0 else "lower" if conf_diff < 0 else "same"
+                ),
+            },
+            "suggestions_comparison": {
+                "latest": latest_sugg,
+                "previous": prev_sugg,
+                "difference": sugg_diff,
+                "pct_change": (
+                    round(sugg_diff / prev_sugg * 100, 2) if prev_sugg > 0 else 0
+                ),
+                "assessment": (
+                    "more" if sugg_diff > 0 else "fewer" if sugg_diff < 0 else "same"
+                ),
+            },
+            "std_dev_comparison": {
+                "latest": round(latest_data["metrics"].get("std_dev_confidence", 0), 4),
+                "previous": round(prev_data["metrics"].get("std_dev_confidence", 0), 4),
+            },
+            "median_comparison": {
+                "latest": round(latest_data["metrics"].get("median_confidence", 0), 4),
+                "previous": round(prev_data["metrics"].get("median_confidence", 0), 4),
+            },
+        }
+
+    # Consistency analysis
+    if len(all_confidences) >= 3:
+        conf_std = statistics.stdev(all_confidences) if len(all_confidences) > 1 else 0
+        sugg_std = (
+            statistics.stdev(all_suggestion_counts)
+            if len(all_suggestion_counts) > 1
+            else 0
+        )
+
+        report["consistency_analysis"] = {
+            "confidence_stability": (
+                "stable"
+                if conf_std < 0.05
+                else "moderate" if conf_std < 0.1 else "volatile"
+            ),
+            "confidence_std_across_cycles": round(conf_std, 4),
+            "suggestions_stability": (
+                "stable"
+                if sugg_std < 50
+                else "moderate" if sugg_std < 100 else "volatile"
+            ),
+            "suggestions_std_across_cycles": round(sugg_std, 2),
+            "coefficient_of_variation_confidence": (
+                round(conf_std / statistics.mean(all_confidences) * 100, 2)
+                if statistics.mean(all_confidences) > 0
+                else 0
+            ),
+        }
+
+    # Relationship type averages across cycles
+    rel_type_avgs = {}
+    for rel_type, counts in relationship_type_aggregates.items():
+        rel_type_avgs[rel_type] = {
+            "avg_per_cycle": round(statistics.mean(counts), 1),
+            "total": sum(counts),
+            "trend": (
+                "increasing"
+                if counts[-1] > counts[0]
+                else "decreasing" if counts[-1] < counts[0] else "stable"
+            ),
+        }
+
+    rel_cat_avgs = {}
+    for rel_cat, counts in relationship_category_aggregates.items():
+        rel_cat_avgs[rel_cat] = {
+            "avg_per_cycle": round(statistics.mean(counts), 1),
+            "total": sum(counts),
+            "trend": (
+                "increasing"
+                if counts[-1] > counts[0]
+                else "decreasing" if counts[-1] < counts[0] else "stable"
+            ),
+        }
+
+    report["relationship_analysis"] = {
+        "type_averages": rel_type_avgs,
+        "category_averages": rel_cat_avgs,
+    }
+
+    # Generate recommendations based on analysis
+    recommendations = []
+
+    # Confidence-based recommendations
+    avg_conf = report["summary"]["avg_confidence_across_cycles"]
+    if avg_conf < 0.6:
+        recommendations.append(
+            {
+                "priority": "high",
+                "category": "confidence",
+                "message": "Average confidence is below 0.6. Consider adjusting reranker thresholds or improving embedding quality.",
+            }
+        )
+    elif avg_conf < 0.7:
+        recommendations.append(
+            {
+                "priority": "medium",
+                "category": "confidence",
+                "message": "Average confidence is moderate (0.6-0.7). Monitor for declining trends.",
+            }
+        )
+
+    # Trend-based recommendations
+    if len(sorted_cycles) >= 2:
+        if report["trends"]["confidence_trend_direction"] == "declining":
+            recommendations.append(
+                {
+                    "priority": "high",
+                    "category": "trend",
+                    "message": f"Confidence trend is declining ({report['trends']['confidence_trend_pct']}%). Investigate recent changes to reranker configuration.",
+                }
+            )
+
+        if (
+            report["trends"]["suggestions_trend_direction"] == "increasing"
+            and report["trends"]["suggestions_trend_pct"] > 50
+        ):
+            recommendations.append(
+                {
+                    "priority": "medium",
+                    "category": "volume",
+                    "message": f"Suggestions increased by {report['trends']['suggestions_trend_pct']}%. Ensure quality isn't being sacrificed for quantity.",
+                }
+            )
+
+    # Consistency-based recommendations
+    if "confidence_stability" in report.get("consistency_analysis", {}):
+        if report["consistency_analysis"]["confidence_stability"] == "volatile":
+            recommendations.append(
+                {
+                    "priority": "medium",
+                    "category": "consistency",
+                    "message": "Confidence is volatile across cycles. Consider stabilizing reranker parameters.",
+                }
+            )
+
+    # Latest cycle comparison recommendations
+    if "cycle_comparison" in report:
+        if report["cycle_comparison"]["confidence_comparison"]["assessment"] == "lower":
+            recommendations.append(
+                {
+                    "priority": "high",
+                    "category": "recent_performance",
+                    "message": f"Latest cycle ({report['cycle_comparison']['latest_cycle']}) shows lower confidence than previous. Review recent changes.",
+                }
+            )
+
+    if not recommendations:
+        recommendations.append(
+            {
+                "priority": "info",
+                "category": "status",
+                "message": "Reranker performance is within acceptable parameters. Continue monitoring.",
+            }
+        )
+
+    report["recommendations"] = recommendations
+
+    # Save report to history directory
+    if save_report:
+        report_path = os.path.join(history_dir, "performance_history_report.json")
+        try:
+            with open(report_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+            logger.info(f"Performance history report saved to {report_path}")
+        except Exception as e:
+            logger.error(f"Failed to save performance report: {e}")
+
+    return report
+
+
+def format_report_summary(report: Dict) -> str:
+    """
+    Format a performance history report as a human-readable string.
+
+    Args:
+        report: The report dictionary from generate_performance_history_report
+
+    Returns:
+        Formatted string summary of the report
+    """
+    if "error" in report:
+        return f"Error: {report['error']}"
+
+    lines = []
+    lines.append("=" * 60)
+    lines.append("RERANKER PERFORMANCE HISTORY REPORT")
+    lines.append("=" * 60)
+    lines.append(f"Generated: {report['report_timestamp']}")
+    lines.append(
+        f"Cycles Analyzed: {report['cycles_analyzed']} (Cycle {report['cycle_range']['start']} - {report['cycle_range']['end']})"
+    )
+    lines.append("")
+
+    # Summary section
+    lines.append("-" * 40)
+    lines.append("SUMMARY")
+    lines.append("-" * 40)
+    summary = report["summary"]
+    lines.append(f"Average Confidence: {summary['avg_confidence_across_cycles']}")
+    lines.append(f"Median Confidence: {summary['median_confidence_across_cycles']}")
+    lines.append(
+        f"Confidence Range: {summary['confidence_range']['min']} - {summary['confidence_range']['max']}"
+    )
+    lines.append(f"Avg Suggestions/Cycle: {summary['avg_suggestions_per_cycle']}")
+    lines.append(f"Total Suggestions: {summary['total_suggestions_all_cycles']}")
+    lines.append(f"Avg Std Deviation: {summary['avg_std_dev']}")
+    lines.append("")
+
+    # Trends section
+    if report.get("trends"):
+        lines.append("-" * 40)
+        lines.append("TRENDS")
+        lines.append("-" * 40)
+        trends = report["trends"]
+        lines.append(
+            f"Confidence Trend: {trends['confidence_trend_direction']} ({trends['confidence_trend_pct']}%)"
+        )
+        lines.append(
+            f"Suggestions Trend: {trends['suggestions_trend_direction']} ({trends['suggestions_trend_pct']}%)"
+        )
+        lines.append(
+            f"Avg Confidence Change/Cycle: {trends['avg_confidence_change_per_cycle_pct']}%"
+        )
+        lines.append("")
+
+    # Cycle comparison section
+    if report.get("cycle_comparison"):
+        lines.append("-" * 40)
+        lines.append("LATEST VS PREVIOUS CYCLE")
+        lines.append("-" * 40)
+        comp = report["cycle_comparison"]
+        lines.append(
+            f"Comparing Cycle {comp['latest_cycle']} vs {comp['previous_cycle']}:"
+        )
+        conf_comp = comp["confidence_comparison"]
+        lines.append(
+            f"  Confidence: {conf_comp['previous']} -> {conf_comp['latest']} ({conf_comp['assessment']}, {conf_comp['pct_change']}%)"
+        )
+        sugg_comp = comp["suggestions_comparison"]
+        lines.append(
+            f"  Suggestions: {sugg_comp['previous']} -> {sugg_comp['latest']} ({sugg_comp['assessment']}, {sugg_comp['pct_change']}%)"
+        )
+        lines.append("")
+
+    # Consistency section
+    if report.get("consistency_analysis"):
+        lines.append("-" * 40)
+        lines.append("CONSISTENCY ANALYSIS")
+        lines.append("-" * 40)
+        consistency = report["consistency_analysis"]
+        lines.append(f"Confidence Stability: {consistency['confidence_stability']}")
+        lines.append(
+            f"Coefficient of Variation: {consistency['coefficient_of_variation_confidence']}%"
+        )
+        lines.append("")
+
+    # Recommendations section
+    if report.get("recommendations"):
+        lines.append("-" * 40)
+        lines.append("RECOMMENDATIONS")
+        lines.append("-" * 40)
+        for rec in report["recommendations"]:
+            lines.append(
+                f"[{rec['priority'].upper()}] {rec['category']}: {rec['message']}"
+            )
+        lines.append("")
+
+    lines.append("=" * 60)
+    return "\n".join(lines)

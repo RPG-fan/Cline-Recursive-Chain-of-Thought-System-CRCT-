@@ -1056,6 +1056,7 @@ def unload_reranker_model():
     RERANKER_TOKENIZER = None
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
 
 
 def get_instruction_for_relation_type(source_path: str, target_path: str) -> str:
@@ -1074,13 +1075,13 @@ def get_instruction_for_relation_type(source_path: str, target_path: str) -> str
     target_cat = map_to_category(target_ext_type)
 
     if source_cat == "code" and target_cat == "code":
-        return "Retrieve the code file that is structurally or semantically related to the query code file, sharing dependencies or functionality."
+        return "Retrieve the code file that is structurally or semantically related to the query code file, sharing dependencies or functionality. Will file A be affected by changes in file B, or vice versa?"
     elif (source_cat == "doc" and target_cat == "code") or (
         source_cat == "code" and target_cat == "doc"
     ):
-        return "Retrieve the file that explains or implements the concepts described in the query."
+        return "Retrieve the file that explains, provides relevant context, or implements the concepts described in the query."
     elif source_cat == "doc" and target_cat == "doc":
-        return "Retrieve the documentation file that is thematically related to the query documentation file."
+        return "Retrieve the documentation file that explains, informs, or supports the query documentation file."
     else:
         return "Retrieve the structural dependency match based on symbol definitions and references"
 
@@ -1110,18 +1111,14 @@ def _calculate_dynamic_batch_size(
     )
     estimated_gb_per_sample = estimated_mb_per_sample / 1024.0
 
-    # Safety buffer: leave 20% or 1GB, whichever is larger
-    reserved_buffer = max(1.0, available_mem_gb * 0.2)
+    # Safety buffer: leave 10% or 1GB, whichever is larger
+    reserved_buffer = max(1.0, available_mem_gb * 0.1)
     usable_mem_gb = max(0.0, available_mem_gb - reserved_buffer)
-
-    # if usable_mem_gb <= 0.1:
-    # logger.warning("Very low memory available for batch processing.")
-    # return 1
 
     max_batch = int(usable_mem_gb / estimated_gb_per_sample)
 
     # Clamp batch size
-    max_batch = max(1, min(max_batch, 50))  # Cap at 50 to avoid other bottlenecks
+    max_batch = max(1, min(max_batch, 15))  # Cap at 15
 
     logger.debug(
         f"Dynamic Batch Sizing: Available={available_mem_gb:.2f}GB, "
@@ -1224,12 +1221,27 @@ def rerank_candidates_with_qwen3(
     start_idx = 0
     total_candidates = len(sorted_items)
 
-    # 3. Process in Dynamic Batches
+    # 3. Process in Dynamic Batches with VRAM coordination
+    # Get the VRAM manager directly for coordinated VRAM management
+    vram_manager = None
+    if device == "cuda":
+        from cline_utils.dependency_system.utils.resource_validator import (
+            get_vram_manager,
+        )
+
+        vram_manager = get_vram_manager()
+
     while start_idx < total_candidates:
+        # Check for backpressure from the VRAM manager
+        if vram_manager is not None and vram_manager.should_pause_for_backpressure():
+            logger.debug("Reranking paused due to VRAM backpressure")
+            # Wait for VRAM to become available (blocking, no timeout)
+            vram_manager.wait_for_available_vram(0.75)
+
         # CRITICAL: Re-poll available memory before each batch calculation
         # This ensures we get accurate, real-time values after previous batches free memory
         if device == "cuda":
-            available_mem = _get_available_vram()
+            available_mem = vram_manager.get_available_for_allocation()
         else:
             available_mem = _get_available_ram()
 
@@ -1259,6 +1271,28 @@ def rerank_candidates_with_qwen3(
             max_len_in_batch = sorted_items[end_idx - 1]["length"]
 
         batch_items = sorted_items[start_idx:end_idx]
+
+        # Estimate VRAM needed for this batch and request allocation
+        estimated_vram_gb = (max_len_in_batch / 1000.0) * 0.08 + 0.175 * len(
+            batch_items
+        ) / 1024.0
+        allocation_id = None
+
+        if vram_manager is not None and device == "cuda":
+            # Request VRAM allocation through the VRAM manager (blocking, no timeout)
+            granted, allocation_id = vram_manager.request_allocation(
+                size_gb=max(estimated_vram_gb, 0.75),  # Minimum 0.75GB per batch
+                blocking=True,
+                timeout=None,  # Wait indefinitely for resources
+            )
+            if not granted:
+                logger.warning(
+                    f"VRAM allocation denied for batch, using fallback scores"
+                )
+                for item in batch_items:
+                    all_scores.append((item["index"], 0.0))
+                start_idx = end_idx
+                continue
 
         try:
             # Clear cache before allocation to reduce fragmentation
@@ -1317,6 +1351,10 @@ def rerank_candidates_with_qwen3(
             # Fallback: assign zero scores
             for item in batch_items:
                 all_scores.append((item["index"], 0.0))
+        finally:
+            # Always release the VRAM allocation
+            if allocation_id is not None and vram_manager is not None:
+                vram_manager.release_allocation(allocation_id)
 
         # Move to next batch
         start_idx = end_idx
