@@ -199,15 +199,17 @@ def aggregate_dependencies_contextual(
 
         processed_mini_trackers += 1
         try:
-            # read_tracker_file returns data based on the *file content*, keys are strings
+            # read_tracker_file_structured returns lists, need to convert to dicts for processing
             mini_data = read_tracker_file_structured(mini_tracker_path)
-            mini_grid = mini_data.get("grid", {})
-            # Key definitions LOCAL to this mini-tracker: {key_string: path_string (might not be normalized)}
-            mini_keys_defined_raw = mini_data.get("keys", {})
-            # Normalize paths defined in the mini-tracker for consistent lookup
-            mini_keys_defined = {
-                k: normalize_path(p) for k, p in mini_keys_defined_raw.items()
+            # grid_rows_ordered is List[Tuple[row_key_string, compressed_data_string]]
+            mini_grid_rows = mini_data.get("grid_rows_ordered", [])
+            mini_grid = {
+                row_key: compressed_data for row_key, compressed_data in mini_grid_rows
             }
+            # definitions_ordered is List[Tuple[key_string, path_string]]
+            mini_definitions = mini_data.get("definitions_ordered", [])
+            # Normalize paths defined in the mini-tracker for consistent lookup
+            mini_keys_defined = {k: normalize_path(p) for k, p in mini_definitions}
 
             if not mini_grid or not mini_keys_defined:
                 logger.debug(
