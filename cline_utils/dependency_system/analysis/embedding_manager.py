@@ -1365,6 +1365,30 @@ def rerank_candidates_with_qwen3(
     return all_scores[:top_k]
 
 
+def _get_text_content_for_embedding(
+    file_path: str, symbol_map: Dict[str, Any], project_root: str
+) -> str:
+    """Helper to retrieve text content for embedding from symbol map or file."""
+    if file_path in symbol_map:
+        return generate_symbol_essence_string(
+            file_path, symbol_map[file_path], symbol_map=symbol_map
+        )
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in [".md", ".txt", ".rst"]:
+            return preprocess_doc_structure(content)
+
+        rel_path = os.path.relpath(file_path, project_root)
+        return f"[FILE: {rel_path}]\n{content[:32000]}"
+    except Exception as e:
+        logger.error(f"Failed to read {file_path}: {e}")
+        return ""
+
+
 # --- Main Embedding Generation ---
 
 
@@ -1395,6 +1419,20 @@ def generate_embeddings(
     # 1. Load Symbol Map (if not provided)
     if symbol_map is None:
         symbol_map = _load_project_symbol_map()
+
+    # Load existing metadata to preserve tokens for skipped files
+    metadata_path = os.path.join(embeddings_dir, "metadata.json")
+    existing_metadata = {}
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                existing_metadata = data.get("keys", {})
+        except Exception as e:
+            logger.warning(f"Failed to load existing metadata: {e}")
+
+    # Track token counts for all files
+    final_token_counts: Dict[str, int] = {}
 
     # 2. Identification Phase
     files_to_process: List[KeyInfo] = []
@@ -1427,15 +1465,14 @@ def generate_embeddings(
         if should_process:
             files_to_process.append(key_info)
 
-    if not files_to_process:
-        logger.info("All embeddings are up to date.")
+    if not files_to_process and all(
+        k in existing_metadata and "tokens" in existing_metadata[k]
+        for k in path_to_key_info.keys()
+        if not path_to_key_info[k].is_directory
+    ):
+        logger.info("All embeddings and metadata are up to date.")
         return True
 
-    logger.info(
-        f"Generating embeddings for {len(files_to_process)} files using Symbol Essence..."
-    )
-
-    # 3. Processing Phase
     logger.info(
         f"Generating embeddings for {len(files_to_process)} files using Symbol Essence..."
     )
@@ -1455,31 +1492,10 @@ def generate_embeddings(
             file_path = key_info.norm_path
             rel_path = os.path.relpath(file_path, project_root)
             prep_tracker.set_description(f"Reading {os.path.basename(rel_path)}")
-            text_to_embed = ""
 
-            # Strategy: Symbol Map -> Doc Structure -> Raw Fallback
-            if file_path in symbol_map:
-                text_to_embed = generate_symbol_essence_string(
-                    file_path, symbol_map[file_path], symbol_map=symbol_map
-                )
-            else:
-                # Not in symbol map (e.g. documentation, config files, or analysis skipped)
-                try:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        content = f.read()
-
-                    ext = os.path.splitext(file_path)[1].lower()
-                    if ext in [".md", ".txt", ".rst"]:
-                        text_to_embed = preprocess_doc_structure(content)
-                    else:
-                        # Raw fallback for unknown types
-                        text_to_embed = (
-                            f"[FILE: {rel_path}]\n{content[:32000]}"  # Increased limit
-                        )
-                except Exception as e:
-                    logger.error(f"Failed to read {file_path}: {e}")
-                    prep_tracker.update()
-                    continue
+            text_to_embed = _get_text_content_for_embedding(
+                file_path, symbol_map, project_root
+            )
 
             if not text_to_embed.strip():
                 prep_tracker.update()
@@ -1487,6 +1503,7 @@ def generate_embeddings(
 
             # Count tokens
             token_count = _count_tokens(text_to_embed, tokenizer)
+            final_token_counts[key_info.key_string] = token_count
 
             processing_queue.append(
                 {
@@ -1559,9 +1576,27 @@ def generate_embeddings(
 
         if os.path.exists(npy_path):
             try:
+                # Get token count: new > existing > calculate
+                token_count = final_token_counts.get(key_info.key_string)
+                if token_count is None:
+                    if (
+                        key_info.key_string in existing_metadata
+                        and "tokens" in existing_metadata[key_info.key_string]
+                    ):
+                        token_count = existing_metadata[key_info.key_string]["tokens"]
+                    else:
+                        # Fallback: calculate now (avoiding full re-embed)
+                        # This happens if file was skipped but metadata is missing tokens
+                        text = _get_text_content_for_embedding(
+                            key_info.norm_path, symbol_map, project_root
+                        )
+                        token_count = _count_tokens(text, tokenizer)
+                        final_token_counts[key_info.key_string] = token_count
+
                 new_metadata["keys"][key_info.key_string] = {
                     "path": key_info.norm_path,
                     "mtime": os.path.getmtime(key_info.norm_path),
+                    "tokens": token_count,
                 }
             except OSError:
                 pass

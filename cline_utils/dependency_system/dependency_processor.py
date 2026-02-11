@@ -98,6 +98,32 @@ def _load_global_map_or_exit() -> Dict[str, KeyInfo]:
     return path_to_key_info
 
 
+def _load_token_metadata(project_root: str) -> Dict[str, int]:
+    """Loads token counts from metadata.json."""
+    metadata_path = os.path.join(
+        project_root,
+        "cline_utils",
+        "dependency_system",
+        "analysis",
+        "embeddings",
+        "metadata.json",
+    )
+    token_map = {}
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                keys = data.get("keys", {})
+                for key_data in keys.values():
+                    path = key_data.get("path")
+                    tokens = key_data.get("tokens")
+                    if path and tokens is not None:
+                        token_map[path] = tokens
+        except Exception as e:
+            logger.warning(f"Failed to load token metadata: {e}")
+    return token_map
+
+
 def is_parent_child(
     key1_str: str, key2_str: str, global_map: Dict[str, KeyInfo]
 ) -> bool:
@@ -682,15 +708,16 @@ def handle_add_dependency(args: argparse.Namespace) -> int:
             for ki in matching_source_infos:
                 print(f"  - {ki.key_string} (Path: {ki.norm_path})")
             return 1
-    elif len(matching_source_infos) > 1:
-        print(
-            f"Error: Source key '{src_base_key_str}' is globally ambiguous. Please specify which instance you mean using '#<num>':"
-        )
-        for ki in matching_source_infos:
-            print(f"  - {ki.key_string} (Path: {ki.norm_path})")
-        return 1
     else:
-        resolved_source_ki = matching_source_infos[0]
+        if len(matching_source_infos) > 1:
+            print(
+                f"Error: Source key '{src_base_key_str}' is globally ambiguous. Please specify which instance you mean using '#<num>':"
+            )
+            for ki in matching_source_infos:
+                print(f"  - {ki.key_string} (Path: {ki.norm_path})")
+            return 1
+        else:
+            resolved_source_ki = matching_source_infos[0]
 
     if not resolved_source_ki:
         return 1
@@ -781,16 +808,19 @@ def handle_add_dependency(args: argparse.Namespace) -> int:
                     (tgt_key_arg_item_raw, "Invalid global instance number.")
                 )
                 continue
-        elif len(matching_target_infos) > 1:
-            print(
-                f"Error: Target key '{tgt_base_key_str}' is globally ambiguous. Please specify which instance you mean using '#<num>':"
-            )
-            for ki in matching_target_infos:
-                print(f"  - {ki.key_string} (Path: {ki.norm_path})")
-            rejected_targets.append((tgt_key_arg_item_raw, "Globally ambiguous key."))
-            continue
         else:
-            resolved_target_ki = matching_target_infos[0]
+            if len(matching_target_infos) > 1:
+                print(
+                    f"Error: Target key '{tgt_base_key_str}' is globally ambiguous. Please specify which instance you mean using '#<num>':"
+                )
+                for ki in matching_target_infos:
+                    print(f"  - {ki.key_string} (Path: {ki.norm_path})")
+                rejected_targets.append(
+                    (tgt_key_arg_item_raw, "Globally ambiguous key.")
+                )
+                continue
+            else:
+                resolved_target_ki = matching_target_infos[0]
 
         if not resolved_target_ki:
             # This case is already covered by the ambiguity/resolution logic above, but as a safeguard:
@@ -1068,6 +1098,7 @@ def handle_show_dependencies(args: argparse.Namespace) -> int:
     current_global_map = _load_global_map_or_exit()  # path_to_key_info
     config = ConfigManager()
     project_root = get_project_root()
+    token_map = _load_token_metadata(project_root)
 
     parts = user_provided_key_arg.split("#")
     base_key_to_show = parts[0]
@@ -1126,8 +1157,11 @@ def handle_show_dependencies(args: argparse.Namespace) -> int:
         )
         return 1
 
+    token_count = token_map.get(target_ki_to_show.norm_path)
+    token_info = f" [Tokens: {token_count}]" if token_count is not None else ""
+
     print(
-        f"\n--- Dependencies for: {target_key_gi_str_to_show} (Path: {target_ki_to_show.norm_path}) ---"
+        f"\n--- Dependencies for: {target_key_gi_str_to_show} (Path: {target_ki_to_show.norm_path}){token_info} ---"
     )
 
     # Pre-calculate global counts for display formatting
@@ -1284,8 +1318,11 @@ def handle_show_dependencies(args: argparse.Namespace) -> int:
                 else ""
             )
 
+            token_count = token_map.get(interacting_ki.norm_path)
+            token_info = f" [Tokens: {token_count}]" if token_count is not None else ""
+
             print(
-                f"  - {display_name_interacting}: {interacting_ki.norm_path}{origins_str}"
+                f"  - {display_name_interacting}: {interacting_ki.norm_path}{token_info}{origins_str}"
             )
 
     print("\n------------------------------------------")
@@ -1304,6 +1341,9 @@ def handle_show_keys(args: argparse.Namespace) -> int:
     logger.info(
         f"Attempting to show keys and check status (p, s, S) from tracker: {tracker_path}"
     )
+
+    project_root = get_project_root()
+    token_map = _load_token_metadata(project_root)
 
     if not os.path.exists(tracker_path):
         print(f"Error: Tracker file not found: {tracker_path}", file=sys.stderr)
@@ -1394,6 +1434,10 @@ def handle_show_keys(args: argparse.Namespace) -> int:
                 f"{key_str_in_file}: {path_str_in_file}{global_instance_suffix}{status_indicator}"
             )
 
+            token_count = token_map.get(normalize_path(path_str_in_file))
+            if token_count is not None:
+                print(f"    | Tokens: {token_count}")
+
         print("--- End of Key Definitions ---")
         try:
             with open(tracker_path, "r", encoding="utf-8") as f_check:
@@ -1442,6 +1486,8 @@ def handle_show_placeholders(args: argparse.Namespace) -> int:
         chars_to_check = ("p", "s", "S")
 
     # --- Load Global Map for Path Resolution ---
+    project_root = get_project_root()
+    token_map = _load_token_metadata(project_root)
     global_map = load_global_key_map()
     key_to_path_map = {}
     if global_map:
@@ -1506,7 +1552,15 @@ def handle_show_placeholders(args: argparse.Namespace) -> int:
         )
         for source_label in sorted_source_keys:
             source_path = key_to_path_map.get(source_label, "Path not found")
-            print(f"\n--- Key: {source_label} (Path: {source_path}) ---")
+            source_token_count = token_map.get(normalize_path(source_path))
+            source_token_info = (
+                f" [Tokens: {source_token_count}]"
+                if source_token_count is not None
+                else ""
+            )
+            print(
+                f"\n--- Key: {source_label} (Path: {source_path}){source_token_info} ---"
+            )
             char_map = unverified_deps[source_label]
             for char_type in sorted(char_map.keys()):
                 target_labels = sorted(
@@ -1515,7 +1569,13 @@ def handle_show_placeholders(args: argparse.Namespace) -> int:
                 print(f"  {char_type}:")
                 for tgt in target_labels:
                     tgt_path = key_to_path_map.get(tgt, "Path not found")
-                    print(f"    - {tgt} (Path: {tgt_path})")
+                    tgt_token_count = token_map.get(normalize_path(tgt_path))
+                    tgt_token_info = (
+                        f" [Tokens: {tgt_token_count}]"
+                        if tgt_token_count is not None
+                        else ""
+                    )
+                    print(f"    - {tgt} (Path: {tgt_path}){tgt_token_info}")
 
         return 0
 
@@ -1545,7 +1605,7 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        current_global_map_cli = _load_global_map_or_exit()
+        current_global_map_cli = _load_global_map_or_exit()  # path_to_key_info
         config_cli = ConfigManager()
         project_root_cli = get_project_root()
         # Use find_all_tracker_paths from tracker_utils (was tracker_io before)
