@@ -2542,9 +2542,9 @@ def update_tracker(
                     decomp_row = decomp_rows_cache[idx1]
                     if decomp_row and idx2 < len(decomp_row):
                         found_char = decomp_row[idx2]
-                        logger.debug(
-                            f"    Home tracker {os.path.basename(home_tracker_file_norm)}: Found '{found_char}' for {path1_norm} -> {path2_norm}"
-                        )
+                        # logger.debug(
+                        #     f"    Home tracker {os.path.basename(home_tracker_file_norm)}: Found '{found_char}' for {path1_norm} -> {path2_norm}"
+                        # )
                         return found_char
             return None
 
@@ -3355,7 +3355,7 @@ def update_tracker(
                 f"Mini Tracker ({os.path.basename(output_file)}): Skipping foreign key pruning because force_apply_suggestions is True."
             )
     elif tracker_type == "doc" and final_key_info_list:
-        logger.info(
+        logger.debug(
             f"Doc Tracker ({os.path.basename(output_file)}): Pruning items not in a doc root."
         )
 
@@ -3612,9 +3612,9 @@ def update_tracker(
                 # Always override placeholder/empty/'n' with AST char
                 char_to_set = ast_char
                 changed_this_cell = True
-                logger.debug(
-                    f"AST_OVERRIDE: ({final_key_info_list[row_idx].norm_path} -> {final_key_info_list[col_idx].norm_path}) set to '{ast_char}' from '{current_char_in_grid}'."
-                )
+                # logger.debug(
+                #     f"AST_OVERRIDE: ({final_key_info_list[row_idx].norm_path} -> {final_key_info_list[col_idx].norm_path}) set to '{ast_char}' from '{current_char_in_grid}'."
+                # )
             else:
                 # Priority comparison for other cases
                 try:

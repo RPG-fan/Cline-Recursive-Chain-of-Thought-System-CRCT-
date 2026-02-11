@@ -1120,11 +1120,11 @@ def _calculate_dynamic_batch_size(
     # Clamp batch size
     max_batch = max(1, min(max_batch, 15))  # Cap at 15
 
-    logger.debug(
-        f"Dynamic Batch Sizing: Available={available_mem_gb:.2f}GB, "
-        f"Context={context_length}, Est.PerSample={estimated_gb_per_sample:.2f}GB "
-        f"-> Batch Size={max_batch}"
-    )
+    # logger.debug(
+    #     f"Dynamic Batch Sizing: Available={available_mem_gb:.2f}GB, "
+    #     f"Context={context_length}, Est.PerSample={estimated_gb_per_sample:.2f}GB "
+    #     f"-> Batch Size={max_batch}"
+    # )
     return max_batch
 
 

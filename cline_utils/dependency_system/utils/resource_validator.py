@@ -962,9 +962,9 @@ class VRAMResourceManager:
             # Check if we can grant immediately
             if self._can_allocate(size_gb):
                 self._grant_allocation(allocation)
-                logger.debug(
-                    f"VRAM allocation granted: {allocation_id} ({size_gb:.2f}GB)"
-                )
+                # logger.debug(
+                #     f"VRAM allocation granted: {allocation_id} ({size_gb:.2f}GB)"
+                # )
                 return True, allocation_id
 
             # Can't allocate now
@@ -1000,9 +1000,9 @@ class VRAMResourceManager:
 
             # Granted after waiting
             self._grant_allocation(allocation)
-            logger.debug(
-                f"VRAM allocation granted after wait: {allocation_id} ({size_gb:.2f}GB)"
-            )
+            # logger.debug(
+            #     f"VRAM allocation granted after wait: {allocation_id} ({size_gb:.2f}GB)"
+            # )
             return True, allocation_id
 
     def _can_allocate(self, size_gb: float) -> bool:
@@ -1056,7 +1056,7 @@ class VRAMResourceManager:
             # Notify waiting threads
             self._condition.notify_all()
 
-            logger.debug(f"VRAM allocation released: {allocation_id}")
+            # logger.debug(f"VRAM allocation released: {allocation_id}")
             return True
 
     def get_stats(self) -> Dict[str, Any]:
