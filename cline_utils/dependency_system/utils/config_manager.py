@@ -117,8 +117,8 @@ DEFAULT_CONFIG = {
         "code_similarity": 0.7,
         "doc_code_similarity": 0.68,  # Threshold for doc<->code relations
         "reranker_promotion_threshold": 0.9,  # Threshold for < promotion
-        "reranker_strong_semantic_threshold": 0.78,  # Threshold for S
-        "reranker_weak_semantic_threshold": 0.65,  # Threshold for s
+        "reranker_strong_semantic_threshold": 0.70,  # Threshold for S
+        "reranker_weak_semantic_threshold": 0.60,  # Threshold for s
     },
     "models": {
         "doc_model_name": "all-mpnet-base-v2",
@@ -326,8 +326,8 @@ class ConfigManager:
             ("output", DEFAULT_CONFIG["output"]),
             ("environment", DEFAULT_CONFIG["environment"]),
         ]:
-            if key not in self._config:  # type: ignore
-                self._config[key] = default_value  # type: ignore
+            if key not in self._config:  
+                self._config[key] = default_value  
 
         # Apply environment variable overrides
         self._apply_environment_overrides()
@@ -336,6 +336,11 @@ class ConfigManager:
         # They are triggered by perform_resource_validation_and_adjustments().
 
         self._initialized = True
+
+    @property
+    def resource_validation_results(self) -> Optional[Dict[str, Any]]:
+        """Get the resource validation results if available."""
+        return self._resource_validation_results
 
     def perform_resource_validation_and_adjustments(self) -> None:
         """

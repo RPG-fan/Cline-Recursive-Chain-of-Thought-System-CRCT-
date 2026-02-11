@@ -3,6 +3,8 @@ Cache management module with dynamic, TTL-based caching for dependency tracking 
 Supports on-demand cache creation, automatic expiration, and granular invalidation.
 """
 
+from __future__ import annotations
+
 import functools
 import gzip
 import json
@@ -13,6 +15,7 @@ import re
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, cast
@@ -23,19 +26,26 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 # Configuration
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
-DEFAULT_MAX_SIZE = 5000  # Default max items per cache
+DEFAULT_MAX_SIZE = 10000  # Default max items per cache
 DEFAULT_TTL = 300  # 10 minutes in seconds
 CACHE_SIZES = {
-    "embeddings_generation": 150,  # Smaller for heavy data
+    "embeddings_generation": 300,  # Smaller for heavy data
     "key_generation": 5000,  # Larger for key maps
-    "reranking": 1000,  # Reranking results
+    "reranking": 35000,  # Reranking results
+    "reranker_history": 200,  # Historical pairs (Set/List)
+    "ast_verified_links": 200,  # Structural data
     "default": DEFAULT_MAX_SIZE,
 }
 
 # Advanced cache configuration
 ENABLE_COMPRESSION = True
-COMPRESSION_THRESHOLD = 512000  # Only compress items larger than 500KB
+COMPRESSION_THRESHOLD = 10485760  # Only compress items larger than 10MB
 COMPRESSION_MIN_SAVINGS = 0.1  # 10% minimum savings
+
+# Global registry for memory monitoring
+_CACHE_REGISTRY: list[weakref.ref[Cache]] = []
+_REGISTRY_LOCK = threading.Lock()
+_global_budget_mb: Optional[int] = None  # Calculated on first access
 
 
 class EvictionPolicy(Enum):
@@ -95,6 +105,10 @@ class Cache:
         self._lock = threading.RLock()  # Thread safety
         self.compression_threshold = COMPRESSION_THRESHOLD
 
+        # Register cache for global monitoring
+        with _REGISTRY_LOCK:
+            _CACHE_REGISTRY.append(weakref.ref(self))
+
         # Adaptive parameters
         self.lru_weight = 0.6 if eviction_policy == EvictionPolicy.ADAPTIVE else 1.0
         self.min_accesses = 3
@@ -112,7 +126,7 @@ class Cache:
                 return None
 
             # Get value and metadata
-            value, access_time, expiry = self.data[key]
+            value, _access_time, expiry = self.data[key]
 
             # Check if expired
             if expiry and time.time() > expiry:
@@ -300,7 +314,11 @@ class Cache:
     def _remove_key(self, key: str) -> None:
         try:
             if key in self.data:
+                # Update size metrics before removal
+                value, _, _ = self.data[key]
+                size = self._estimate_size(value)
                 del self.data[key]
+                self.metrics.total_size_bytes = max(0, self.metrics.total_size_bytes - size)
 
             # Clean up reverse dependencies: remove 'key' from the dependency lists of its dependents
             if key in self.reverse_deps:
@@ -426,12 +444,17 @@ class CacheManager:
         return self.caches[cache_name]
 
     def cleanup(self, force: bool = False) -> None:
-        """Remove expired caches and items, with throttling."""
+        """Remove expired caches and items, with throttling, and enforce global budget."""
         now = time.time()
         if not force and (now - self._last_cleanup_time < 60):
             return
 
         self._last_cleanup_time = now
+
+        # Enforce global budget
+        self._enforce_global_budget()
+
+        # Existing cleanup logic...
         for name, cache in list(self.caches.items()):
             # Clean up items within the cache
             cache.cleanup_expired()
@@ -442,6 +465,103 @@ class CacheManager:
                     self._save_cache(name)
                 del self.caches[name]
                 logger.debug(f"Spun down expired cache: {name}")
+
+    def _enforce_global_budget(self) -> None:
+        """Monitor total memory usage across all caches and evict if budget exceeded."""
+        budget_mb = self.get_global_budget_mb()
+        budget_bytes = budget_mb * 1024 * 1024
+        total_usage = self.get_total_cache_usage()
+
+        if total_usage > budget_bytes:
+            logger.warning(
+                f"Global cache limit exceeded: {total_usage // (1024*1024)}MB / {budget_mb}MB. "
+                "Starting proactive eviction."
+            )
+            # Find all active caches and prune dead refs
+            active_caches: list[Cache] = []
+            with _REGISTRY_LOCK:
+                new_registry: list[weakref.ref[Cache]] = []
+                for ref in _CACHE_REGISTRY:
+                    cache: Optional[Cache] = ref()
+                    if cache is not None:
+                        active_caches.append(cache)
+                        new_registry.append(ref)
+                _CACHE_REGISTRY[:] = new_registry
+
+            if not active_caches:
+                return
+
+            # Sort caches by usage descending
+            active_caches.sort(key=lambda c: c.metrics.total_size_bytes, reverse=True)
+
+            # Evict from each cache until we are under budget
+            # Or at least until we've reduced usage significantly
+            target_usage = int(budget_bytes * 0.8)  # Aim for 80% to provide a buffer
+            for active_cache in active_caches:
+                if total_usage <= target_usage:
+                    break
+                
+                # Evict 20% of items or until we meet target
+                initial_size: int = active_cache.metrics.total_size_bytes
+                if initial_size == 0:
+                    continue
+                
+                items_to_evict = max(1, len(active_cache.data) // 5)
+                # Ensure we don't evict everything if it's small
+                if len(active_cache.data) < 5 and total_usage > budget_bytes:
+                    items_to_evict = 1
+                    
+                with active_cache._lock:
+                    # Logic similar to _evict_items but forced
+                    time_sorted: list[str] = sorted(
+                        active_cache.data.keys(),
+                        key=lambda k: active_cache.data[k][1],  # access_time
+                    )
+                    keys_to_evict: list[str] = time_sorted[:items_to_evict]
+                    for key in keys_to_evict:
+                        active_cache._remove_key(key)
+                        active_cache.metrics.evictions += 1
+                
+                total_usage -= (initial_size - active_cache.metrics.total_size_bytes)
+
+    @staticmethod
+    def get_global_budget_mb() -> int:
+        """Get the global cache budget in MB, scaling based on system resources."""
+        global _global_budget_mb
+        if _global_budget_mb is not None:
+            return _global_budget_mb
+
+        # Default fallback
+        _global_budget_mb = 512
+
+        try:
+            # Use psutil directly instead of ConfigManager to avoid an
+            # import cycle (cache_manager ↔ config_manager).
+            import psutil
+            available_mb: int = psutil.virtual_memory().available // (1024 * 1024)
+            if available_mb > 16384:  # > 16GB available
+                _global_budget_mb = 2048
+            elif available_mb > 4096:  # > 4GB available
+                _global_budget_mb = 512
+            elif available_mb > 0:
+                _global_budget_mb = 128  # Very tight
+        except ImportError:
+            logger.debug("psutil not available, using default cache budget")
+        except Exception as e:
+            logger.debug(f"Could not calculate dynamic budget, using default: {e}")
+
+        return _global_budget_mb
+
+    @staticmethod
+    def get_total_cache_usage() -> int:
+        """Sum total_size_bytes across all registered caches."""
+        total: int = 0
+        with _REGISTRY_LOCK:
+            for ref in _CACHE_REGISTRY:
+                cache_ref: Optional[Cache] = ref()
+                if cache_ref is not None:
+                    total += cache_ref.metrics.total_size_bytes
+        return total
 
     def clear_all(self) -> None:
         if self.persist:

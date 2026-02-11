@@ -15,9 +15,10 @@ import re
 import statistics
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, DefaultDict, Dict, List, Optional, Tuple, cast
 
 from cline_utils.dependency_system.utils.path_utils import get_file_type, normalize_path
+from cline_utils.dependency_system.utils.cache_manager import cached
 from cline_utils.dependency_system.core import key_manager
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,7 @@ class RerankerAssignment:
         self.confidence = confidence
         self.relationship = relationship  # md->py, py->md, etc.
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
             "source": self.source,
@@ -81,7 +82,7 @@ def parse_suggestions_log(log_path: str) -> List[RerankerAssignment]:
     Returns:
         List of RerankerAssignment objects
     """
-    assignments = []
+    assignments: List[RerankerAssignment] = []
 
     if not os.path.exists(log_path):
         logger.warning(f"Suggestions log not found: {log_path}")
@@ -144,29 +145,75 @@ def parse_suggestions_log(log_path: str) -> List[RerankerAssignment]:
         return assignments
 
 
-def parse_scans_log(log_path: str) -> List[Dict[str, str]]:
+def parse_scans_log(log_path: str) -> List[Dict[str, Any]]:
     """
     Parse reranker_scans.jsonl to extract all scanned pairs.
+
+    Validates each line for required keys ('source', 'target') and attempts
+    to repair truncated JSON (e.g. from interrupted writes or race conditions).
     """
-    scans = []
+    scans: List[Dict[str, Any]] = []
     if not os.path.exists(log_path):
         return scans
 
+    skipped = 0
+    repaired = 0
     try:
         with open(log_path, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
+            for line_num, line in enumerate(f, 1):
+                raw = line.strip()
+                if not raw:
+                    continue
+
+                # --- Attempt to parse the JSON line ---
+                entry = None
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    # Attempt simple repair: truncated line missing closing brace
+                    repaired_line = raw.rstrip().rstrip(",")
+                    if not repaired_line.endswith("}"):
+                        repaired_line += "}"
                     try:
-                        scans.append(json.loads(line))
+                        entry = json.loads(repaired_line)
+                        repaired += 1
+                        logger.debug(
+                            f"Repaired truncated JSON on line {line_num} of {log_path}"
+                        )
                     except json.JSONDecodeError:
+                        skipped += 1
+                        logger.debug(
+                            f"Skipping unparseable line {line_num} in {log_path}: {raw[:120]}"
+                        )
                         continue
+
+                if not isinstance(entry, dict):
+                    skipped += 1
+                    continue
+
+                # --- Validate required keys ---
+                if "source" not in entry or "target" not in entry:
+                    skipped += 1
+                    logger.debug(
+                        f"Skipping line {line_num} in {log_path}: missing required key(s). "
+                        f"Has source={('source' in entry)}, target={('target' in entry)}"
+                    )
+                    continue
+
+                scans.append(cast(Dict[str, Any], entry))
+
+        if skipped or repaired:
+            logger.info(
+                f"Scans log parse summary for {os.path.basename(log_path)}: "
+                f"{len(scans)} valid, {skipped} skipped, {repaired} repaired"
+            )
         return scans
     except Exception as e:
         logger.error(f"Error parsing scans log {log_path}: {e}")
         return scans
 
 
-def aggregate_metrics(assignments: List[RerankerAssignment]) -> Dict:
+def aggregate_metrics(assignments: List[RerankerAssignment]) -> Dict[str, Any]:
     """
     Calculate aggregate metrics from reranker assignments.
 
@@ -202,12 +249,12 @@ def aggregate_metrics(assignments: List[RerankerAssignment]) -> Dict:
     }
 
     # Relationship type counts (S, s, etc.)
-    rel_types = defaultdict(int)
+    rel_types: DefaultDict[str, int] = defaultdict(int)
     for a in assignments:
         rel_types[a.rel_type] += 1
 
     # Relationship category counts (md->py, py->md, etc.)
-    rel_categories = defaultdict(int)
+    rel_categories: DefaultDict[str, int] = defaultdict(int)
     for a in assignments:
         rel_categories[a.relationship] += 1
 
@@ -223,7 +270,7 @@ def aggregate_metrics(assignments: List[RerankerAssignment]) -> Dict:
 
 def get_top_assignments(
     assignments: List[RerankerAssignment], n: int = 10
-) -> List[Dict]:
+) -> List[Dict[str, Any]]:
     """Get top N most confident assignments."""
     sorted_assignments = sorted(assignments, key=lambda a: a.confidence, reverse=True)
     return [a.to_dict() for a in sorted_assignments[:n]]
@@ -231,7 +278,7 @@ def get_top_assignments(
 
 def get_bottom_assignments(
     assignments: List[RerankerAssignment], n: int = 10
-) -> List[Dict]:
+) -> List[Dict[str, Any]]:
     """Get bottom N least confident assignments."""
     sorted_assignments = sorted(assignments, key=lambda a: a.confidence)
     return [a.to_dict() for a in sorted_assignments[:n]]
@@ -240,7 +287,7 @@ def get_bottom_assignments(
 def save_cycle_data(
     cycle_number: int,
     assignments: List[RerankerAssignment],
-    all_pairs: List[Dict[str, str]],
+    all_pairs: List[Dict[str, Any]],
     project_root: str,
 ) -> bool:
     """
@@ -262,11 +309,10 @@ def save_cycle_data(
     metrics = aggregate_metrics(assignments)
 
     # Prepare data structure
-    data = {
+    data: Dict[str, Any] = {
         "cycle": cycle_number,
         "timestamp": datetime.now().isoformat(),
         "total_suggestions": len(assignments),
-        "metrics": metrics,
         "metrics": metrics,
         "top_10_confident": get_top_assignments(assignments, 10),
         "bottom_10_confident": get_bottom_assignments(assignments, 10),
@@ -301,7 +347,7 @@ def rotate_old_cycles(project_root: str, max_cycles: int = MAX_CYCLES_TO_KEEP) -
         return
 
     # Find all cycle files
-    cycle_files = []
+    cycle_files: List[Tuple[int, str]] = []
     for filename in os.listdir(history_dir):
         if filename.startswith("cycle_") and filename.endswith(".json"):
             match = re.match(r"cycle_(\d+)\.json", filename)
@@ -364,6 +410,17 @@ def track_reranker_performance(cycle_number: int, project_root: str) -> bool:
     success = save_cycle_data(cycle_number, assignments, scanned_pairs, project_root)
 
     if success:
+        # Auto-repair the newly created cycle file to purge any residual corruption
+        cycle_file = os.path.join(
+            normalize_path(os.path.join(project_root, HISTORY_DIR)),
+            f"cycle_{cycle_number}.json",
+        )
+        try:
+            if repair_history_file(cycle_file):
+                logger.info(f"Auto-repaired cycle file: {cycle_file}")
+        except Exception as e:
+            logger.warning(f"Auto-repair failed for {cycle_file}: {e}")
+
         # Rotate old cycles
         rotate_old_cycles(project_root)
 
@@ -414,19 +471,19 @@ def repair_history_file(filepath: str) -> bool:
             nonlocal modified
             # Ensure items is a list
             if not items:
-                return []
-
-            cleaned = []
+                return cast(List[Dict[str, Any]], [])
+            
+            cleaned: List[Dict[str, Any]] = []
             for item in items:
                 # Ensure item is a dict and has required keys
                 if not item or "source" not in item or "target" not in item:
                     modified = True
                     continue
-
+                
                 # Check if source/target are hierarchical keys and resolve them
                 s: str = item.get("source", "")
                 t: str = item.get("target", "")
-
+                
                 # Simple check for key-like string (e.g. 1A, 1B2, 1Aa1)
                 # If it doesn't look like an absolute path (H:/...), try to resolve it
                 if s and not s.startswith(("H:/", "C:/", "/")):
@@ -434,7 +491,7 @@ def repair_history_file(filepath: str) -> bool:
                     if resolved_s:
                         item["source"] = resolved_s
                         modified = True
-
+                
                 if t and not t.startswith(("H:/", "C:/", "/")):
                     resolved_t = key_manager.get_path_from_key(t, path_to_key_info)
                     if resolved_t:
@@ -442,7 +499,7 @@ def repair_history_file(filepath: str) -> bool:
                         modified = True
 
                 cleaned.append(item)
-
+            
             if len(cleaned) != len(items):
                 modified = True
             return cleaned
@@ -452,16 +509,14 @@ def repair_history_file(filepath: str) -> bool:
         if "top_10_confident" in data:
             data["top_10_confident"] = _resolve_and_clean(data["top_10_confident"])
         if "bottom_10_confident" in data:
-            data["bottom_10_confident"] = _resolve_and_clean(
-                data["bottom_10_confident"]
-            )
+            data["bottom_10_confident"] = _resolve_and_clean(data["bottom_10_confident"])
 
         if modified:
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
             logger.info(f"Successfully repaired and updated history file: {filepath}")
             return True
-
+            
         return False
 
     except Exception as e:
@@ -488,7 +543,7 @@ def get_performance_comparison(
         return {"error": "No history data available"}
 
     # Load cycle data
-    cycle_data = {}
+    cycle_data: Dict[int, Dict[str, Any]] = {}
     for filename in os.listdir(history_dir):
         if filename.startswith("cycle_") and filename.endswith(".json"):
             match = re.match(r"cycle_(\d+)\.json", filename)
@@ -499,14 +554,11 @@ def get_performance_comparison(
                     try:
                         with open(filepath, "r", encoding="utf-8") as f:
                             data = json.load(f)
-
+                            
                         # Basic validation to ensure metrics exist
-                        if (
-                            "metrics" not in data
-                            or "avg_confidence" not in data["metrics"]
-                        ):
+                        if "metrics" not in data or "avg_confidence" not in data["metrics"]:
                             raise KeyError("Missing core data in history file")
-
+                            
                         cycle_data[cycle_num] = data
                     except (Exception, KeyError) as e:
                         logger.warning(
@@ -517,13 +569,9 @@ def get_performance_comparison(
                                 with open(filepath, "r", encoding="utf-8") as f:
                                     cycle_data[cycle_num] = json.load(f)
                             except Exception:
-                                logger.error(
-                                    f"Critical failure reloading {filepath} after repair"
-                                )
+                                logger.error(f"Critical failure reloading {filepath} after repair")
                         else:
-                            logger.error(
-                                f"Skipping cycle {cycle_num} due to irreparable corruption: {filepath}"
-                            )
+                            logger.error(f"Skipping cycle {cycle_num} due to irreparable corruption: {filepath}")
 
     if not cycle_data:
         return {"error": "No cycle data loaded"}
@@ -544,6 +592,7 @@ def get_performance_comparison(
     return comparison
 
 
+@cached("reranker_history", ttl=300, track_path_args=[0])
 def get_historical_pairs(
     project_root: str, max_age_cycles: int = 10
 ) -> set[Tuple[str, str]]:
@@ -559,13 +608,13 @@ def get_historical_pairs(
         Set of (source, target) tuples
     """
     history_dir = normalize_path(os.path.join(project_root, HISTORY_DIR))
-    historical_pairs = set()
+    historical_pairs: set[Tuple[str, str]] = set()
 
     if not os.path.exists(history_dir):
         return historical_pairs
 
     # Find all cycle files and determine the current max cycle
-    cycle_files = []
+    cycle_files: List[Tuple[int, str]] = []
     for filename in os.listdir(history_dir):
         if filename.startswith("cycle_") and filename.endswith(".json"):
             match = re.match(r"cycle_(\d+)\.json", filename)
@@ -602,9 +651,7 @@ def get_historical_pairs(
                     for item in data.get("bottom_10_confident", []):
                         historical_pairs.add((item["source"], item["target"]))
             except (KeyError, TypeError) as ke:
-                logger.warning(
-                    f"Structural corruption in {filepath} ({ke}). Triggering repair..."
-                )
+                logger.warning(f"Structural corruption in {filepath} ({ke}). Triggering repair...")
                 if repair_history_file(filepath):
                     # Reload and try again
                     try:
@@ -612,22 +659,14 @@ def get_historical_pairs(
                             data = json.load(f)
                             if "all_pairs" in data:
                                 for pair in data["all_pairs"]:
-                                    historical_pairs.add(
-                                        (pair["source"], pair["target"])
-                                    )
+                                    historical_pairs.add((pair["source"], pair["target"]))
                             else:
                                 for item in data.get("top_10_confident", []):
-                                    historical_pairs.add(
-                                        (item["source"], item["target"])
-                                    )
+                                    historical_pairs.add((item["source"], item["target"]))
                                 for item in data.get("bottom_10_confident", []):
-                                    historical_pairs.add(
-                                        (item["source"], item["target"])
-                                    )
+                                    historical_pairs.add((item["source"], item["target"]))
                     except Exception as re_err:
-                        logger.error(
-                            f"Failed to recover historical pairs from {filepath} even after repair: {re_err}"
-                        )
+                         logger.error(f"Failed to recover historical pairs from {filepath} even after repair: {re_err}")
                 else:
                     logger.error(f"Irreparable structural issues in {filepath}")
 
@@ -660,7 +699,7 @@ def generate_performance_history_report(
         return {"error": "No history data available"}
 
     # Load all cycle data
-    cycle_data = {}
+    cycle_data: Dict[int, Dict[str, Any]] = {}
     for filename in os.listdir(history_dir):
         if filename.startswith("cycle_") and filename.endswith(".json"):
             match = re.match(r"cycle_(\d+)\.json", filename)
@@ -670,16 +709,14 @@ def generate_performance_history_report(
                 try:
                     with open(filepath, "r", encoding="utf-8") as f:
                         data = json.load(f)
-
+                    
                     # Basic validation
                     if "metrics" not in data:
-                        raise KeyError("metrics")
-
+                         raise KeyError("metrics")
+                         
                     cycle_data[cycle_num] = data
                 except (Exception, KeyError) as e:
-                    logger.warning(
-                        f"Corrupted cycle data in {filepath} ({e}). Attempting repair..."
-                    )
+                    logger.warning(f"Corrupted cycle data in {filepath} ({e}). Attempting repair...")
                     if repair_history_file(filepath):
                         try:
                             with open(filepath, "r", encoding="utf-8") as f:
@@ -687,32 +724,30 @@ def generate_performance_history_report(
                         except Exception:
                             logger.error(f"Failed to reload {filepath} after repair")
                     else:
-                        logger.error(
-                            f"Skipping cycle {cycle_num} due to irreparable corruption"
-                        )
+                        logger.error(f"Skipping cycle {cycle_num} due to irreparable corruption")
 
     if not cycle_data:
         return {"error": "No cycle data loaded"}
 
     sorted_cycles = sorted(cycle_data.keys())
-    report = {
+    report: Dict[str, Any] = {
         "report_timestamp": datetime.now().isoformat(),
         "cycles_analyzed": len(sorted_cycles),
         "cycle_range": {"start": sorted_cycles[0], "end": sorted_cycles[-1]},
-        "summary": {},
-        "trends": {},
-        "cycle_comparison": {},
-        "consistency_analysis": {},
-        "recommendations": [],
+        "summary": cast(Dict[str, Any], {}),
+        "trends": cast(Dict[str, Any], {}),
+        "cycle_comparison": cast(Dict[str, Any], {}),
+        "consistency_analysis": cast(Dict[str, Any], {}),
+        "recommendations": cast(List[Dict[str, Any]], []),
     }
 
     # Calculate summary statistics across all cycles
-    all_confidences = []
-    all_suggestion_counts = []
-    all_std_devs = []
-    all_medians = []
-    relationship_type_aggregates = defaultdict(list)
-    relationship_category_aggregates = defaultdict(list)
+    all_confidences: List[float] = []
+    all_suggestion_counts: List[int] = []
+    all_std_devs: List[float] = []
+    all_medians: List[float] = []
+    relationship_type_aggregates: DefaultDict[str, List[int]] = defaultdict(list)
+    relationship_category_aggregates: DefaultDict[str, List[int]] = defaultdict(list)
 
     for cycle_num in sorted_cycles:
         data = cycle_data[cycle_num]
@@ -758,8 +793,8 @@ def generate_performance_history_report(
     # Trend analysis
     if len(sorted_cycles) >= 2:
         # Calculate period-over-period changes
-        confidence_changes = []
-        suggestion_changes = []
+        confidence_changes: List[float] = []
+        suggestion_changes: List[float] = []
 
         for i in range(1, len(sorted_cycles)):
             prev_cycle = sorted_cycles[i - 1]
@@ -929,10 +964,10 @@ def generate_performance_history_report(
     }
 
     # Generate recommendations based on analysis
-    recommendations = []
+    recommendations: List[Dict[str, Any]] = []
 
     # Confidence-based recommendations
-    avg_conf = report["summary"]["avg_confidence_across_cycles"]
+    avg_conf: float = float(cast(float, report["summary"].get("avg_confidence_across_cycles", 0.0)))
     if avg_conf < 0.6:
         recommendations.append(
             {
@@ -961,9 +996,10 @@ def generate_performance_history_report(
                 }
             )
 
+        suggestions_trend_pct: float = float(cast(float, report["trends"].get("suggestions_trend_pct", 0.0)))
         if (
             report["trends"]["suggestions_trend_direction"] == "increasing"
-            and report["trends"]["suggestions_trend_pct"] > 50
+            and suggestions_trend_pct > 50
         ):
             recommendations.append(
                 {
@@ -985,8 +1021,9 @@ def generate_performance_history_report(
             )
 
     # Latest cycle comparison recommendations
-    if "cycle_comparison" in report:
-        if report["cycle_comparison"]["confidence_comparison"]["assessment"] == "lower":
+    if report.get("cycle_comparison"):
+        comp_data = cast(Dict[str, Any], report["cycle_comparison"])
+        if comp_data["confidence_comparison"]["assessment"] == "lower":
             recommendations.append(
                 {
                     "priority": "high",
@@ -1032,7 +1069,7 @@ def format_report_summary(report: Dict[str, Any]) -> str:
     if "error" in report:
         return f"Error: {report['error']}"
 
-    lines = []
+    lines: List[str] = []
     lines.append("=" * 60)
     lines.append("RERANKER PERFORMANCE HISTORY REPORT")
     lines.append("=" * 60)

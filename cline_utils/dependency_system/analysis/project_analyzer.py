@@ -51,6 +51,9 @@ from cline_utils.dependency_system.utils.visualize_dependencies import (
     generate_mermaid_diagram,
     render_mermaid_to_image,
 )
+from cline_utils.dependency_system.utils.resource_validator import (
+    get_cached_resource_metrics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +67,90 @@ OLD_PROJECT_SYMBOL_MAP_FILENAME = "project_symbol_map_old.json"
 # --- Constants for the AST verified links file ---
 AST_VERIFIED_LINKS_FILENAME = "ast_verified_links.json"
 OLD_AST_VERIFIED_LINKS_FILENAME = "ast_verified_links_old.json"
+
+# Process names spawned by mmdc (Mermaid CLI) that should be cleaned up
+# if the rendering executor crashes mid-flight.
+_RENDER_PROCESS_NAMES = {"mmdc", "node", "chrome", "chromium"}
+
+
+def _cleanup_orphaned_render_processes(parent_pid: int) -> None:
+    """Kill orphaned mmdc/node/chrome processes left by a crashed render batch.
+
+    After a ``ProcessPoolExecutor`` crash the worker processes may terminate,
+    but the Node.js / headless-Chrome subprocesses they spawned can survive as
+    orphans.  These orphans hold file-handles and, on Windows, can keep the
+    CUDA driver locked — making subsequent ``torch.cuda`` calls hang until
+    reboot.
+
+    This function walks the process tree rooted at *parent_pid*, finds any
+    child whose name matches ``_RENDER_PROCESS_NAMES``, and terminates it.
+    A ``taskkill`` fallback is used when ``psutil`` is unavailable.
+    """
+    killed = 0
+
+    # --- Primary path: psutil ---
+    try:
+        import psutil
+
+        try:
+            parent = psutil.Process(parent_pid)
+        except psutil.NoSuchProcess:
+            logger.debug(
+                "Cleanup: parent PID %d no longer exists, skipping.", parent_pid
+            )
+            return
+
+        children = parent.children(recursive=True)
+        for child in children:
+            try:
+                if child.name().lower().split(".")[0] in _RENDER_PROCESS_NAMES:
+                    logger.warning(
+                        "Killing orphaned render process: pid=%d name=%s",
+                        child.pid,
+                        child.name(),
+                    )
+                    child.kill()
+                    killed += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        if killed:
+            # Give killed processes a moment to release resources
+            psutil.wait_procs(
+                [c for c in children if not c.is_running()], timeout=5
+            )
+            logger.info("Cleaned up %d orphaned render process(es).", killed)
+        else:
+            logger.debug("Cleanup: no orphaned render processes found.")
+
+        return
+    except ImportError:
+        pass  # Fall through to subprocess fallback
+
+    # --- Fallback: taskkill (Windows) ---
+    import platform
+    import subprocess as _sp
+
+    if platform.system() == "Windows":
+        for name in _RENDER_PROCESS_NAMES:
+            try:
+                _sp.run(
+                    ["taskkill", "/F", "/IM", f"{name}.exe", "/T"],
+                    capture_output=True,
+                    timeout=10,
+                )
+                killed += 1
+            except Exception:
+                pass
+        if killed:
+            logger.info(
+                "Cleaned up render processes via taskkill (fallback)."
+            )
+    else:
+        logger.warning(
+            "Cannot clean up orphaned render processes: "
+            "psutil is unavailable and OS is not Windows."
+        )
 
 
 # Caching for analyze_project (Consider if key_func needs more refinement)
@@ -88,8 +175,8 @@ def analyze_project(
         Dictionary containing project-wide analysis results and status
     """
     # --- Initial Setup ---
-    embedding_manager.RERANKED_FILES = set()
-    embedding_manager.RERANKING_COUNTER = 0
+    embedding_manager.reranked_files = set()
+    embedding_manager.reranking_counter = 0
     config = ConfigManager()
     project_root = get_project_root()
     logger.info(f"Starting project analysis in directory: {project_root}")
@@ -197,7 +284,7 @@ def analyze_project(
         if newly_generated_keys:
             logger.info(f"Assigned {len(newly_generated_keys)} new keys.")
 
-        embedding_manager.TOTAL_FILES_TO_RERANK = len(
+        embedding_manager.total_files_to_rerank = len(
             [ki for ki in path_to_key_info.values() if not ki.is_directory]
         )
     except key_manager.KeyGenerationError as kge:
@@ -1095,6 +1182,7 @@ def analyze_project(
     else:
         logger.info("No tracker updates to commit")
 
+
     # --- Template Generation ---
     logger.info("Starting template generation (e.g., final review checklist)...")
     try:
@@ -1130,6 +1218,21 @@ def analyze_project(
         analysis_results[
             "message"
         ] += f" Critical error during template generation: {template_err}."
+
+    # --- ADDED: Clear Reranker and AST Caches to Free Memory Before Visualisation ---
+    # Performance tracking in generate_final_review_checklist may have loaded history caches.
+    # We explicitly unload them here to maximize memory for the diagram generation phase.
+    try:
+        cache_manager.get_cache("reranker_history").data.clear()
+        cache_manager.get_cache("ast_verified_links").data.clear()
+        logger.debug(
+            "Cleared 'reranker_history' and 'ast_verified_links' caches to free memory for diagram generation."
+        )
+    except Exception as e_clear_cache:
+        logger.warning(
+            f"Failed to clear reranker/ast caches before visualization: {e_clear_cache}"
+        )
+    # --- END OF ADDED BLOCK ---
 
     # --- Auto Diagram Generation ---
     auto_generate_enabled = config.config.get("visualization", {}).get(
@@ -1324,28 +1427,79 @@ def analyze_project(
                             module_key_str
                         ] = "nodata_or_failed"
 
-            # --- Execute Parallel Rendering ---
+            # --- Execute Chunked Parallel Rendering ---
             if diagram_render_tasks:
-                logger.info(
-                    f"Rendering {len(diagram_render_tasks)} diagrams in parallel using ProcessPoolExecutor..."
-                )
-                # Use ProcessPoolExecutor for better isolation on Windows
-                # to avoid file locking conflicts when multiple mmdc processes
-                # try to write SVG files concurrently
-                max_workers = min(os.cpu_count() or 4, len(diagram_render_tasks))
-                with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {
-                        executor.submit(render_mermaid_to_image, code, path): path
-                        for code, path in diagram_render_tasks
-                    }
+                # Compute safe chunk size from cached resource metrics.
+                # Each mmdc subprocess spawns Node.js + headless Chrome,
+                # consuming ~200-350 MB each.  Submitting them all at once
+                # can exhaust system memory in large projects.
+                resource_metrics = get_cached_resource_metrics()
+                if resource_metrics:
+                    available_mb = resource_metrics.get("memory", {}).get(
+                        "available_mb", 700
+                    )
+                    cpu_cores = resource_metrics.get("cpu", {}).get(
+                        "logical_cores",
+                        resource_metrics.get("cpu", {}).get("cores", 4),
+                    )
+                else:
+                    available_mb = 700  # Conservative fallback
+                    cpu_cores = os.cpu_count() or 4
 
-                    for future in as_completed(futures):
-                        path = futures[future]
-                        try:
-                            future.result()
-                            # logger.debug(f"Successfully rendered: {path}") # Optional logging
-                        except Exception as e:
-                            logger.error(f"Failed to render diagram {path}: {e}")
+                mem_per_render_mb = 350
+                max_concurrent = max(
+                    1, min(int(available_mb // mem_per_render_mb), cpu_cores)
+                )
+                chunk_size = max(1, min(max_concurrent, len(diagram_render_tasks)))
+
+                # Slice the task list into chunks
+                chunks = [
+                    diagram_render_tasks[i : i + chunk_size]
+                    for i in range(0, len(diagram_render_tasks), chunk_size)
+                ]
+                logger.info(
+                    f"Rendering {len(diagram_render_tasks)} diagrams in "
+                    f"{len(chunks)} chunk(s) (chunk_size={chunk_size}, "
+                    f"available_mb={available_mb:.0f}, cpu_cores={cpu_cores})..."
+                )
+
+                # Track the current process's PID so we can find orphaned
+                # children if a crash leaves mmdc/node processes running.
+                # Orphaned render processes can hold GPU/CUDA driver locks,
+                # making torch.cuda hang until reboot.
+                parent_pid = os.getpid()
+                render_crashed = False
+
+                try:
+                    for chunk_idx, chunk in enumerate(chunks):
+                        logger.debug(
+                            f"Rendering chunk {chunk_idx + 1}/{len(chunks)} "
+                            f"({len(chunk)} diagram(s))..."
+                        )
+                        with ProcessPoolExecutor(max_workers=len(chunk)) as executor:
+                            futures = {
+                                executor.submit(
+                                    render_mermaid_to_image, code, path
+                                ): path
+                                for code, path in chunk
+                            }
+                            for future in as_completed(futures):
+                                path = futures[future]
+                                try:
+                                    future.result()
+                                except Exception as e:
+                                    logger.error(
+                                        f"Failed to render diagram {path}: {e}"
+                                    )
+                except Exception as render_err:
+                    render_crashed = True
+                    logger.error(
+                        f"Render executor crashed: {render_err}", exc_info=True
+                    )
+                    raise
+                finally:
+                    if render_crashed:
+                        _cleanup_orphaned_render_processes(parent_pid)
 
         except Exception as viz_err:
             logger.error(

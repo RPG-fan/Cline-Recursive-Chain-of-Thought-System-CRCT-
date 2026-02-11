@@ -3,6 +3,8 @@ System resource validation utilities for project analyzer.
 Validates available memory, disk space, VRAM, and other resources before analysis.
 """
 
+from __future__ import annotations
+
 import datetime
 import json
 import logging
@@ -24,7 +26,7 @@ from ..utils.path_utils import normalize_path
 try:
     import torch
 
-    TORCH_AVAILABLE = True
+    TORCH_AVAILABLE: bool = True
 except ImportError:
     TORCH_AVAILABLE = False
     torch = None
@@ -33,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 # Cache configuration
 VALIDATION_CACHE_FILE = "validation_cache.json"
+CACHE_VERSION = "1.1"  # Bumped: now includes GPU/VRAM metrics
 DEFAULT_CACHE_TTL_SECONDS = 604800  # 7 days (hardware resources rarely change)
 
 
@@ -67,7 +70,7 @@ def _save_validation_cache(project_path: str, results: Dict[str, Any]) -> None:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
 
         cache_data = {
-            "version": "1.0",
+            "version": CACHE_VERSION,
             "last_validated": datetime.datetime.now().isoformat(),
             "project_path": normalize_path(project_path),
             "results": results,
@@ -89,7 +92,7 @@ def _is_cache_valid(
     """Check if cached validation is still valid."""
     try:
         # Check version
-        if cache_data.get("version") != "1.0":
+        if cache_data.get("version") != CACHE_VERSION:
             return False
 
         # Check project path
@@ -123,6 +126,21 @@ def _is_cache_valid(
             logger.debug("Cache invalid: previous validation had warnings/errors")
             return False
 
+        # Check for invalid/zero metrics that suggest a failed validation
+        resource_check = results.get("resource_check", {})
+
+        # Memory should never be zero
+        mem_check = resource_check.get("memory", {})
+        if mem_check.get("available_mb", 0) <= 0:
+            logger.debug("Cache invalid: memory metrics are zero/missing")
+            return False
+
+        # GPU: if available, VRAM should be > 0
+        gpu_check = resource_check.get("gpu", {})
+        if gpu_check.get("gpu_available") and gpu_check.get("vram_total_mb", 0) <= 0:
+            logger.debug("Cache invalid: GPU marked available but VRAM is zero")
+            return False
+
         return True
     except Exception as e:
         logger.warning(f"Error checking cache validity: {e}")
@@ -150,7 +168,7 @@ class ResourceValidator:
         """
         super().__init__()
         self.strict_mode = strict_mode
-        self.validation_results = {}
+        self.validation_results: Dict[str, Any] = {}
 
     def validate_system_resources(
         self, project_path: str, estimated_files: int = 0
@@ -176,107 +194,124 @@ class ResourceValidator:
                 self.validation_results = cached_results
                 return cached_results
 
-        results = {
-            "valid": True,
-            "warnings": [],
-            "errors": [],
-            "recommendations": [],
-            "resource_check": {
-                "memory": {},
-                "disk_space": {},
-                "cpu": {},
-                "temporary_space": {},
-            },
+        # Use separate typed containers to avoid mixed-type dict inference issues
+        warnings_list: list[str] = []
+        errors_list: list[str] = []
+        resource_check: Dict[str, Dict[str, Any]] = {
+            "memory": {},
+            "disk_space": {},
+            "cpu": {},
+            "gpu": {},
+            "temporary_space": {},
         }
+        is_valid = True
 
         try:
             # Memory validation
             memory_check = self._validate_memory()
-            results["resource_check"]["memory"] = memory_check
+            resource_check["memory"] = memory_check
 
             if not memory_check["sufficient"]:
-                results["valid"] = False
+                is_valid = False
                 if memory_check["critical"]:
-                    results["errors"].append(
+                    errors_list.append(
                         f"Insufficient memory: {memory_check['available_mb']} MB available, {memory_check['required_mb']} MB required"
                     )
                 else:
-                    results["warnings"].append(
+                    warnings_list.append(
                         f"Low memory: {memory_check['available_mb']} MB available, {memory_check['required_mb']} MB recommended"
                     )
 
             # Disk space validation
             disk_check = self._validate_disk_space(project_path)
-            results["resource_check"]["disk_space"] = disk_check
+            resource_check["disk_space"] = disk_check
 
             if not disk_check["sufficient"]:
-                results["valid"] = False
-                results["errors"].append(
+                is_valid = False
+                errors_list.append(
                     f"Insufficient disk space: {disk_check['free_space_mb']} MB free, {disk_check['required_mb']} MB required"
                 )
 
             # Temporary space validation
             temp_check = self._validate_temporary_space()
-            results["resource_check"]["temporary_space"] = temp_check
+            resource_check["temporary_space"] = temp_check
 
             if not temp_check["sufficient"]:
-                results["valid"] = False
-                results["errors"].append(
+                is_valid = False
+                errors_list.append(
                     f"Insufficient temporary space: {temp_check['free_space_mb']} MB free, {temp_check['required_mb']} MB required"
                 )
 
             # CPU validation
             cpu_check = self._validate_cpu()
-            results["resource_check"]["cpu"] = cpu_check
+            resource_check["cpu"] = cpu_check
 
             if not cpu_check["sufficient"]:
                 warning_msg = f"Limited CPU cores: {cpu_check['cores']} cores available, {cpu_check['recommended_cores']} recommended"
                 if self.strict_mode:
-                    results["valid"] = False
-                    results["errors"].append(warning_msg)
+                    is_valid = False
+                    errors_list.append(warning_msg)
                 else:
-                    results["warnings"].append(warning_msg)
+                    warnings_list.append(warning_msg)
+
+            # GPU/VRAM validation
+            gpu_check = self._validate_gpu()
+            resource_check["gpu"] = gpu_check
 
             # Project-specific validation
             project_check = self._validate_project_specific(
                 project_path, estimated_files
             )
-            results["resource_check"]["project"] = project_check
+            resource_check["project"] = project_check
 
             if not project_check["sufficient"]:
-                results["valid"] = False
-                results["errors"].append(
+                is_valid = False
+                errors_list.append(
                     f"Project validation failed: {project_check['reason']}"
                 )
 
+            # Assemble final results dict
+            results: Dict[str, Any] = {
+                "valid": is_valid,
+                "warnings": warnings_list,
+                "errors": errors_list,
+                "resource_check": resource_check,
+            }
+
             # Generate recommendations
-            recommendations = self._generate_recommendations(results)
+            recommendations: list[str] = self._generate_recommendations(results)
             results["recommendations"] = recommendations
 
             # Summary
-            if results["valid"] and not results["warnings"]:
+            if is_valid and not warnings_list:
                 logger.info("System resource validation passed successfully")
-            elif results["valid"] and results["warnings"]:
+            elif is_valid and warnings_list:
                 logger.warning(
-                    f"System resource validation passed with {len(results['warnings'])} warnings"
+                    f"System resource validation passed with {len(warnings_list)} warnings"
                 )
             else:
                 logger.error(
-                    f"System resource validation failed with {len(results['errors'])} errors"
+                    f"System resource validation failed with {len(errors_list)} errors"
                 )
 
             self.validation_results = results
 
             # Cache successful validation results
-            if results.get("valid") and not results.get("errors"):
+            if is_valid and not errors_list:
                 _save_validation_cache(project_path, results)
 
             return results
 
         except Exception as e:
             logger.error(f"Resource validation failed: {e}")
-            results["valid"] = False
-            results["errors"].append(f"Validation process error: {e}")
+            results_err: Dict[str, Any] = {
+                "valid": False,
+                "warnings": warnings_list,
+                "errors": errors_list + [f"Validation process error: {e}"],
+                "resource_check": resource_check,
+                "recommendations": [],
+            }
+            self.validation_results = results_err
             raise log_and_reraise(logger, e, "resource_validation")
 
     def _validate_memory(self) -> Dict[str, Any]:
@@ -417,7 +452,7 @@ class ResourceValidator:
             if not project_dir.exists():
                 project_dir = project_dir.parent
 
-            total, used, free = shutil.disk_usage(project_dir)
+            total, _used, free = shutil.disk_usage(project_dir)
             free_mb = free / (1024 * 1024)
 
             # Estimate required space (files + temp space + cache)
@@ -455,7 +490,7 @@ class ResourceValidator:
         try:
             # Check system temp directory
             temp_dir = Path(tempfile.gettempdir())
-            total, used, free = shutil.disk_usage(temp_dir)
+            _total, _used, free = shutil.disk_usage(temp_dir)
             free_mb = free / (1024 * 1024)
 
             required_temp_mb = max(self.MIN_FREE_SPACE_MB, 100)  # 100MB minimum
@@ -489,12 +524,12 @@ class ResourceValidator:
         try:
             import psutil
 
-            cores = psutil.cpu_count(logical=False)  # Physical cores
-            logical_cores = psutil.cpu_count(logical=True)  # Logical processors
+            cores: int = psutil.cpu_count(logical=False) or 1  # Physical cores
+            logical_cores: int = psutil.cpu_count(logical=True) or 1  # Logical processors
 
             recommended_cores = 2  # Minimum recommended for efficient analysis
 
-            sufficient = cores >= 1 and logical_cores >= 2
+            sufficient: bool = cores >= 1 and logical_cores >= 2
 
             # Consider CPU usage
             current_usage = psutil.cpu_percent(interval=1)
@@ -525,6 +560,67 @@ class ResourceValidator:
                 "high_usage": False,
                 "fallback": True,
             }
+
+    def _validate_gpu(self) -> Dict[str, Any]:
+        """Validate GPU/VRAM availability and collect hardware details."""
+        check_result: Dict[str, Any] = {
+            "gpu_available": False,
+            "gpu_name": None,
+            "gpu_count": 0,
+            "vram_total_mb": 0.0,
+            "vram_available_mb": 0.0,
+            "vram_used_mb": 0.0,
+            "driver_version": None,
+            "cuda_version": None,
+        }
+        if not TORCH_AVAILABLE or torch is None:
+            logger.debug("GPU validation skipped: torch not available")
+            return check_result
+
+        try:
+            if not torch.cuda.is_available():
+                logger.debug("GPU validation: CUDA not available")
+                return check_result
+
+            gpu_count = torch.cuda.device_count()
+            check_result["gpu_available"] = gpu_count > 0
+            check_result["gpu_count"] = gpu_count
+
+            if gpu_count > 0:
+                props = torch.cuda.get_device_properties(0)
+                check_result["gpu_name"] = props.name
+                total_bytes = props.total_memory
+                check_result["vram_total_mb"] = round(total_bytes / (1024 * 1024), 2)
+
+                try:
+                    torch.cuda.synchronize()
+                    free_bytes, _ = torch.cuda.mem_get_info(0)
+                    check_result["vram_available_mb"] = round(
+                        free_bytes / (1024 * 1024), 2
+                    )
+                    check_result["vram_used_mb"] = round(
+                        (total_bytes - free_bytes) / (1024 * 1024), 2
+                    )
+                except Exception as e_mem:
+                    logger.debug(f"Could not query live VRAM usage: {e_mem}")
+
+                # Driver / CUDA version (best-effort)
+                try:
+                    cuda_ver = torch.version.cuda
+                    check_result["cuda_version"] = cuda_ver
+                except Exception:
+                    pass
+
+            logger.debug(
+                f"GPU validation: {check_result['gpu_name']} "
+                f"({check_result['vram_total_mb']:.0f} MB total, "
+                f"{check_result['vram_available_mb']:.0f} MB free)"
+            )
+        except Exception as e:
+            logger.warning(f"GPU validation failed: {e}")
+            check_result["gpu_available"] = False
+
+        return check_result
 
     def _validate_project_specific(
         self, project_path: str, estimated_files: int
@@ -620,7 +716,7 @@ class ResourceValidator:
 
         return max_depth_found
 
-    def _generate_recommendations(self, validation_results: Dict[str, Any]) -> list:
+    def _generate_recommendations(self, validation_results: Dict[str, Any]) -> list[str]:
         """Generate recommendations based on validation results."""
         recommendations = []
 
@@ -836,7 +932,7 @@ class VRAMResourceManager:
 
     def _get_physical_vram_gb(self) -> float:
         """Get total physical VRAM in GB."""
-        if not TORCH_AVAILABLE or not torch.cuda.is_available():
+        if not TORCH_AVAILABLE or torch is None or not torch.cuda.is_available():
             return 0.0
         try:
             _, total_memory = torch.cuda.mem_get_info(0)
@@ -847,7 +943,7 @@ class VRAMResourceManager:
 
     def _get_available_vram_gb(self) -> float:
         """Get actually free VRAM in GB (not accounting for reservations)."""
-        if not TORCH_AVAILABLE or not torch.cuda.is_available():
+        if not TORCH_AVAILABLE or torch is None or not torch.cuda.is_available():
             return 0.0
         try:
             torch.cuda.synchronize()
@@ -874,7 +970,20 @@ class VRAMResourceManager:
     def get_available_for_allocation(self) -> float:
         """
         Get VRAM available for new allocations.
-        Accounts for: active allocations + system reservation
+        Accounts for: system reservation + pending (not-yet-materialized) allocations.
+
+        mem_get_info() returns physically free VRAM, which already reflects
+        any memory consumed by active tensors. We subtract:
+        - reserved: system stability buffer
+        - _total_allocated_gb: virtual hold for allocations that have been
+          granted but whose tensors may not yet exist on-device (the window
+          between grant and actual torch tensor creation).
+
+        This CAN conservatively double-count when tensors are on-device
+        (mem_get_info already reflects usage AND _total_allocated_gb holds it),
+        but conservative is safe — yields slightly smaller batches vs OOM.
+        When allocations are released and tensors deleted, both free_vram
+        rises AND _total_allocated_gb drops, keeping the math consistent.
 
         Returns:
             Available VRAM in GB for new allocations
@@ -883,7 +992,10 @@ class VRAMResourceManager:
             free_vram = self._get_available_vram_gb()
             reserved = self.get_reserved_vram_gb()
 
-            # Available = free - reserved - already_allocated
+            # Subtract both reserved buffer AND pending allocations.
+            # Pending allocations are critical for concurrent safety:
+            # without them, multiple threads all see full VRAM and
+            # over-commit simultaneously.
             available = free_vram - reserved - self._total_allocated_gb
             return max(0.0, available)
 
@@ -901,10 +1013,10 @@ class VRAMResourceManager:
             try:
                 # Use torch directly to measure VRAM without importing from embedding_manager
                 # This avoids a circular import cycle
-                if TORCH_AVAILABLE and torch.cuda.is_available():
+                if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available():
                     torch.cuda.synchronize()
                     # Get actual memory usage - this will be the model's footprint if loaded
-                    model_memory_gb = torch.cuda.memory_allocated() / (1024**3)
+                    model_memory_gb: float = torch.cuda.memory_allocated() / (1024**3)
                     if model_memory_gb > 0.1:  # If we have valid measurement
                         logger.debug(
                             f"Using actual measured footprint for {model_name}: {model_memory_gb:.2f}GB"
@@ -1398,3 +1510,24 @@ def get_vram_manager() -> VRAMResourceManager:
 def get_batch_scheduler() -> VRAMBatchScheduler:
     """Get the global VRAM batch scheduler instance."""
     return VRAMBatchScheduler()
+
+
+def get_cached_resource_metrics() -> Optional[Dict[str, Any]]:
+    """
+    Retrieve the cached resource_check metrics from validation_cache.json.
+
+    Returns the 'resource_check' dict (memory, cpu, gpu, disk_space, etc.)
+    if the cache is present and its version matches, else None.
+    This is a lightweight read-only helper — it does NOT re-run validation.
+    """
+    cache_data = _load_validation_cache()
+    if cache_data is None:
+        return None
+    if cache_data.get("version") != CACHE_VERSION:
+        logger.debug(
+            f"Validation cache version mismatch "
+            f"(found {cache_data.get('version')!r}, expected {CACHE_VERSION!r}). "
+            f"Returning None — cache will be refreshed on next validation run."
+        )
+        return None
+    return cache_data.get("results", {}).get("resource_check")

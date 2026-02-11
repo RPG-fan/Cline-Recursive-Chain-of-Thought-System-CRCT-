@@ -126,6 +126,40 @@ def _create_mermaid_config_file(directory: str) -> str:
     return config_path
 
 
+def _create_puppeteer_config_file(directory: str) -> str:
+    """
+    Creates a puppeteer config file to increase the protocolTimeout.
+
+    Args:
+        directory: The directory where the config file should be saved.
+
+    Returns:
+        The full path to the created config file.
+    """
+    config_path = os.path.join(directory, "puppeteer_config.json")
+    # Increased limits to handle large diagrams
+    config_data = {
+        "protocolTimeout": 600000,
+        "args": [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+        ],
+    }
+
+    # Only write the file if it doesn't already exist to avoid unnecessary disk I/O.
+    if not os.path.exists(config_path):
+        try:
+            with open(config_path, "w") as f:
+                json.dump(config_data, f, indent=2)
+            logger.debug(f"Created Puppeteer config file at: {config_path}")
+        except IOError as e:
+            logger.error(f"Could not write Puppeteer config file: {e}")
+            return ""
+    return config_path
+
+
 def render_mermaid_to_image(mermaid_syntax: str, output_file_path: str):
     """
     Renders a Mermaid syntax string to an image file using the mermaid-cli.
@@ -142,6 +176,8 @@ def render_mermaid_to_image(mermaid_syntax: str, output_file_path: str):
         logger.debug(f"Created directory for dependency diagrams: {output_dir}")
 
     mermaid_config_path = _create_mermaid_config_file(output_dir)
+    # Ensure puppeteer config exists
+    _create_puppeteer_config_file(output_dir)
 
     mmdc_executable = _find_mmdc_executable()
 
@@ -153,13 +189,19 @@ def render_mermaid_to_image(mermaid_syntax: str, output_file_path: str):
         os.path.normpath(output_file_path),
         "--backgroundColor",
         "transparent",
-        # '--width', '7680', # Use a large canvas for layout
-        # '--scale', '3'      # Render at 2x pixel density for crisp text
     ]
     # Add config file arguments if they were created successfully
     if mermaid_config_path:
         command.extend(["--configFile", os.path.normpath(mermaid_config_path)])
 
+    # Add puppeteer config for protocolTimeout (prevents timeouts on large diagrams)
+    puppeteer_config_path = os.path.join(output_dir, "puppeteer_config.json")
+    if os.path.isfile(puppeteer_config_path):
+        command.extend(["--puppeteerConfigFile", os.path.normpath(puppeteer_config_path)])
+        logger.debug(f"Using Puppeteer config: {puppeteer_config_path}")
+
+    # 15-minute subprocess timeout as a safety net beyond Puppeteer's protocolTimeout
+    subprocess_timeout_seconds = 900
     try:
         process = subprocess.run(
             command,
@@ -167,6 +209,7 @@ def render_mermaid_to_image(mermaid_syntax: str, output_file_path: str):
             capture_output=True,
             text=False,
             check=True,
+            timeout=subprocess_timeout_seconds,
         )
         logger.debug(
             f"Successfully rendered high-resolution diagram to {output_file_path}"
@@ -183,6 +226,11 @@ def render_mermaid_to_image(mermaid_syntax: str, output_file_path: str):
             "Please ensure that Node.js and @mermaid-js/mermaid-cli are installed and in your PATH."
         )
         logger.error("Installation: npm install -g @mermaid-js/mermaid-cli")
+    except subprocess.TimeoutExpired:
+        logger.error(
+            f"Mermaid rendering timed out after {subprocess_timeout_seconds}s for '{output_file_path}'. "
+            f"The diagram may be too large. Consider splitting into smaller module diagrams."
+        )
     except subprocess.CalledProcessError as e:
         logger.warning(
             f"Error during Mermaid rendering using '{mmdc_executable}' with default config: {e}"
@@ -191,9 +239,12 @@ def render_mermaid_to_image(mermaid_syntax: str, output_file_path: str):
         logger.warning(f"Mermaid CLI Error Output:\n{error_output}")
 
         if "Edge limit exceeded" in error_output:
-            # CORRECTED BUG: Use the correct variable name 'mermaid_config_path'
             logger.error(
                 f"HINT: The error is due to too many edges. The script attempted to use a config file ({mermaid_config_path}) to increase the limit. Check that this file is correct and accessible."
+            )
+        elif "protocolTimeout" in error_output or "timed out" in error_output.lower():
+            logger.error(
+                f"HINT: Puppeteer protocol timeout. Check that '{puppeteer_config_path}' exists and has a sufficient 'protocolTimeout' value."
             )
     except Exception as e:
         logger.error(f"An unexpected error occurred during rendering: {e}")

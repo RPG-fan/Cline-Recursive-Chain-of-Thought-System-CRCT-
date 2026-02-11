@@ -45,10 +45,10 @@ logger = logging.getLogger(__name__)
 
 # Default model configuration
 DEFAULT_MODEL_NAME = "sentence-transformers/all-mpnet-base-v2"
-MODEL_INSTANCE: Optional[Any] = None  # Can be Llama or SentenceTransformer
-SELECTED_DEVICE: Optional[str] = None
-SELECTED_MODEL_CONFIG: Optional[Dict[str, Any]] = None
-TOKENIZER_INSTANCE: Optional[Any] = None
+_model_instance: Optional[Any] = None  # Can be Llama or SentenceTransformer
+_selected_device_cache: Optional[str] = None
+_selected_model_config: Optional[Dict[str, Any]] = None
+_tokenizer_instance: Optional[Any] = None
 
 # Locks
 MODEL_LOCK = threading.Lock()
@@ -92,7 +92,7 @@ def _get_available_vram() -> float:
         torch.cuda.synchronize()
         # Use mem_get_info() which returns (free_memory, total_memory) directly
         # This is more accurate than manual calculation
-        free_memory, total_memory = torch.cuda.mem_get_info(0)
+        free_memory, _total_memory = torch.cuda.mem_get_info(0)
         return free_memory / (1024**3)  # Convert to GB
     except Exception as e:
         logger.warning(f"Failed to get VRAM info: {e}")
@@ -157,8 +157,8 @@ def _get_best_device() -> str:
 
 def _select_device() -> str:
     """Selects device based on config override or automatic detection."""
-    global SELECTED_DEVICE
-    if SELECTED_DEVICE is None:
+    global _selected_device_cache
+    if _selected_device_cache is None:
         config_manager = ConfigManager()
         config_device = (
             config_manager.config.get("compute", {})
@@ -170,7 +170,7 @@ def _select_device() -> str:
                 logger.warning(
                     "Config specified 'cuda', but not available. Auto-detecting."
                 )
-                SELECTED_DEVICE = _get_best_device()
+                _selected_device_cache = _get_best_device()
             elif config_device == "mps" and not (
                 sys.platform == "darwin"
                 and hasattr(torch.backends, "mps")
@@ -180,17 +180,17 @@ def _select_device() -> str:
                 logger.warning(
                     "Config specified 'mps', but not available. Auto-detecting."
                 )
-                SELECTED_DEVICE = _get_best_device()
+                _selected_device_cache = _get_best_device()
             else:
                 logger.debug(f"Using device specified in config: {config_device}")
-                SELECTED_DEVICE = config_device
+                _selected_device_cache = config_device
         elif config_device == "auto":
             logger.debug("Auto-detecting device.")
-            SELECTED_DEVICE = _get_best_device()
+            _selected_device_cache = _get_best_device()
         else:
             logger.warning(f"Invalid device '{config_device}'. Auto-detecting.")
-            SELECTED_DEVICE = _get_best_device()
-    return SELECTED_DEVICE or "cpu"
+            _selected_device_cache = _get_best_device()
+    return _selected_device_cache or "cpu"
 
 
 def _verify_qwen3_model(model_path: str) -> bool:
@@ -310,9 +310,9 @@ def _download_qwen3_model(model_path: str) -> bool:
 
 def _select_best_model() -> Dict[str, Any]:
     """Select the best embedding model based on hardware and config."""
-    global SELECTED_MODEL_CONFIG
-    if SELECTED_MODEL_CONFIG is not None:
-        return SELECTED_MODEL_CONFIG
+    global _selected_model_config
+    if _selected_model_config is not None:
+        return _selected_model_config
 
     config_manager = ConfigManager()
     model_selection = config_manager.get_embedding_setting("model_selection", "auto")
@@ -331,11 +331,11 @@ def _select_best_model() -> Dict[str, Any]:
         ):
             _download_qwen3_model(model_config["path"])
 
-        SELECTED_MODEL_CONFIG = model_config
+        _selected_model_config = model_config
         return model_config
     elif model_selection == "mpnet":
-        SELECTED_MODEL_CONFIG = MODEL_CONFIGS["mpnet"].copy()
-        return SELECTED_MODEL_CONFIG
+        _selected_model_config = MODEL_CONFIGS["mpnet"].copy()
+        return _selected_model_config
 
     # Auto-detect
     device = _select_device()
@@ -345,8 +345,8 @@ def _select_best_model() -> Dict[str, Any]:
     qwen_config = MODEL_CONFIGS["qwen3-4b"].copy()
     qwen_config["path"] = config_manager.get_embedding_setting("qwen3_model_path")
 
-    mem_req = (
-        qwen_config["min_vram_gb"] if device == "cuda" else qwen_config["min_ram_gb"]
+    mem_req: float = float(
+        (qwen_config["min_vram_gb"] if device == "cuda" else qwen_config["min_ram_gb"]) or 0
     )
 
     if available_mem >= mem_req:
@@ -359,27 +359,27 @@ def _select_best_model() -> Dict[str, Any]:
         if os.path.exists(qwen_config["path"]) and _verify_qwen3_model(
             qwen_config["path"]
         ):
-            SELECTED_MODEL_CONFIG = qwen_config
+            _selected_model_config = qwen_config
             return qwen_config
         elif _download_qwen3_model(qwen_config["path"]):
-            SELECTED_MODEL_CONFIG = qwen_config
+            _selected_model_config = qwen_config
             return qwen_config
 
-    SELECTED_MODEL_CONFIG = MODEL_CONFIGS["mpnet"].copy()
-    return SELECTED_MODEL_CONFIG
+    _selected_model_config = MODEL_CONFIGS["mpnet"].copy()
+    return _selected_model_config
 
 
 def _get_tokenizer():
     """Lazily loads a tokenizer for token counting."""
-    global TOKENIZER_INSTANCE, RERANKER_TOKENIZER
+    global _tokenizer_instance, _reranker_tokenizer
 
-    if TOKENIZER_INSTANCE is not None:
-        return TOKENIZER_INSTANCE
+    if _tokenizer_instance is not None:
+        return _tokenizer_instance
 
     # 1. Try reusing Reranker tokenizer if loaded
-    if RERANKER_TOKENIZER is not None:
-        TOKENIZER_INSTANCE = RERANKER_TOKENIZER
-        return TOKENIZER_INSTANCE
+    if _reranker_tokenizer is not None:
+        _tokenizer_instance = _reranker_tokenizer
+        return _tokenizer_instance
 
     # 2. Try loading from local reranker path
     try:
@@ -390,10 +390,10 @@ def _get_tokenizer():
         ):
             from transformers import AutoTokenizer
 
-            TOKENIZER_INSTANCE = AutoTokenizer.from_pretrained(
+            _tokenizer_instance = AutoTokenizer.from_pretrained(
                 local_model_path, trust_remote_code=True
             )
-            return TOKENIZER_INSTANCE
+            return _tokenizer_instance
     except Exception as e:
         logger.warning(f"Failed to load tokenizer from local path: {e}")
 
@@ -414,13 +414,13 @@ def _count_tokens(text: str, tokenizer: Any = None) -> int:
 
 def _load_model(n_ctx: int = 8192):
     """Loads the embedding model based on hardware capabilities."""
-    global MODEL_INSTANCE, SELECTED_MODEL_CONFIG
+    global _model_instance, _selected_model_config
 
-    if MODEL_INSTANCE is not None:
+    if _model_instance is not None:
         # Check if we need to reload due to context size
-        if SELECTED_MODEL_CONFIG and SELECTED_MODEL_CONFIG["type"] == "gguf":
+        if _selected_model_config and _selected_model_config["type"] == "gguf":
             try:
-                current_n_ctx = MODEL_INSTANCE.n_ctx()
+                current_n_ctx = _model_instance.n_ctx()
                 if current_n_ctx < n_ctx:
                     logger.debug(
                         f"Reloading model to increase context from {current_n_ctx} to {n_ctx}"
@@ -428,26 +428,26 @@ def _load_model(n_ctx: int = 8192):
                     _unload_model()
                 else:
                     # Existing context is sufficient
-                    return MODEL_INSTANCE
+                    return _model_instance
             except AttributeError:
                 # Fallback if n_ctx() not available
                 pass
         elif (
-            SELECTED_MODEL_CONFIG
-            and SELECTED_MODEL_CONFIG["type"] == "sentence-transformer"
+            _selected_model_config
+            and _selected_model_config["type"] == "sentence-transformer"
         ):
             # Update max_seq_length for SentenceTransformer without reload
-            if hasattr(MODEL_INSTANCE, "max_seq_length"):
-                if MODEL_INSTANCE.max_seq_length < n_ctx:
-                    MODEL_INSTANCE.max_seq_length = n_ctx
-            return MODEL_INSTANCE
+            if hasattr(_model_instance, "max_seq_length"):
+                if _model_instance.max_seq_length < n_ctx:
+                    _model_instance.max_seq_length = n_ctx
+            return _model_instance
 
-    if MODEL_INSTANCE is None:
-        SELECTED_MODEL_CONFIG = _select_best_model()
+    if _model_instance is None:
+        _selected_model_config = _select_best_model()
         device = _select_device()
 
         try:
-            if SELECTED_MODEL_CONFIG["type"] == "gguf":
+            if _selected_model_config["type"] == "gguf":
                 # Load GGUF model with llama-cpp-python
                 if Llama is None or llama_cpp is None:
                     logger.error(
@@ -475,7 +475,7 @@ def _load_model(n_ctx: int = 8192):
                     None, ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p
                 )
 
-                def noop_log_callback(level, text, user_data):
+                def noop_log_callback(level: int, text: bytes, user_data: int) -> None:
                     pass
 
                 # Keep a reference to prevent GC (Critical!)
@@ -484,8 +484,8 @@ def _load_model(n_ctx: int = 8192):
 
                 llama_cpp.llama_log_set(_C_LOG_CALLBACK_REF, ctypes.c_void_p())
 
-                MODEL_INSTANCE = Llama(
-                    model_path=SELECTED_MODEL_CONFIG["path"],
+                _model_instance = Llama(
+                    model_path=_selected_model_config["path"],
                     embedding=True,
                     n_ctx=n_ctx,
                     n_batch=512,
@@ -497,38 +497,38 @@ def _load_model(n_ctx: int = 8192):
                     verbose=False,
                 )
                 logger.debug(
-                    f"Loaded GGUF model: {SELECTED_MODEL_CONFIG['name']} on device: {device}"
+                    f"Loaded GGUF model: {_selected_model_config['name']} on device: {device}"
                 )
 
-            elif SELECTED_MODEL_CONFIG["type"] == "sentence-transformer":
+            elif _selected_model_config["type"] == "sentence-transformer":
                 # Load sentence-transformers model with proper device handling
                 from sentence_transformers import SentenceTransformer
 
                 try:
-                    MODEL_INSTANCE = SentenceTransformer(
-                        SELECTED_MODEL_CONFIG["name"], device=device
+                    _model_instance = SentenceTransformer(
+                        _selected_model_config["name"], device=device
                     )
                 except Exception:
                     # Fallback to CPU if device init fails
-                    MODEL_INSTANCE = SentenceTransformer(
-                        SELECTED_MODEL_CONFIG["name"], device="cpu"
+                    _model_instance = SentenceTransformer(
+                        _selected_model_config["name"], device="cpu"
                     )
                 logger.debug(
-                    f"Loaded sentence transformer: {SELECTED_MODEL_CONFIG['name']}"
+                    f"Loaded sentence transformer: {_selected_model_config['name']}"
                 )
 
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             raise
 
-    return MODEL_INSTANCE
+    return _model_instance
 
 
 def _unload_model():
     """Unloads the embedding model."""
-    global MODEL_INSTANCE
-    if MODEL_INSTANCE is not None:
-        MODEL_INSTANCE = None
+    global _model_instance
+    if _model_instance is not None:
+        _model_instance = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -822,19 +822,25 @@ def preprocess_doc_structure(content: str) -> str:
 
 # --- Reranker Logic ---
 
-RERANKER_MODEL: Optional[Any] = None
-RERANKER_TOKENIZER: Optional[Any] = None
+_reranker_model: Optional[Any] = None
+_reranker_tokenizer: Optional[Any] = None
 
 # Pre-computed tokenizer values to avoid concurrency issues
-RERANKER_FALSE_ID: Optional[int] = None
-RERANKER_TRUE_ID: Optional[int] = None
-RERANKER_PREFIX_TOKENS: Optional[List[int]] = None
-RERANKER_SUFFIX_TOKENS: Optional[List[int]] = None
+reranker_false_id: Optional[int] = None
+reranker_true_id: Optional[int] = None
+_reranker_prefix_tokens: Optional[List[int]] = None
+_reranker_suffix_tokens: Optional[List[int]] = None
 
 # Reranking tracking variables
-RERANKED_FILES: set = set()
-RERANKING_COUNTER: int = 0
-TOTAL_FILES_TO_RERANK: int = 0
+reranked_files: set = set()
+reranking_counter: int = 0
+total_files_to_rerank: int = 0
+
+# Reranker scheduling — serializes the VRAM read → batch plan → allocate
+# critical section so concurrent threads don't all plan against the same
+# stale VRAM snapshot. Forward passes still run concurrently.
+_RERANKER_PLAN_LOCK = threading.Lock()
+MIN_RERANK_BATCH_SIZE = 6  # Don't thrash with items=1; wait for VRAM instead
 
 # Qwen3 Reranker Configuration
 RERANKER_REPO_ID = "ManiKumarAdapala/Qwen3-Reranker-0.6B-Q8_0-Safetensors"
@@ -926,14 +932,14 @@ def _download_reranker_model(model_dir: str) -> bool:
 
 def _load_reranker_model():
     """Lazy loads the reranker model (Singleton)."""
-    global RERANKER_MODEL, RERANKER_TOKENIZER
-    global RERANKER_FALSE_ID, RERANKER_TRUE_ID, RERANKER_PREFIX_TOKENS, RERANKER_SUFFIX_TOKENS
+    global _reranker_model, _reranker_tokenizer
+    global reranker_false_id, reranker_true_id, _reranker_prefix_tokens, _reranker_suffix_tokens
 
     with MODEL_LOCK:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        if RERANKER_MODEL is not None:
-            return RERANKER_TOKENIZER, RERANKER_MODEL
+        if _reranker_model is not None:
+            return _reranker_tokenizer, _reranker_model
 
         try:
             # Use local model path if available, otherwise download
@@ -955,58 +961,58 @@ def _load_reranker_model():
 
             device = _select_device()
 
-            RERANKER_TOKENIZER = AutoTokenizer.from_pretrained(
+            _reranker_tokenizer = AutoTokenizer.from_pretrained(
                 model_name_or_path,
                 trust_remote_code=True,
                 padding_side="left",  # Left padding for generation/classification to align last token
             )
 
             # Pre-compute special tokens and IDs under lock to avoid concurrency issues
-            RERANKER_FALSE_ID = RERANKER_TOKENIZER.convert_tokens_to_ids("no")
-            RERANKER_TRUE_ID = RERANKER_TOKENIZER.convert_tokens_to_ids("yes")
+            reranker_false_id = _reranker_tokenizer.convert_tokens_to_ids("no")
+            reranker_true_id = _reranker_tokenizer.convert_tokens_to_ids("yes")
 
-            if RERANKER_FALSE_ID is None or RERANKER_TRUE_ID is None:
+            if reranker_false_id is None or reranker_true_id is None:
                 logger.error(
-                    f"Could not find 'yes' (id={RERANKER_TRUE_ID}) or 'no' (id={RERANKER_FALSE_ID}) tokens in tokenizer. Model may be corrupted."
+                    f"Could not find 'yes' (id={reranker_true_id}) or 'no' (id={reranker_false_id}) tokens in tokenizer. Model may be corrupted."
                 )
                 raise RuntimeError("Invalid tokenizer state for reranker")
 
             prefix = '<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
             suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
-            RERANKER_PREFIX_TOKENS = RERANKER_TOKENIZER.encode(
+            _reranker_prefix_tokens = _reranker_tokenizer.encode(
                 prefix, add_special_tokens=False
             )
-            RERANKER_SUFFIX_TOKENS = RERANKER_TOKENIZER.encode(
+            _reranker_suffix_tokens = _reranker_tokenizer.encode(
                 suffix, add_special_tokens=False
             )
 
             # Optimizations: Flash Attention 2 and float16 for CUDA
             try:
                 if device == "cuda":
-                    RERANKER_MODEL = AutoModelForCausalLM.from_pretrained(
+                    _reranker_model = AutoModelForCausalLM.from_pretrained(
                         model_name_or_path,  # FIXED: was model_name
                         dtype=torch.float16,  # Use 'dtype' instead of 'torch_dtype'
                         attn_implementation="flash_attention_2",
                         trust_remote_code=True,
                     )
                 else:
-                    RERANKER_MODEL = AutoModelForCausalLM.from_pretrained(
+                    _reranker_model = AutoModelForCausalLM.from_pretrained(
                         model_name_or_path, trust_remote_code=True
                     )
             except Exception as e:
                 logger.warning(
                     f"Optimization failed, falling back to standard load: {e}"
                 )
-                RERANKER_MODEL = AutoModelForCausalLM.from_pretrained(
+                _reranker_model = AutoModelForCausalLM.from_pretrained(
                     model_name_or_path, trust_remote_code=True
                 )
 
                 # Only move non-quantized models manually
-                if not getattr(RERANKER_MODEL, "is_quantized", False):
-                    RERANKER_MODEL.to(device)
+                if not getattr(_reranker_model, "is_quantized", False):
+                    _reranker_model.to(device)
 
-            RERANKER_MODEL.eval()
+            _reranker_model.eval()
 
             # Create a dummy tensor to prime the CUDA context with the expected dtype and device
             if device == "cuda":
@@ -1016,8 +1022,8 @@ def _load_reranker_model():
                 logger.debug("CUDA context primed with dummy tensor.")
 
             # Verify Flash Attention
-            if hasattr(RERANKER_MODEL.config, "_attn_implementation"):
-                attn_impl = RERANKER_MODEL.config._attn_implementation
+            if hasattr(_reranker_model.config, "_attn_implementation"):
+                attn_impl = _reranker_model.config._attn_implementation
                 if attn_impl == "flash_attention_2":
                     logger.info("Flash Attention 2 is active!")
                 else:
@@ -1030,30 +1036,30 @@ def _load_reranker_model():
                 torch.cuda.synchronize()
                 model_memory_gb = torch.cuda.memory_allocated() / (1024**3)
                 logger.info(
-                    f"Loaded Qwen3-Reranker (Q8 quantized) on {RERANKER_MODEL.device}. "
+                    f"Loaded Qwen3-Reranker (Q8 quantized) on {_reranker_model.device}. "
                     f"Model footprint: {model_memory_gb:.2f}GB"
                 )
             else:
-                logger.info(f"Loaded Qwen3-Reranker-0.6B on {RERANKER_MODEL.device}")
+                logger.info(f"Loaded Qwen3-Reranker-0.6B on {_reranker_model.device}")
         except Exception as e:
             logger.error(f"Failed to load reranker: {e}", exc_info=True)
             # Clean up partial load
-            RERANKER_MODEL = None
-            RERANKER_TOKENIZER = None
-            RERANKER_FALSE_ID = None
-            RERANKER_TRUE_ID = None
+            _reranker_model = None
+            _reranker_tokenizer = None
+            reranker_false_id = None
+            reranker_true_id = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             return None, None
 
-    return RERANKER_TOKENIZER, RERANKER_MODEL
+    return _reranker_tokenizer, _reranker_model
 
 
 def unload_reranker_model():
     """Unloads reranker model to free memory."""
-    global RERANKER_MODEL, RERANKER_TOKENIZER
-    RERANKER_MODEL = None
-    RERANKER_TOKENIZER = None
+    global _reranker_model, _reranker_tokenizer
+    _reranker_model = None
+    _reranker_tokenizer = None
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.empty_cache()
@@ -1169,8 +1175,8 @@ def rerank_candidates_with_qwen3(
         return [(i, 1.0) for i in range(len(candidate_texts))][:top_k]
 
     # Use pre-computed values
-    token_false_id = RERANKER_FALSE_ID
-    token_true_id = RERANKER_TRUE_ID
+    token_false_id = reranker_false_id
+    token_true_id = reranker_true_id
 
     if token_false_id is None or token_true_id is None:
         logger.error("Pre-computed token IDs are missing.")
@@ -1238,48 +1244,88 @@ def rerank_candidates_with_qwen3(
             # Wait for VRAM to become available (blocking, no timeout)
             vram_manager.wait_for_available_vram(0.75)
 
-        # CRITICAL: Re-poll available memory before each batch calculation
-        # This ensures we get accurate, real-time values after previous batches free memory
-        if device == "cuda":
-            available_mem = vram_manager.get_available_for_allocation()
-        else:
-            available_mem = _get_available_ram()
+        # ── Serialized batch planning ────────────────────────────────
+        # Acquire the planning lock so that only one thread at a time
+        # reads VRAM, calculates batch size, and submits an allocation
+        # request.  This prevents N threads from all planning against
+        # the same stale GB reading simultaneously.  The lock is
+        # held only during planning (~0.1 ms), NOT during the forward
+        # pass, so compute still runs concurrently.
+        _wait_for_vram_gb: float = 0.0
+        with _RERANKER_PLAN_LOCK:
+            # Re-poll available memory with fresh hardware reading
+            if device == "cuda":
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                available_mem = vram_manager.get_available_for_allocation()
+            else:
+                available_mem = _get_available_ram()
 
-        # Peek at the next item to establish a baseline length
-        # (In a sorted list, this is the shortest in the remaining set)
-        current_item = sorted_items[start_idx]
-        current_len = current_item["length"]
+            # Peek at the next item to establish a baseline length
+            current_item = sorted_items[start_idx]
+            current_len = current_item["length"]
 
-        # Calculate initial batch size based on this length
-        # This gives us a "maximum possible batch size" if all subsequent items were this short.
-        batch_size = _calculate_dynamic_batch_size(available_mem, current_len, device)
+            # Calculate initial batch size based on shortest remaining item
+            batch_size = _calculate_dynamic_batch_size(available_mem, current_len, device)
 
-        # Look ahead to find the actual max length in this tentative batch
-        end_idx = min(start_idx + batch_size, total_candidates)
-        last_item_in_batch = sorted_items[end_idx - 1]
-        max_len_in_batch = last_item_in_batch["length"]
+            # Look ahead to find the actual max length in this tentative batch
+            end_idx = min(start_idx + batch_size, total_candidates)
+            last_item_in_batch = sorted_items[end_idx - 1]
+            max_len_in_batch = last_item_in_batch["length"]
 
-        # Recalculate batch size based on the ACTUAL longest item in the batch
-        real_batch_size = _calculate_dynamic_batch_size(
-            available_mem, max_len_in_batch, device
-        )
+            # Recalculate batch size based on the ACTUAL longest item
+            real_batch_size = _calculate_dynamic_batch_size(
+                available_mem, max_len_in_batch, device
+            )
 
-        # If the real batch size is smaller than our lookahead, we need to shrink
-        if real_batch_size < (end_idx - start_idx):
-            end_idx = min(start_idx + real_batch_size, total_candidates)
-            # Update max length for the new, smaller batch
-            max_len_in_batch = sorted_items[end_idx - 1]["length"]
+            # If the real batch size is smaller than our lookahead, shrink
+            if real_batch_size < (end_idx - start_idx):
+                end_idx = min(start_idx + real_batch_size, total_candidates)
+                max_len_in_batch = sorted_items[end_idx - 1]["length"]
+
+            actual_batch_count = end_idx - start_idx
+            remaining_items = total_candidates - start_idx
+
+            # ── Minimum batch enforcement ────────────────────────────
+            # If batch is too small AND there are enough items remaining,
+            # wait for VRAM instead of thrashing with items=1 batches.
+            if (
+                actual_batch_count < MIN_RERANK_BATCH_SIZE
+                and remaining_items >= MIN_RERANK_BATCH_SIZE
+                and vram_manager is not None
+            ):
+                min_batch_end = min(start_idx + MIN_RERANK_BATCH_SIZE, total_candidates)
+                min_batch_max_len: int = int(sorted_items[min_batch_end - 1]["length"])
+                _wait_for_vram_gb = float(
+                    MIN_RERANK_BATCH_SIZE * (175 + (min_batch_max_len / 1000.0) * 80)
+                ) / 1024.0
+                # logger.debug(
+                #     f"Batch too small ({actual_batch_count} < {MIN_RERANK_BATCH_SIZE}), "
+                #     f"waiting for {_wait_for_vram_gb:.2f}GB VRAM"
+                # )
+            # Lock released here by 'with' block exit
+
+        # After releasing the lock, wait for VRAM if needed and retry
+        if _wait_for_vram_gb > 0.0 and vram_manager is not None:
+            vram_manager.wait_for_available_vram(_wait_for_vram_gb)
+            continue  # Re-enter loop: re-acquire lock, re-poll VRAM
 
         batch_items = sorted_items[start_idx:end_idx]
 
         # Estimate VRAM needed for this batch and request allocation
-        estimated_vram_gb = (max_len_in_batch / 1000.0) * 0.08 + 0.175 * len(
-            batch_items
-        ) / 1024.0
+        # Use the same empirical model as _calculate_dynamic_batch_size:
+        # base_overhead=175MB/sample + 80MB per 1k tokens per sample
+        estimated_mb = len(batch_items) * (175 + (max_len_in_batch / 1000.0) * 80)
+        estimated_vram_gb = estimated_mb / 1024.0
+
+        logger.debug(
+            f"Batch plan: items={len(batch_items)}, max_tokens={max_len_in_batch}, "
+            f"est_vram={estimated_vram_gb:.2f}GB, available={available_mem:.2f}GB"
+        )
         allocation_id = None
 
         if vram_manager is not None and device == "cuda":
-            # Request VRAM allocation through the VRAM manager (blocking, no timeout)
+            # Request VRAM allocation through the VRAM manager (blocking)
             granted, allocation_id = vram_manager.request_allocation(
                 size_gb=max(estimated_vram_gb, 0.75),  # Minimum 0.75GB per batch
                 blocking=True,
@@ -1522,7 +1568,7 @@ def generate_embeddings(
     current_batch_paths = []
 
     # Determine batch size
-    effective_batch_size = batch_size or (64 if SELECTED_DEVICE == "cuda" else 16)
+    effective_batch_size = batch_size or (64 if _selected_device_cache == "cuda" else 16)
 
     with PhaseTracker(
         total=len(processing_queue), phase_name="Generating Embeddings"
@@ -1563,7 +1609,7 @@ def generate_embeddings(
     metadata_path = os.path.join(embeddings_dir, "metadata.json")
     new_metadata = {
         "version": "2.0_SES",
-        "model": SELECTED_MODEL_CONFIG["name"] if SELECTED_MODEL_CONFIG else "unknown",
+        "model": _selected_model_config["name"] if _selected_model_config else "unknown",
         "keys": {},
     }
 
@@ -1627,19 +1673,19 @@ def _flush_batch(texts: List[str], save_paths: List[str]):
         return
 
     try:
-        if MODEL_INSTANCE is None:
+        if _model_instance is None:
             logger.error("Model instance lost during batch flush")
             return
 
-        if SELECTED_MODEL_CONFIG and SELECTED_MODEL_CONFIG["type"] == "gguf":
+        if _selected_model_config and _selected_model_config["type"] == "gguf":
             # GGUF (llama-cpp) handles one by one in loop usually unless batched explicitly
             embeddings = []
             for t in texts:
-                res = MODEL_INSTANCE.embed(t)
+                res = _model_instance.embed(t)
                 embeddings.append(np.array(res, dtype=np.float32))
         else:
             # SentenceTransformer handles batches natively
-            embeddings = MODEL_INSTANCE.encode(
+            embeddings = _model_instance.encode(
                 texts, show_progress_bar=False, convert_to_numpy=True
             )
 

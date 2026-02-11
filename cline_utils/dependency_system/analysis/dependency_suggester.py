@@ -11,17 +11,25 @@ import ast
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Attempt to import jsonc-parser
-try:
-    from jsonc_parser.parser import JsoncParser
+def _init_jsonc() -> Tuple[Any, bool, Any, Any, Any]:
+    try:
+        from jsonc_parser.parser import JsoncParser
 
-    JSONC_PARSER_AVAILABLE = True
-except ImportError:
-    JSONC_PARSER_AVAILABLE = False
-    JsoncParser = None
-    FileError = ParserError = JsoncFunctionParameterError = Exception
+        return JsoncParser, True, Exception, Exception, Exception
+    except ImportError:
+        return None, False, Exception, Exception, Exception
+
+
+_jsonc_parser_instance, _jsonc_parser_available, _f_err, _p_err, _jp_err = _init_jsonc()
+
+JsoncParser: Any = _jsonc_parser_instance
+JSONC_PARSER_AVAILABLE: bool = _jsonc_parser_available
+FileError: Any = _f_err
+ParserError: Any = _p_err
+JsoncFunctionParameterError: Any = _jp_err
 
 import logging
 
@@ -30,7 +38,6 @@ from cline_utils.dependency_system.core import key_manager
 # Import only from lower-level modules
 from cline_utils.dependency_system.core.key_manager import KeyInfo
 from cline_utils.dependency_system.utils.cache_manager import (
-    cache_manager,
     cached,
     clear_all_caches,
 )
@@ -62,18 +69,29 @@ _structural_resolved_path_cache: Dict[Tuple[str, Optional[str]], Optional[str]] 
 # s: Semantic dependency (weak .06-.07) - Adjusted based on .clinerules
 # S: Semantic dependency (strong .07+) - Added based on .clinerules
 
+GLOBAL_SCAN_LIMIT = 80
 _PROJECT_SYMBOL_MAP_FILENAME_LOCAL = "project_symbol_map.json"
+
+def _get_symbol_map_path() -> str:
+    """Robustly determines the path to project_symbol_map.json."""
+    try:
+        # Use import to find the directory of key_manager.py
+        import cline_utils.dependency_system.core.key_manager as km
+        return normalize_path(os.path.join(os.path.dirname(os.path.abspath(km.__file__)), _PROJECT_SYMBOL_MAP_FILENAME_LOCAL))
+    except Exception:
+        # Fallback relative to this file
+        return normalize_path(os.path.join(os.path.dirname(os.path.dirname(__file__)), "core", _PROJECT_SYMBOL_MAP_FILENAME_LOCAL))
 
 
 # _OLD_PROJECT_SYMBOL_MAP_FILENAME_LOCAL = "project_symbol_map_old.json" # Not used by load, only by save
 def clear_caches():
     clear_all_caches()
     if hasattr(_find_and_parse_tsconfig, "_cache"):
-        _find_and_parse_tsconfig._cache.clear()  # type: ignore
+        _find_and_parse_tsconfig._cache.clear()  
     _structural_import_map_cache.clear()
     _structural_resolved_path_cache.clear()
     if hasattr(load_project_symbol_map, "_cache"):
-        load_project_symbol_map._cache.clear()  # type: ignore
+        load_project_symbol_map._cache.clear()  
 
 
 @cached("metadata", track_path_args=[0])
@@ -104,11 +122,11 @@ def load_metadata(metadata_path: str) -> Dict[str, Any]:
 
 
 # --- TS/JS Config Helper ---
-@cached(
-    "tsconfig_data",
-    key_func=lambda start_dir, project_root_val: f"tsconfig:{normalize_path(start_dir)}:{normalize_path(project_root_val)}",
-    track_path_args=[0],
-)
+def _tsconfig_cache_key(start_dir: Any, project_root_val: Any) -> str:
+    return f"tsconfig:{normalize_path(str(start_dir))}:{normalize_path(str(project_root_val))}"
+
+
+@cached("tsconfig_data", key_func=_tsconfig_cache_key, track_path_args=[0])
 def _find_and_parse_tsconfig(
     start_dir: str, project_root_val: str
 ) -> Optional[Tuple[str, Dict[str, Any]]]:
@@ -133,14 +151,14 @@ def _find_and_parse_tsconfig(
                         JSONC_PARSER_AVAILABLE and JsoncParser
                     ):  # Check JsoncParser is not None
                         # Ensure JsoncParser.parse_file is called correctly
-                        data = JsoncParser.parse_file(config_path)  # type: ignore
+                        data: Dict[str, Any] = JsoncParser.parse_file(config_path)
                         logger.debug(
                             f"Successfully parsed {config_path} using jsonc-parser."
                         )
                         return config_path, data
                     else:
                         with open(config_path, "r", encoding="utf-8") as f:
-                            data = json.load(f)
+                            data: Dict[str, Any] = json.load(f)
                         logger.debug(
                             f"Successfully parsed {config_path} using standard json parser."
                         )
@@ -168,7 +186,7 @@ def _find_and_parse_tsconfig(
 # --- MODIFIED load_project_symbol_map ---
 @cached(
     "project_symbol_map_data",
-    key_func=lambda: f"project_symbol_map:{os.path.getmtime(os.path.join(KEY_MANAGER_DIR, _PROJECT_SYMBOL_MAP_FILENAME_LOCAL)) if os.path.exists(os.path.join(KEY_MANAGER_DIR, _PROJECT_SYMBOL_MAP_FILENAME_LOCAL)) else 'missing'}",
+    key_func=lambda: f"project_symbol_map:{os.path.getmtime(_get_symbol_map_path()) if os.path.exists(_get_symbol_map_path()) else 'missing'}",
 )
 def load_project_symbol_map() -> Dict[str, Dict[str, Any]]:
     """
@@ -180,13 +198,7 @@ def load_project_symbol_map() -> Dict[str, Dict[str, Any]]:
     try:
         # Determine path relative to key_manager.py
         # Using __import__ and __file__ to robustly get key_manager's directory
-        key_manager_module = __import__(
-            "cline_utils.dependency_system.core.key_manager", fromlist=[""]
-        )
-        core_dir = os.path.dirname(os.path.abspath(key_manager_module.__file__))
-        map_path = normalize_path(
-            os.path.join(core_dir, _PROJECT_SYMBOL_MAP_FILENAME_LOCAL)
-        )
+        map_path = _get_symbol_map_path()
 
         if not os.path.exists(map_path):
             logger.warning(
@@ -195,7 +207,7 @@ def load_project_symbol_map() -> Dict[str, Dict[str, Any]]:
             return {}
 
         with open(map_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            data: Dict[str, Dict[str, Any]] = json.load(f)
         logger.debug(
             f"Successfully loaded project symbol map from: {map_path} ({len(data)} entries)"
         )
@@ -337,6 +349,60 @@ def suggest_dependencies(
         # No AST links from generic
 
     return char_suggestions, raw_ast_links_collector  # MODIFIED return
+
+
+def _verify_class_member(
+    module_symbols: Dict[str, Any], class_name: str, member_name: str
+) -> bool:
+    """
+    Check if member_name is a method or instance attribute of class_name
+    using the enriched project_symbol_map data.
+
+    Performs deep lookup against the class's 'methods' array (including __init__
+    attribute_accesses for instance attributes). Falls back to assuming valid
+    if the class has no method data (backward compat for files where runtime
+    inspection failed or produced no methods).
+
+    Args:
+        module_symbols: The symbol data dict for a single module file.
+        class_name: The name of the class to look up.
+        member_name: The method or attribute name to verify.
+
+    Returns:
+        True if the member is verified or assumed valid, False otherwise.
+    """
+    for cls in module_symbols.get("classes", []):
+        if cls.get("name") != class_name:
+            continue
+
+        methods = cls.get("methods", [])
+
+        # If the class has method data, do an actual lookup
+        if methods:
+            # Check direct method name match
+            if any(m.get("name") == member_name for m in methods):
+                return True
+            # Check instance attributes (self.X set in __init__)
+            init_method = next(
+                (m for m in methods if m.get("name") == "__init__"), None
+            )
+            if init_method:
+                init_attrs = init_method.get("attribute_accesses", [])
+                if member_name in init_attrs:
+                    return True
+            # Class has methods but member not found among them
+            return False
+        else:
+            # Fallback: class exists but no method data (runtime inspection
+            # failed or class has no methods). Preserve old heuristic.
+            logger.debug(
+                f"_verify_class_member: Class '{class_name}' has no method data, "
+                f"assuming member '{member_name}' is valid (fallback heuristic)."
+            )
+            return True
+
+    # Class not found at all
+    return False
 
 
 # --- Type-Specific Suggestion Functions ---
@@ -643,18 +709,18 @@ def _identify_structural_dependencies(
                     for s_item in module_symbols.get(s_list_key, [])
                 )
 
-                # Heuristic: if it's a class method call like MyClass.method(), check if MyClass is in symbols,
-                # but we don't have easy access to method names within classes in project_symbol_map yet.
-                # For now, if potential_source (e.g., MyClass) is a class in target_path_val, assume method call is valid.
+                # Deep verification: check if the member is actually defined on the class
+                # using enriched symbol map data (methods list, __init__ attributes)
                 if not is_verified and potential_source_str:
                     potential_class_name = potential_source_str.split(".")[-1]
-                    if any(
-                        c.get("name") == potential_class_name
-                        for c in module_symbols.get("classes", [])
+                    if _verify_class_member(
+                        module_symbols,
+                        potential_class_name,
+                        actual_item_name_to_check,
                     ):
-                        is_verified = True  # Assume valid method call if the class itself is verified
+                        is_verified = True
                         logger.debug(
-                            f"StructuralDep/Call: Assuming valid method call '{actual_item_name_to_check}' on verified class '{potential_class_name}' from {target_path_val}"
+                            f"StructuralDep/Call: Verified method '{actual_item_name_to_check}' on class '{potential_class_name}' from {target_path_val}"
                         )
 
                 if is_verified:
@@ -702,17 +768,18 @@ def _identify_structural_dependencies(
                 for s_item in module_symbols.get(s_list_key, [])
             )
 
-            # Heuristic: if potential_source_str (e.g., MyClass or my_instance_of_MyClass) resolves to a class,
-            # we assume the attribute access is valid for now (we don't have instance/class attributes in project_symbol_map easily).
+            # Deep verification: check if the attribute is a method, __init__ attr, or class-level attribute
+            # using enriched symbol map data (methods list, __init__ attributes)
             if not is_verified and potential_source_str:
                 potential_class_name_from_source = potential_source_str.split(".")[-1]
-                if any(
-                    c.get("name") == potential_class_name_from_source
-                    for c in module_symbols.get("classes", [])
+                if _verify_class_member(
+                    module_symbols,
+                    potential_class_name_from_source,
+                    attribute_name_accessed,
                 ):
-                    is_verified = True  # Assume valid attribute access if the base object is a known class
+                    is_verified = True
                     logger.debug(
-                        f"StructuralDep/Attribute: Assuming valid attribute '{attribute_name_accessed}' access on object/class '{potential_source_str}' (resolved to class in {target_path_val})"
+                        f"StructuralDep/Attribute: Verified attribute '{attribute_name_accessed}' on class '{potential_class_name_from_source}' from {target_path_val}"
                     )
 
             if is_verified:
@@ -898,12 +965,8 @@ def suggest_python_dependencies(
     file_path: str,
     path_to_key_info: Dict[str, KeyInfo],
     project_root: str,
-    source_analysis: Dict[
-        str, Any
-    ],  # MODIFIED: This is now the specific analysis for file_path
-    _all_file_analyses_map: Dict[
-        str, Any
-    ],  # MODIFIED: This is the full map of all file analyses
+    source_analysis: Optional[Dict[str, Any]],  # CHANGED: Allow None
+    _all_file_analyses_map: Dict[str, Any],
     project_symbol_map: Dict[str, Dict[str, Any]],
     threshold: float,
     shared_scan_counter: Any = None,
@@ -1354,6 +1417,7 @@ def suggest_generic_dependencies(
     )
 
 
+@cached("ast_verified_links", ttl=300, track_path_args=[0])
 def _load_ast_verified_links(project_root: str) -> List[Dict[str, str]]:
     """
     Load AST-verified links from project_analyzer for structural evidence
@@ -1422,10 +1486,10 @@ def _enhance_semantic_suggestions_with_ast_evidence(
     """
     Enhance semantic suggestions with AST-verified structural evidence
     """
-    enhanced = []
+    enhanced: List[Tuple[str, str]] = []
 
     # Track which targets we've processed to avoid duplicates when adding from ast_map
-    processed_targets = set()
+    processed_targets: Set[str] = set()
 
     for target_path, semantic_char in semantic_suggestions:
         target_norm = os.path.normpath(target_path).replace(os.sep, "/")
@@ -1470,7 +1534,6 @@ def suggest_semantic_dependencies_path_based(
     shared_scan_counter: Any = None,
 ) -> List[Tuple[str, str]]:  # Output: List[(target_norm_path, char)]
     # Check global limit FIRST to avoid unnecessary processing
-    GLOBAL_SCAN_LIMIT = 80
     if shared_scan_counter is not None:
         # Non-blocking check (value access is atomic enough for this optimization)
         if shared_scan_counter.value >= GLOBAL_SCAN_LIMIT:
@@ -1493,7 +1556,6 @@ def suggest_semantic_dependencies_path_based(
     if not source_key_info or source_key_info.is_directory:
         return []  # Only for files
 
-    suggested_deps_path_based: List[Tuple[str, str]] = []
     target_key_infos_list: List[KeyInfo] = [
         info
         for info in path_to_key_info.values()
@@ -1553,7 +1615,7 @@ def suggest_semantic_dependencies_path_based(
             candidates_with_similarity.append((target_ki, confidence))
 
     # This variable will hold the results from either reranking or the fallback logic
-    initial_suggestions = []
+    initial_suggestions: List[Tuple[str, str]] = []
 
     # Apply reranking if we have multiple candidates and the reranking feature is available
     if len(candidates_with_similarity) > 1:
@@ -1597,16 +1659,13 @@ def suggest_semantic_dependencies_path_based(
                     threshold_s = config.get_threshold("code_similarity")  # 0.7
 
                 # Only include candidates that would get 'S' or 's' assignments (not 'p' or 'n')
-                # if confidence >= threshold_s:
-                filtered_candidates.append((target_ki, confidence))
+                if confidence >= threshold_s:
+                    filtered_candidates.append((target_ki, confidence))
 
             candidates_with_similarity = filtered_candidates
             logger.debug(
                 f"Pre-reranking filter: {len(candidates_with_similarity)} candidates remaining from original collection"
             )
-
-            # Check global scan limit to ensure "curated selection" of ~80 files per run
-            GLOBAL_SCAN_LIMIT = 80
 
             # Use shared counter if available (preferred for parallel execution)
             if shared_scan_counter is not None:
@@ -1668,10 +1727,19 @@ def suggest_semantic_dependencies_path_based(
                         os.makedirs(os.path.dirname(scans_file), exist_ok=True)
                         with open(scans_file, "a", encoding="utf-8") as f:
                             for cand_ki, cand_conf in top_candidates:
+                                # Defensive: skip entries with missing source or target
+                                src_path = getattr(source_key_info, 'norm_path', None)
+                                tgt_path = getattr(cand_ki, 'norm_path', None)
+                                if not src_path or not tgt_path:
+                                    logger.warning(
+                                        f"Skipping scan log entry: missing "
+                                        f"source={src_path!r} or target={tgt_path!r}"
+                                    )
+                                    continue
                                 json.dump(
                                     {
-                                        "source": source_key_info.norm_path,
-                                        "target": cand_ki.norm_path,
+                                        "source": src_path,
+                                        "target": tgt_path,
                                         "confidence": float(cand_conf),
                                     },
                                     f,
@@ -1708,8 +1776,8 @@ def suggest_semantic_dependencies_path_based(
                     pass  # Fall through to the original similarity logic
                 else:
                     # Prepare candidate texts for reranking
-                    candidate_texts = []
-                    valid_candidates = []
+                    candidate_texts: List[str] = []
+                    valid_candidates: List[Tuple[KeyInfo, float]] = []
 
                     for target_ki, original_confidence in top_candidates:
                         try:
@@ -1769,7 +1837,7 @@ def suggest_semantic_dependencies_path_based(
                         )
 
                         # Process reranked results
-                        for i, (candidate_idx, rerank_score) in enumerate(
+                        for _, (candidate_idx, rerank_score) in enumerate(
                             reranked_results
                         ):
                             if candidate_idx < len(valid_candidates):
@@ -2087,7 +2155,7 @@ def _convert_python_import_to_paths(
         )
 
     # --- Check generated candidates against path_to_key_info and verify specific_item_name ---
-    seen_paths = set()
+    seen_paths: Set[str] = set()
     for p_candidate_str in candidate_module_file_paths_to_check_in_map:
         # p_candidate_str is already a normalized absolute path from the generation logic
         if p_candidate_str in path_to_key_info:  # Direct check against tracked files
