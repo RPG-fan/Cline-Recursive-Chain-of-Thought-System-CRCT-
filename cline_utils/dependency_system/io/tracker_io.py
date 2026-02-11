@@ -2943,6 +2943,8 @@ def update_tracker(
                             reciprocal_char_to_set = "<"
                         elif final_char_to_set_in_grid == "<":
                             reciprocal_char_to_set = ">"
+                        elif final_char_to_set_in_grid == "x":
+                            reciprocal_char_to_set = "x"
 
                         if reciprocal_char_to_set:
                             existing_char_in_reverse = temp_decomp_grid_rows[
