@@ -15,9 +15,10 @@ import re
 import statistics
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from cline_utils.dependency_system.utils.path_utils import get_file_type, normalize_path
+from cline_utils.dependency_system.core import key_manager
 
 logger = logging.getLogger(__name__)
 
@@ -390,9 +391,87 @@ def track_reranker_performance(cycle_number: int, project_root: str) -> bool:
     return success
 
 
+def repair_history_file(filepath: str) -> bool:
+    """
+    Repairs a corrupted reranker history JSON file.
+    Filters out entries missing 'source' or 'target' keys.
+    Attempts to resolve hierarchical keys to absolute paths.
+
+    Returns:
+        True if the file was repaired/modified, False otherwise.
+    """
+    if not os.path.exists(filepath):
+        return False
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        modified = False
+        path_to_key_info = key_manager.load_global_key_map() or {}
+
+        def _resolve_and_clean(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            nonlocal modified
+            # Ensure items is a list
+            if not items:
+                return []
+
+            cleaned = []
+            for item in items:
+                # Ensure item is a dict and has required keys
+                if not item or "source" not in item or "target" not in item:
+                    modified = True
+                    continue
+
+                # Check if source/target are hierarchical keys and resolve them
+                s: str = item.get("source", "")
+                t: str = item.get("target", "")
+
+                # Simple check for key-like string (e.g. 1A, 1B2, 1Aa1)
+                # If it doesn't look like an absolute path (H:/...), try to resolve it
+                if s and not s.startswith(("H:/", "C:/", "/")):
+                    resolved_s = key_manager.get_path_from_key(s, path_to_key_info)
+                    if resolved_s:
+                        item["source"] = resolved_s
+                        modified = True
+
+                if t and not t.startswith(("H:/", "C:/", "/")):
+                    resolved_t = key_manager.get_path_from_key(t, path_to_key_info)
+                    if resolved_t:
+                        item["target"] = resolved_t
+                        modified = True
+
+                cleaned.append(item)
+
+            if len(cleaned) != len(items):
+                modified = True
+            return cleaned
+
+        if "all_pairs" in data:
+            data["all_pairs"] = _resolve_and_clean(data["all_pairs"])
+        if "top_10_confident" in data:
+            data["top_10_confident"] = _resolve_and_clean(data["top_10_confident"])
+        if "bottom_10_confident" in data:
+            data["bottom_10_confident"] = _resolve_and_clean(
+                data["bottom_10_confident"]
+            )
+
+        if modified:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            logger.info(f"Successfully repaired and updated history file: {filepath}")
+            return True
+
+        return False
+
+    except Exception as e:
+        logger.error(f"Failed to repair history file {filepath}: {e}")
+        return False
+
+
 def get_performance_comparison(
     project_root: str, cycles: Optional[List[int]] = None
-) -> Dict:
+) -> Dict[str, Any]:
     """
     Get performance comparison across multiple cycles.
 
@@ -419,11 +498,32 @@ def get_performance_comparison(
                     filepath = os.path.join(history_dir, filename)
                     try:
                         with open(filepath, "r", encoding="utf-8") as f:
-                            cycle_data[cycle_num] = json.load(f)
-                    except Exception as e:
+                            data = json.load(f)
+
+                        # Basic validation to ensure metrics exist
+                        if (
+                            "metrics" not in data
+                            or "avg_confidence" not in data["metrics"]
+                        ):
+                            raise KeyError("Missing core data in history file")
+
+                        cycle_data[cycle_num] = data
+                    except (Exception, KeyError) as e:
                         logger.warning(
-                            f"Failed to load cycle data from {filepath}: {e}"
+                            f"Corrupted cycle data in {filepath} ({e}). Attempting repair..."
                         )
+                        if repair_history_file(filepath):
+                            try:
+                                with open(filepath, "r", encoding="utf-8") as f:
+                                    cycle_data[cycle_num] = json.load(f)
+                            except Exception:
+                                logger.error(
+                                    f"Critical failure reloading {filepath} after repair"
+                                )
+                        else:
+                            logger.error(
+                                f"Skipping cycle {cycle_num} due to irreparable corruption: {filepath}"
+                            )
 
     if not cycle_data:
         return {"error": "No cycle data loaded"}
@@ -490,7 +590,8 @@ def get_historical_pairs(
             with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-                # Try to get from 'all_pairs' first (new format)
+            # Process pairs
+            try:
                 if "all_pairs" in data:
                     for pair in data["all_pairs"]:
                         historical_pairs.add((pair["source"], pair["target"]))
@@ -500,6 +601,35 @@ def get_historical_pairs(
                         historical_pairs.add((item["source"], item["target"]))
                     for item in data.get("bottom_10_confident", []):
                         historical_pairs.add((item["source"], item["target"]))
+            except (KeyError, TypeError) as ke:
+                logger.warning(
+                    f"Structural corruption in {filepath} ({ke}). Triggering repair..."
+                )
+                if repair_history_file(filepath):
+                    # Reload and try again
+                    try:
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                            if "all_pairs" in data:
+                                for pair in data["all_pairs"]:
+                                    historical_pairs.add(
+                                        (pair["source"], pair["target"])
+                                    )
+                            else:
+                                for item in data.get("top_10_confident", []):
+                                    historical_pairs.add(
+                                        (item["source"], item["target"])
+                                    )
+                                for item in data.get("bottom_10_confident", []):
+                                    historical_pairs.add(
+                                        (item["source"], item["target"])
+                                    )
+                    except Exception as re_err:
+                        logger.error(
+                            f"Failed to recover historical pairs from {filepath} even after repair: {re_err}"
+                        )
+                else:
+                    logger.error(f"Irreparable structural issues in {filepath}")
 
         except Exception as e:
             logger.warning(f"Failed to load history from {filepath}: {e}")
@@ -512,7 +642,7 @@ def get_historical_pairs(
 
 def generate_performance_history_report(
     project_root: str, save_report: bool = True
-) -> Dict:
+) -> Dict[str, Any]:
     """
     Generate a comprehensive performance history report analyzing reranker
     performance across all available cycles.
@@ -539,9 +669,27 @@ def generate_performance_history_report(
                 filepath = os.path.join(history_dir, filename)
                 try:
                     with open(filepath, "r", encoding="utf-8") as f:
-                        cycle_data[cycle_num] = json.load(f)
-                except Exception as e:
-                    logger.warning(f"Failed to load cycle data from {filepath}: {e}")
+                        data = json.load(f)
+
+                    # Basic validation
+                    if "metrics" not in data:
+                        raise KeyError("metrics")
+
+                    cycle_data[cycle_num] = data
+                except (Exception, KeyError) as e:
+                    logger.warning(
+                        f"Corrupted cycle data in {filepath} ({e}). Attempting repair..."
+                    )
+                    if repair_history_file(filepath):
+                        try:
+                            with open(filepath, "r", encoding="utf-8") as f:
+                                cycle_data[cycle_num] = json.load(f)
+                        except Exception:
+                            logger.error(f"Failed to reload {filepath} after repair")
+                    else:
+                        logger.error(
+                            f"Skipping cycle {cycle_num} due to irreparable corruption"
+                        )
 
     if not cycle_data:
         return {"error": "No cycle data loaded"}
@@ -871,7 +1019,7 @@ def generate_performance_history_report(
     return report
 
 
-def format_report_summary(report: Dict) -> str:
+def format_report_summary(report: Dict[str, Any]) -> str:
     """
     Format a performance history report as a human-readable string.
 
