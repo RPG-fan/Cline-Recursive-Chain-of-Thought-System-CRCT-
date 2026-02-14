@@ -17,6 +17,14 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from cline_utils.dependency_system.analysis.dependency_analyzer import analyze_file
 
+# Type alias for sortable parts
+SortableParts = list[str]
+from cline_utils.dependency_system.analysis.embedding_manager import (
+    _load_project_symbol_map,
+    generate_symbol_essence_string,
+)
+from cline_utils.dependency_system.analysis.local_llm_processor import LocalLLMProcessor
+
 # --- Analysis Imports ---
 from cline_utils.dependency_system.analysis.project_analyzer import analyze_project
 
@@ -61,6 +69,12 @@ from cline_utils.dependency_system.utils.template_generator import (
 from cline_utils.dependency_system.utils.template_generator import (
     get_item_type as get_item_type_for_checklist,
 )
+from cline_utils.dependency_system.utils.tracker_batch_collector import (
+    TrackerBatchCollector,
+    create_doc_tracker_update,
+    create_main_tracker_update,
+    create_mini_tracker_update,
+)
 from cline_utils.dependency_system.utils.tracker_utils import (
     find_all_tracker_paths,
     get_globally_resolved_key_info_for_cli,
@@ -98,7 +112,7 @@ def _load_global_map_or_exit() -> Dict[str, KeyInfo]:
     return path_to_key_info
 
 
-def _load_token_metadata(project_root: str) -> Dict[str, int]:
+def _load_token_metadata(project_root: str) -> Dict[str, Dict[str, int]]:
     """Loads token counts from metadata.json."""
     metadata_path = os.path.join(
         project_root,
@@ -116,9 +130,21 @@ def _load_token_metadata(project_root: str) -> Dict[str, int]:
                 keys = data.get("keys", {})
                 for key_data in keys.values():
                     path = key_data.get("path")
-                    tokens = key_data.get("tokens")
-                    if path and tokens is not None:
-                        token_map[path] = tokens
+                    if not path:
+                        continue
+                    path = normalize_path(path)
+
+                    ses = key_data.get("ses_tokens")
+                    full = key_data.get("full_tokens")
+
+                    if ses is None and "tokens" in key_data:
+                        ses = key_data["tokens"]
+
+                    if full is None:
+                        full = ses
+
+                    if ses is not None:
+                        token_map[path] = {"ses_tokens": ses, "full_tokens": full}
         except Exception as e:
             logger.warning(f"Failed to load token metadata: {e}")
     return token_map
@@ -155,6 +181,131 @@ def is_parent_child(
         f"is_parent_child check: {key1_str}({path1}) vs {key2_str}({path2}). Is Parent1: {is_parent1}, Is Parent2: {is_parent2}"
     )
     return is_parent1 or is_parent2
+
+
+def handle_determine_dependency(args: argparse.Namespace) -> int:
+    """Handle the determine-dependency command."""
+    global_map = _load_global_map_or_exit()
+    config_manager = ConfigManager()
+    project_root = get_project_root()
+
+    # Load token metadata from embeddings/metadata.json
+    embeddings_dir = config_manager.get_path(
+        "embeddings_dir", "cline_utils/dependency_system/analysis/embeddings"
+    )
+    if not os.path.isabs(embeddings_dir):
+        embeddings_dir = os.path.join(project_root, embeddings_dir)
+
+    metadata_path = os.path.join(embeddings_dir, "metadata.json")
+    token_metadata = {}
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                token_metadata = data.get("keys", {})
+        except Exception as e:
+            logger.warning(f"Failed to load token metadata: {e}")
+
+    # Resolve source key
+    source_ki = resolve_key_global_instance_to_ki(args.source_key, global_map)
+    if not source_ki:
+        print(f"Error: Could not resolve source key '{args.source_key}'")
+        return 1
+
+    # Resolve target key
+    target_ki = resolve_key_global_instance_to_ki(args.target_key, global_map)
+    if not target_ki:
+        print(f"Error: Could not resolve target key '{args.target_key}'")
+        return 1
+
+    source_path = normalize_path(source_ki.norm_path)
+    target_path = normalize_path(target_ki.norm_path)
+
+    if not os.path.exists(source_path):
+        print(f"Error: Source file not found: {source_path}")
+        return 1
+    if not os.path.exists(target_path):
+        print(f"Error: Target file not found: {target_path}")
+        return 1
+
+    # Load symbol map
+    symbol_map = _load_project_symbol_map()
+
+    try:
+        # Use SES for source if available
+        if source_path in symbol_map:
+            source_content = generate_symbol_essence_string(
+                source_path, symbol_map[source_path], symbol_map=symbol_map
+            )
+            source_basename = f"{os.path.basename(source_path)} (SES)"
+        else:
+            with open(source_path, "r", encoding="utf-8") as f:
+                source_content = f.read()
+            source_basename = os.path.basename(source_path)
+
+        # Use SES for target if available
+        if target_path in symbol_map:
+            target_content = generate_symbol_essence_string(
+                target_path, symbol_map[target_path], symbol_map=symbol_map
+            )
+            target_basename = f"{os.path.basename(target_path)} (SES)"
+        else:
+            with open(target_path, "r", encoding="utf-8") as f:
+                target_content = f.read()
+            target_basename = os.path.basename(target_path)
+
+    except Exception as e:
+        print(f"Error reading files: {e}")
+        return 1
+
+    model_path = args.model
+    if not model_path:
+        model_path = os.path.join(
+            project_root, "models", "Qwen3-4B-Instruct-2507-Q8_0.gguf"
+        )
+
+    if not os.path.exists(model_path):
+        print(f"Error: Model not found at {model_path}")
+        return 1
+
+    try:
+        processor = LocalLLMProcessor(model_path=model_path)
+
+        # Get token counts if available
+        key_data_source = token_metadata.get(source_ki.key_string, {})
+        key_data_target = token_metadata.get(target_ki.key_string, {})
+
+        # Helper to decide token count
+        def get_count_for_key(key_data: Dict[str, Any], is_ses: bool) -> Optional[int]:
+            if is_ses:
+                return key_data.get("ses_tokens", key_data.get("tokens"))
+            return key_data.get("full_tokens", key_data.get("tokens"))
+
+        source_is_ses = source_path in symbol_map
+        target_is_ses = target_path in symbol_map
+
+        source_tokens = get_count_for_key(key_data_source, source_is_ses)
+        target_tokens = get_count_for_key(key_data_target, target_is_ses)
+
+        char, reasoning = processor.determine_dependency(
+            source_content=source_content,
+            target_content=target_content,
+            source_basename=source_basename,
+            target_basename=target_basename,
+            source_tokens=source_tokens,
+            target_tokens=target_tokens,
+        )
+
+        print(f"\nDependency Result: {char}")
+        print(f"Source: {source_ki.key_string} ({source_path})")
+        print(f"Target: {target_ki.key_string} ({target_path})")
+        print(f"\n--- LLM Reasoning ---\n{reasoning}\n---------------------")
+
+        return 0
+    except Exception as e:
+        logger.error(f"Error determining dependency: {e}", exc_info=True)
+        print(f"Error: {e}")
+        return 1
 
 
 # --- Command Handlers ---
@@ -284,11 +435,11 @@ def command_handler_analyze_project(args: argparse.Namespace) -> int:
         )
 
         # Helper function to make results JSON-serializable by removing AST objects
-        def make_serializable(obj):
+        def make_serializable(obj: Any) -> Any:
             """Recursively remove non-JSON-serializable objects from the results."""
             if isinstance(obj, dict):
                 # Remove known non-serializable keys
-                cleaned = {
+                cleaned: Dict[str, Any] = {
                     k: make_serializable(v)
                     for k, v in obj.items()
                     if k not in ("_ast_tree", "_ts_tree")
@@ -1754,6 +1905,292 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
         return 1
 
 
+def handle_resolve_placeholders(args: argparse.Namespace) -> int:
+    """
+    Resolve placeholders using Local LLM in batches.
+    """
+    import time
+
+    tracker_path = normalize_path(args.tracker)
+    if not os.path.exists(tracker_path):
+        print(f"Error: Tracker file not found: {tracker_path}", file=sys.stderr)
+        return 1
+
+    limit = args.limit
+    dep_char = args.dep_char
+    focus_key = args.key
+    model_path = args.model if args.model else "models/Qwen3-4B-Instruct-2507-Q8_0.gguf"
+
+    # Load Global Map
+    global_map = _load_global_map_or_exit()
+
+    # Determine Tracker Type matches handle_add_dependency logic
+    is_mini = tracker_path.endswith("_module.md")
+    tracker_type = (
+        "mini"
+        if is_mini
+        else ("doc" if "doc_tracker.md" in os.path.basename(tracker_path) else "main")
+    )
+
+    # Read Tracker
+    try:
+        with open(tracker_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        key_def_pairs = read_key_definitions_from_lines(lines)
+        _, grid_rows_data = read_grid_from_lines(lines)
+    except Exception as e:
+        print(f"Error reading tracker: {e}", file=sys.stderr)
+        return 1
+
+    if not key_def_pairs or not grid_rows_data:
+        print("Tracker appears empty or invalid.", file=sys.stderr)
+        return 1
+
+    # Find Tasks
+    tasks: List[Tuple[str, str, str, str]] = (
+        []
+    )  # (src_key, src_path, tgt_key, tgt_path)
+
+    for row_idx, (row_label, compressed_row) in enumerate(grid_rows_data):
+        if focus_key and row_label != focus_key:
+            continue
+
+        if row_idx >= len(key_def_pairs):
+            continue
+
+        src_key_from_def, src_path = key_def_pairs[row_idx]
+
+        if not src_path or not os.path.exists(src_path):
+            continue
+
+        try:
+            decomp = list(decompress(compressed_row))
+            for col_idx, char in enumerate(decomp):
+                if char == dep_char:
+                    if col_idx < len(key_def_pairs):
+                        tgt_key_label, tgt_path = key_def_pairs[col_idx]
+
+                        if tgt_path and os.path.exists(tgt_path):
+                            tasks.append((row_label, src_path, tgt_key_label, tgt_path))
+        except Exception:
+            continue
+
+    print(f"Found {len(tasks)} unresolved '{dep_char}' dependencies.")
+    if not tasks:
+        return 0
+
+    tasks = tasks[:limit]
+    print(f"Processing batch of {len(tasks)} items...")
+
+    processor = LocalLLMProcessor(model_path=model_path)
+    collector = TrackerBatchCollector()
+
+    batch_suggestions = defaultdict(list)
+    processed_count = 0
+    total_processed = 0
+
+    start_time = time.time()
+
+    # Setup for token checks
+    MAX_MODEL_TOKENS = 30000  # Leave buffer for system prompt (total ctx 32768)
+    WRAPPER_OVERHEAD = 1000  # Approximate system prompt + overhead
+
+    # Pre-fetch token counts for all involved files to avoid repeated lookups
+    # keys in global_map map to KeyInfo which has .norm_path
+    # token_map uses norm_path as key
+    token_map = _load_token_metadata(get_project_root())
+
+    # Load symbol map to check for SES availability
+    symbol_map = _load_project_symbol_map()
+
+    for src_key, src_path, tgt_key, tgt_path in tasks:
+        try:
+            # Check token limits before reading files
+            src_norm = normalize_path(src_path)
+            tgt_norm = normalize_path(tgt_path)
+
+            src_is_ses = src_norm in symbol_map
+            tgt_is_ses = tgt_norm in symbol_map
+
+            # Helper to get appropriate token count
+            def get_tokens(path_norm: str, is_ses: bool) -> int:
+                data = token_map.get(path_norm, {})
+                if is_ses:
+                    val = data.get("ses_tokens", data.get("tokens"))
+                else:
+                    val = data.get("full_tokens", data.get("tokens"))
+                return val if val is not None else 0
+
+            s_tokens = get_tokens(src_norm, src_is_ses)
+            t_tokens = get_tokens(tgt_norm, tgt_is_ses)
+
+            # If we have token counts, check limit
+            if s_tokens > 0 and t_tokens > 0:
+                total_est = s_tokens + t_tokens + WRAPPER_OVERHEAD
+                if total_est > MAX_MODEL_TOKENS:
+                    logger.warning(
+                        f"Skipping {src_key} -> {tgt_key}: Combined tokens ({total_est}) "
+                        f"exceed limit ({MAX_MODEL_TOKENS})."
+                    )
+                    print(
+                        f"Skipping {src_key} -> {tgt_key}: Tokens {total_est} > {MAX_MODEL_TOKENS}"
+                    )
+                    continue
+
+            with open(src_path, "r", encoding="utf-8", errors="ignore") as f:
+                src_content = f.read()
+            with open(tgt_path, "r", encoding="utf-8", errors="ignore") as f:
+                tgt_content = f.read()
+
+            src_base = os.path.basename(src_path)
+            tgt_base = os.path.basename(tgt_path)
+
+            print(
+                f"[{total_processed+1}/{len(tasks)}] analyzing {src_key} -> {tgt_key}..."
+            )
+
+            # If using SES, update content and basename for the processor
+            if src_is_ses:
+                src_content = generate_symbol_essence_string(
+                    src_norm, symbol_map[src_norm], symbol_map=symbol_map
+                )
+                src_base += " (SES)"
+
+            if tgt_is_ses:
+                tgt_content = generate_symbol_essence_string(
+                    tgt_norm, symbol_map[tgt_norm], symbol_map=symbol_map
+                )
+                tgt_base += " (SES)"
+
+            result = processor.determine_dependency(
+                source_content=src_content,
+                target_content=tgt_content,
+                source_basename=src_base,
+                target_basename=tgt_base,
+                source_tokens=s_tokens if s_tokens > 0 else None,
+                target_tokens=t_tokens if t_tokens > 0 else None,
+            )
+            char, reasoning = result
+            print(f"\nDependency Result: {char}")
+            print(f"\n--- LLM Reasoning ---\n{reasoning}\n---------------------")
+
+            # Add to batch (KEY#GI format is handled by src_key being from tracker which usually has correct format)
+            batch_suggestions[src_key].append((tgt_key, char))
+            processed_count += 1
+            total_processed += 1
+
+            if processed_count >= 10:
+                print("Committing batch of 10 updates...")
+                update_data = update_tracker(
+                    output_file_suggestion=tracker_path,
+                    path_to_key_info=global_map,
+                    tracker_type=tracker_type,
+                    suggestions_external=batch_suggestions,
+                    return_update=True,
+                )
+
+                if update_data:
+                    # Create TrackerUpdate
+                    t_update = None
+                    if tracker_type == "mini":
+                        t_update = create_mini_tracker_update(
+                            output_file=update_data["output_file"],
+                            key_info_list=update_data["key_info_list"],
+                            grid_rows=update_data["grid_rows"],
+                            last_key_edit=update_data["last_key_edit"],
+                            last_grid_edit=update_data["last_grid_edit"],
+                            module_path=update_data["module_path"],
+                            path_to_key_info=update_data["path_to_key_info"],
+                            existing_lines=update_data["existing_lines"],
+                            tracker_exists=update_data["tracker_exists"],
+                        )
+                    elif tracker_type == "doc":
+                        t_update = create_doc_tracker_update(
+                            output_file=tracker_path,
+                            key_info_list=update_data["key_info_list"],
+                            grid_rows=update_data["grid_rows"],
+                            last_key_edit=update_data["last_key_edit"],
+                            last_grid_edit=update_data["last_grid_edit"],
+                            path_to_key_info=global_map,
+                        )
+                    else:  # main
+                        t_update = create_main_tracker_update(
+                            output_file=tracker_path,
+                            key_info_list=update_data["key_info_list"],
+                            grid_rows=update_data["grid_rows"],
+                            last_key_edit=update_data["last_key_edit"],
+                            last_grid_edit=update_data["last_grid_edit"],
+                            path_to_key_info=global_map,
+                        )
+
+                    if t_update:
+                        collector.add(t_update)
+                        collector.commit_all()
+                        batch_suggestions.clear()
+                        processed_count = 0
+                    else:
+                        print("Error: Failed to create tracker update object.")
+                else:
+                    print("Error: Failed to generate update data")
+
+        except Exception as e:
+            logger.error(f"Error processing pair {src_key}->{tgt_key}: {e}")
+            continue
+
+    # Final Commit
+    if processed_count > 0:
+        print(f"Committing final batch of {processed_count} updates...")
+        update_data = update_tracker(
+            output_file_suggestion=tracker_path,
+            path_to_key_info=global_map,
+            tracker_type=tracker_type,
+            suggestions_external=batch_suggestions,
+            return_update=True,
+        )
+        if update_data:
+            t_update = None
+            if tracker_type == "mini":
+                t_update = create_mini_tracker_update(
+                    output_file=update_data["output_file"],
+                    key_info_list=update_data["key_info_list"],
+                    grid_rows=update_data["grid_rows"],
+                    last_key_edit=update_data["last_key_edit"],
+                    last_grid_edit=update_data["last_grid_edit"],
+                    module_path=update_data["module_path"],
+                    path_to_key_info=update_data["path_to_key_info"],
+                    existing_lines=update_data["existing_lines"],
+                    tracker_exists=update_data["tracker_exists"],
+                )
+            elif tracker_type == "doc":
+                t_update = create_doc_tracker_update(
+                    output_file=update_data["output_file"],
+                    key_info_list=update_data["key_info_list"],
+                    grid_rows=update_data["grid_rows"],
+                    last_key_edit=update_data["last_key_edit"],
+                    last_grid_edit=update_data["last_grid_edit"],
+                    path_to_key_info=update_data["path_to_key_info"],
+                )
+            else:  # main
+                t_update = create_main_tracker_update(
+                    output_file=update_data["output_file"],
+                    key_info_list=update_data["key_info_list"],
+                    grid_rows=update_data["grid_rows"],
+                    last_key_edit=update_data["last_key_edit"],
+                    last_grid_edit=update_data["last_grid_edit"],
+                    path_to_key_info=update_data["path_to_key_info"],
+                )
+
+            if t_update:
+                collector.add(t_update)
+                collector.commit_all()
+
+    elapsed = time.time() - start_time
+    print(
+        f"Batch processing complete. Resolved {total_processed} items in {elapsed:.2f}s."
+    )
+    return 0
+
+
 def main():
     """Parse arguments and dispatch to handlers."""
     parser = argparse.ArgumentParser(description="Dependency tracking system CLI")
@@ -1971,6 +2408,47 @@ def main():
         help="Output file path (default: project_overview... or focus_KEY(s)...)",
     )
     visualize_parser.set_defaults(func=handle_visualize_dependencies)
+
+    # --- Resolve Placeholders Command (Batch LLM) ---
+    resolve_placeholders_parser = subparsers.add_parser(
+        "resolve-placeholders",
+        help="Resolve unverified 'p' dependencies using Local LLM in batches",
+    )
+    resolve_placeholders_parser.add_argument(
+        "--tracker", required=True, help="Path to the tracker file"
+    )
+    resolve_placeholders_parser.add_argument(
+        "--key", required=False, help="Restricts to dependencies of this source key"
+    )
+    resolve_placeholders_parser.add_argument(
+        "--limit",
+        type=int,
+        default=200,
+        help="Max dependencies to process (default: 200)",
+    )
+    resolve_placeholders_parser.add_argument(
+        "--dep-char", default="p", help="Dependency char to resolve (default: p)"
+    )
+    resolve_placeholders_parser.add_argument(
+        "--model", required=False, help="Path to GGUF model"
+    )
+    resolve_placeholders_parser.set_defaults(func=handle_resolve_placeholders)
+
+    # --- Determine Dependency Command (LOCAL LLM) ---
+    determine_dep_parser = subparsers.add_parser(
+        "determine-dependency",
+        help="Use local LLM to determine dependency between two keys",
+    )
+    determine_dep_parser.add_argument(
+        "--source-key", required=True, help="Source key (e.g., '1A1' or '1A1#2')"
+    )
+    determine_dep_parser.add_argument(
+        "--target-key", required=True, help="Target key (e.g., '2Ba2' or '2Ba2#1')"
+    )
+    determine_dep_parser.add_argument(
+        "--model", required=False, help="Optional: Path to the GGUF model"
+    )
+    determine_dep_parser.set_defaults(func=handle_determine_dependency)
 
     args = parser.parse_args()
 

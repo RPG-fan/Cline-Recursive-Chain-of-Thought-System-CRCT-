@@ -326,8 +326,8 @@ class ConfigManager:
             ("output", DEFAULT_CONFIG["output"]),
             ("environment", DEFAULT_CONFIG["environment"]),
         ]:
-            if key not in self._config:  
-                self._config[key] = default_value  
+            if key not in self._config:
+                self._config[key] = default_value
 
         # Apply environment variable overrides
         self._apply_environment_overrides()

@@ -42,12 +42,15 @@ PY_LANGUAGE = Language(tspython.language())
 # TS_PARSER = Parser(TS_LANGUAGE) # REMOVED
 # TSX_PARSER = Parser(TSX_LANGUAGE) # REMOVED
 
+from cline_utils.dependency_system.utils.cache_manager import cache_manager, cached
 from cline_utils.dependency_system.utils.cache_manager import (
-    cache_manager,
-    cached,
-    invalidate_dependent_entries,
-    normalize_path_cached as normalize_path,
     get_project_root_cached as get_project_root,
+)
+from cline_utils.dependency_system.utils.cache_manager import (
+    invalidate_dependent_entries,
+)
+from cline_utils.dependency_system.utils.cache_manager import (
+    normalize_path_cached as normalize_path,
 )
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 

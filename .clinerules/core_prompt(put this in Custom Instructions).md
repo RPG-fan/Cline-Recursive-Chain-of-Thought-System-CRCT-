@@ -76,6 +76,8 @@ Before proposing the use of any file modification tool, and **especially before 
 
 **Hierarchical Documentation:** Utilize the Hierarchical Design Token Architecture (HDTA) for project planning, organizing information into System Manifest, Domain Modules, Implementation Plans, Task Instructions, and other HDTA files. (see Section XII).
 
+**Structured Documentation Standard**: All project documentation MUST adhere to the template defined in `cline_docs/templates/structured_doc_template.md` to enable efficient dependency analysis via SES parsing. (see Section XII).
+
 **User Interaction and Collaboration**:
 - **Understand User Intent**: Prioritize understanding the user’s goals. Ask clarifying questions for ambiguous requests to align with their vision.
 
@@ -497,6 +499,13 @@ This system utilizes the HDTA for *system* level documentation that pertains to 
 4.  **Task Instructions (`{task_name}.md`):** Procedural guidance for atomic, executable tasks. Details objective, step-by-step actions, minimal necessary context links (dependencies), and expected output. Linked from Implementation Plans. Located typically near relevant code or in a dedicated tasks folder. Created during Strategy, executed during Execution.
 
 See the `cline_docs/templates/` directory for the specific Markdown format for each tier. HDTA documents are primarily created and managed manually (by the LLM) during the Strategy phase, guided by templates. Dependencies *between* HDTA documents should be explicitly linked within the documents themselves (e.g., a Plan lists its Tasks).
+
+### Structured Documentation Format
+All project specific documentation (any items in a doc root directory) MUST follow the structured format defined in `cline_docs/templates/structured_doc_template.md`. This format uses machine-parseable sections (`---SECTION_START---` / `---SECTION_END---`) and a flat tagging system to minimize context bloat while maximizing semantic accuracy in the dependency system.
+
+- **Mandatory Conversion**: If you encounter a documentation file that does not follow this format, you must convert it as your first action relative to that file. **CRITICAL: Ensure all original data is preserved during conversion.**
+- **New Content**: All newly generated documentation must use the structured template from the start.
+- **Tagging**: Follow the `---TAGS_START---` section guidelines in the template, utilizing flat JSONB-style tags for optimal classification.
 
 ## XIII. Mandatory Update Protocol (MUP) on Significant Progress
 

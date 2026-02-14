@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [8.2.0] - 2026-02-14
+
+### Added
+- **Local LLM Dependency Resolution**: New commands `resolve-placeholders` and `determine-dependency` for automated verification of 'p' placeholders using GGUF models.
+- **Dual-Token Metadata Schema**: Implementation of `ses_tokens` and `full_tokens` for precise context window management.
+- **Structured Documentation Support**: Parser for `structured_doc_template.md` to enhance semantic embedding quality for requirements and design files.
+- **LOCAL_LLM_GUIDE.md**: New handbook for local LLM resolution and command usage.
+
+### Changed
+- **Dependency-Aware Cache Invalidation**: Cascading invalidation based on logical file dependencies to ensure analysis correctness.
+- **Enhanced Document Analysis**: Improved SES extraction logic for markdown/text files.
+
+---
+
+## [8.1.0] - 2026-01-20
+
+### Added
+- **Tracker Batch Collection**: `TrackerBatchCollector` for atomic, high-performance tracker writes with rollback support.
+- **Report Filtering**: `EXCLUSION_PATTERNS` in `report_generator` to eliminate false positives in code quality analysis.
+
+### Changed
+- **Advanced Caching**: Enhanced `@cached` decorator with dynamic file dependencies and mtime-based invalidation.
+- **Optimized I/O**: Refactored `tracker_io` with local lookup caching.
+- **Windows Path Consistency**: Standardized Uppercase drive letters for cross-environment compatibility.
+
+---
+
 ## [8.0.0] - 2025-12-02
 
 > [!IMPORTANT]

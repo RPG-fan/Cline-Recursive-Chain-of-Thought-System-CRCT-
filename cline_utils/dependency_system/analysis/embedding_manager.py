@@ -346,7 +346,8 @@ def _select_best_model() -> Dict[str, Any]:
     qwen_config["path"] = config_manager.get_embedding_setting("qwen3_model_path")
 
     mem_req: float = float(
-        (qwen_config["min_vram_gb"] if device == "cuda" else qwen_config["min_ram_gb"]) or 0
+        (qwen_config["min_vram_gb"] if device == "cuda" else qwen_config["min_ram_gb"])
+        or 0
     )
 
     if available_mem >= mem_req:
@@ -573,7 +574,7 @@ def _load_project_symbol_map() -> Dict[str, Dict[str, Any]]:
 def generate_symbol_essence_string(
     file_path: str,
     symbol_data: Dict[str, Any],
-    max_chars: int = 4000,
+    max_chars: int = 10000,
     symbol_map: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
@@ -803,6 +804,62 @@ def generate_symbol_essence_string(
             sorted_called_by = sorted(list(called_by))
             parts.append(f"CALLED_BY: {', '.join(sorted_called_by)}")
 
+    # 6. Documentation Structural Metadata (NEW)
+    # If this is a doc file, we need its links and code blocks
+    is_doc = symbol_data.get("file_type") == "md" or file_path.lower().endswith(
+        (".md", ".txt", ".rst")
+    )
+    if is_doc:
+        links = symbol_data.get("links", [])
+        if links:
+            # Capturing the 'url' part of the links
+            link_urls = []
+            for lnk in links:
+                if isinstance(lnk, dict) and "url" in lnk:
+                    # Clean up URL to just filename for essence
+                    u = lnk["url"]
+                    if u.startswith("file:///"):
+                        u = os.path.basename(u)
+                    link_urls.append(u)
+            if link_urls:
+                parts.append(f"LINKS: {', '.join(link_urls[:20])}")
+
+        code_blocks = symbol_data.get("code_blocks", [])
+        if code_blocks:
+            parts.append("CODE_BLOCKS:")
+            seen_blocks = set()
+            for cb in code_blocks[:20]:  # Slightly more candidates before deduplication
+                lang = cb.get("language", "text")
+                content = cb.get("content", "").strip()
+                # Get first line of content for essence
+                first_line = content.split("\n")[0] if content else ""
+                block_summary = f"  [{lang}] {first_line}"
+
+                if block_summary not in seen_blocks:
+                    parts.append(block_summary)
+                    seen_blocks.add(block_summary)
+                    if len(seen_blocks) >= 30:  # Limit unique blocks to 10
+                        break
+
+        # Add minimal essence context (headers and first bit)
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    # Read enough to check for structured markers
+                    peek = f.read(200)
+                    f.seek(0)
+                    if "---TAGS_START---" in peek:
+                        # Structured doc: read full file to capture all sections
+                        content = f.read()
+                    else:
+                        # Unstructured doc: small chunk for essence hook
+                        content = f.read(2000)
+                    essence = preprocess_doc_structure(content)
+                    if essence:
+                        parts.append(f"ESSENCE:\n{essence}")
+            except Exception:
+                pass
+
     # Join and truncate if needed
     result = "\n".join(parts)
     if len(result) > max_chars:
@@ -811,13 +868,124 @@ def generate_symbol_essence_string(
     return result
 
 
+def parse_structured_doc(content: str) -> str:
+    """
+    Parses a structured documentation file (using ---SECTION_START---/---SECTION_END--- markers)
+    and extracts the essence for SES generation.
+
+    Extraction rules:
+    - TAGS: Full inclusion (tags + related_tags)
+    - CONTEXT: Full inclusion (1-2 dense sentences)
+    - OVERVIEW: Headers only
+    - DETAILS: Sub-headers only (code blocks handled separately via symbol_data)
+    - REFERENCES: Full inclusion (links to related files)
+    """
+    parts = []
+
+    # Extract TAGS section (full)
+    tags_match = _extract_section(content, "TAGS")
+    if tags_match:
+        for line in tags_match.strip().split("\n"):
+            line = line.strip()
+            if line and not line.startswith("<!--"):
+                parts.append(f"TAG: {line}")
+
+    # Extract CONTEXT section (full)
+    context_match = _extract_section(content, "CONTEXT")
+    if context_match:
+        for line in context_match.strip().split("\n"):
+            line = line.strip()
+            if line and not line.startswith("##"):
+                parts.append(line)
+
+    # Extract OVERVIEW section (headers only)
+    overview_match = _extract_section(content, "OVERVIEW")
+    if overview_match:
+        for line in overview_match.strip().split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                parts.append(stripped)
+
+    # Extract DETAILS section (sub-headers only)
+    details_match = _extract_section(content, "DETAILS")
+    if details_match:
+        for line in details_match.strip().split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                parts.append(stripped)
+
+    # Extract REFERENCES section (full)
+    refs_match = _extract_section(content, "REFERENCES")
+    if refs_match:
+        for line in refs_match.strip().split("\n"):
+            line = line.strip()
+            if line and not line.startswith("##"):
+                parts.append(line)
+
+    return "\n".join(parts)
+
+
+def _extract_section(content: str, section_name: str) -> Optional[str]:
+    """
+    Extracts the content between ---SECTION_NAME_START--- and ---SECTION_NAME_END--- markers.
+    Returns None if markers are not found.
+    """
+    start_marker = f"---{section_name}_START---"
+    end_marker = f"---{section_name}_END---"
+
+    start_idx = content.find(start_marker)
+    if start_idx == -1:
+        return None
+
+    start_idx += len(start_marker)
+    end_idx = content.find(end_marker, start_idx)
+    if end_idx == -1:
+        return None
+
+    return content[start_idx:end_idx]
+
+
 def preprocess_doc_structure(content: str) -> str:
     """
-    Preprocesses documentation for embedding/reranking.
-    Returns the full content (truncated to 32k chars) to preserve context.
+    Preprocesses documentation for embedding/reranking to extract its essence.
+
+    If the document follows the structured template (has ---TAGS_START--- marker),
+    uses parse_structured_doc for precise extraction.
+    Otherwise, falls back to header + first-paragraph extraction.
     """
-    # Return full content with a generous safety cap
-    return content[:32000]
+    # Check for structured doc markers
+    if "---TAGS_START---" in content:
+        return parse_structured_doc(content)
+
+    # Fallback: extract headers and first paragraph
+    lines = content.split("\n")
+    essence_parts = []
+
+    found_first_paragraph = False
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Capture all headers (Markdown style)
+        if stripped.startswith("#"):
+            essence_parts.append(stripped)
+            continue
+
+        # Capture first non-header, non-empty paragraph as summary
+        if not found_first_paragraph and len(essence_parts) < 20:
+            # Simple check for paragraph content (not a list item, not a link)
+            if not any(
+                stripped.startswith(c) for c in ["- ", "* ", "> ", "http", "file://"]
+            ):
+                essence_parts.append(stripped)  # Cap summary length
+                found_first_paragraph = True
+
+        if len(essence_parts) > 50:
+            break
+
+    return "\n".join(essence_parts)
 
 
 # --- Reranker Logic ---
@@ -1266,7 +1434,9 @@ def rerank_candidates_with_qwen3(
             current_len = current_item["length"]
 
             # Calculate initial batch size based on shortest remaining item
-            batch_size = _calculate_dynamic_batch_size(available_mem, current_len, device)
+            batch_size = _calculate_dynamic_batch_size(
+                available_mem, current_len, device
+            )
 
             # Look ahead to find the actual max length in this tentative batch
             end_idx = min(start_idx + batch_size, total_candidates)
@@ -1296,9 +1466,13 @@ def rerank_candidates_with_qwen3(
             ):
                 min_batch_end = min(start_idx + MIN_RERANK_BATCH_SIZE, total_candidates)
                 min_batch_max_len: int = int(sorted_items[min_batch_end - 1]["length"])
-                _wait_for_vram_gb = float(
-                    MIN_RERANK_BATCH_SIZE * (175 + (min_batch_max_len / 1000.0) * 80)
-                ) / 1024.0
+                _wait_for_vram_gb = (
+                    float(
+                        MIN_RERANK_BATCH_SIZE
+                        * (175 + (min_batch_max_len / 1000.0) * 80)
+                    )
+                    / 1024.0
+                )
                 # logger.debug(
                 #     f"Batch too small ({actual_batch_count} < {MIN_RERANK_BATCH_SIZE}), "
                 #     f"waiting for {_wait_for_vram_gb:.2f}GB VRAM"
@@ -1415,7 +1589,11 @@ def _get_text_content_for_embedding(
     file_path: str, symbol_map: Dict[str, Any], project_root: str
 ) -> str:
     """Helper to retrieve text content for embedding from symbol map or file."""
+    ext = os.path.splitext(file_path)[1].lower()
+    is_doc = ext in [".md", ".txt", ".rst"]
+
     if file_path in symbol_map:
+        # For docs in symbol map, we still want the essence string if it's been updated to handle them
         return generate_symbol_essence_string(
             file_path, symbol_map[file_path], symbol_map=symbol_map
         )
@@ -1424,8 +1602,7 @@ def _get_text_content_for_embedding(
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext in [".md", ".txt", ".rst"]:
+        if is_doc:
             return preprocess_doc_structure(content)
 
         rel_path = os.path.relpath(file_path, project_root)
@@ -1478,7 +1655,7 @@ def generate_embeddings(
             logger.warning(f"Failed to load existing metadata: {e}")
 
     # Track token counts for all files
-    final_token_counts: Dict[str, int] = {}
+    final_token_counts: Dict[str, Dict[str, int]] = {}
 
     # 2. Identification Phase
     files_to_process: List[KeyInfo] = []
@@ -1548,14 +1725,25 @@ def generate_embeddings(
                 continue
 
             # Count tokens
-            token_count = _count_tokens(text_to_embed, tokenizer)
-            final_token_counts[key_info.key_string] = token_count
+            ses_token_count = _count_tokens(text_to_embed, tokenizer)
+
+            # Count Full Context tokens (for raw file content)
+            full_token_count = 0
+
+            with open(file_path, "r", encoding="utf-8") as f:
+                full_content = f.read()
+                full_token_count = _count_tokens(full_content, tokenizer)
+
+            final_token_counts[key_info.key_string] = {
+                "ses_tokens": ses_token_count,
+                "full_tokens": full_token_count,
+            }
 
             processing_queue.append(
                 {
                     "key_info": key_info,
                     "text": text_to_embed,
-                    "tokens": token_count,
+                    "tokens": ses_token_count,
                     "rel_path": rel_path,
                 }
             )
@@ -1568,7 +1756,9 @@ def generate_embeddings(
     current_batch_paths = []
 
     # Determine batch size
-    effective_batch_size = batch_size or (64 if _selected_device_cache == "cuda" else 16)
+    effective_batch_size = batch_size or (
+        64 if _selected_device_cache == "cuda" else 16
+    )
 
     with PhaseTracker(
         total=len(processing_queue), phase_name="Generating Embeddings"
@@ -1605,44 +1795,82 @@ def generate_embeddings(
             _flush_batch(current_batch_texts, current_batch_paths)
             tracker.update(len(current_batch_texts))
 
-    # Create/Update Metadata
+    # 4. Create/Update Metadata
     metadata_path = os.path.join(embeddings_dir, "metadata.json")
     new_metadata = {
-        "version": "2.0_SES",
-        "model": _selected_model_config["name"] if _selected_model_config else "unknown",
+        "version": "2.1_DualTokens",
+        "model": (
+            _selected_model_config["name"] if _selected_model_config else "unknown"
+        ),
         "keys": {},
     }
 
-    # Populate metadata with current state of all valid files
+    # If we have existing metadata, carry it over ONLY for current valid keys
+    if existing_metadata:
+        for k, v in existing_metadata.items():
+            # Only migrate if the key is still valid in the current analysis
+            if k in path_to_key_info:
+                new_metadata["keys"][k] = v
+                # Migrate old tokens if needed
+                if "tokens" in v and ("full_tokens" not in v or "ses_tokens" not in v):
+                    new_metadata["keys"][k]["ses_tokens"] = v["tokens"]
+                    # We mark full_tokens same as ses_tokens for migrated entries as a safe fallback
+                    new_metadata["keys"][k]["full_tokens"] = v["tokens"]
+                    del new_metadata["keys"][k]["tokens"]
+
+    # Overwrite with new items or add new ones
     for key_info in path_to_key_info.values():
         if key_info.is_directory:
             continue
+
         rel_path = os.path.relpath(key_info.norm_path, project_root)
         npy_path = os.path.join(embeddings_dir, rel_path) + ".npy"
 
         if os.path.exists(npy_path):
             try:
                 # Get token count: new > existing > calculate
-                token_count = final_token_counts.get(key_info.key_string)
-                if token_count is None:
-                    if (
-                        key_info.key_string in existing_metadata
-                        and "tokens" in existing_metadata[key_info.key_string]
-                    ):
-                        token_count = existing_metadata[key_info.key_string]["tokens"]
-                    else:
-                        # Fallback: calculate now (avoiding full re-embed)
-                        # This happens if file was skipped but metadata is missing tokens
+                token_data = final_token_counts.get(key_info.key_string)
+
+                ses_tokens = 0
+                full_tokens = 0
+
+                if token_data is not None:
+                    ses_tokens = token_data["ses_tokens"]
+                    full_tokens = token_data["full_tokens"]
+                elif (
+                    key_info.key_string in existing_metadata
+                    and "ses_tokens" in existing_metadata[key_info.key_string]
+                ):
+                    # Use existing migrated valid data
+                    ses_tokens = existing_metadata[key_info.key_string]["ses_tokens"]
+                    full_tokens = existing_metadata[key_info.key_string].get(
+                        "full_tokens", ses_tokens
+                    )
+                elif (
+                    key_info.key_string in existing_metadata
+                    and "tokens" in existing_metadata[key_info.key_string]
+                ):
+                    # Legacy fallback (should have been migrated in loop above, but double check)
+                    ses_tokens = existing_metadata[key_info.key_string]["tokens"]
+                    full_tokens = ses_tokens
+                else:
+                    # Fallback: calculate now
+                    try:
                         text = _get_text_content_for_embedding(
                             key_info.norm_path, symbol_map, project_root
                         )
-                        token_count = _count_tokens(text, tokenizer)
-                        final_token_counts[key_info.key_string] = token_count
+                        ses_tokens = _count_tokens(text, tokenizer)
+                        # Try to get full too
+                        with open(key_info.norm_path, "r", encoding="utf-8") as f:
+                            full_tokens = _count_tokens(f.read(), tokenizer)
+                    except Exception:
+                        full_tokens = ses_tokens
 
                 new_metadata["keys"][key_info.key_string] = {
                     "path": key_info.norm_path,
                     "mtime": os.path.getmtime(key_info.norm_path),
-                    "tokens": token_count,
+                    "ses_tokens": ses_tokens,
+                    "full_tokens": full_tokens,
                 }
             except OSError:
                 pass

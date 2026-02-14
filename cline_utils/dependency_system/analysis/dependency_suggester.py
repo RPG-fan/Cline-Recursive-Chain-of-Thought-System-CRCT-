@@ -13,6 +13,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+
 # Attempt to import jsonc-parser
 def _init_jsonc() -> Tuple[Any, bool, Any, Any, Any]:
     try:
@@ -37,10 +38,7 @@ from cline_utils.dependency_system.core import key_manager
 
 # Import only from lower-level modules
 from cline_utils.dependency_system.core.key_manager import KeyInfo
-from cline_utils.dependency_system.utils.cache_manager import (
-    cached,
-    clear_all_caches,
-)
+from cline_utils.dependency_system.utils.cache_manager import cached, clear_all_caches
 from cline_utils.dependency_system.utils.cache_manager import (
     normalize_path_cached as normalize_path,
 )
@@ -69,29 +67,38 @@ _structural_resolved_path_cache: Dict[Tuple[str, Optional[str]], Optional[str]] 
 # s: Semantic dependency (weak .06-.07) - Adjusted based on .clinerules
 # S: Semantic dependency (strong .07+) - Added based on .clinerules
 
-GLOBAL_SCAN_LIMIT = 80
+GLOBAL_SCAN_LIMIT = 100
 _PROJECT_SYMBOL_MAP_FILENAME_LOCAL = "project_symbol_map.json"
+
 
 def _get_symbol_map_path() -> str:
     """Robustly determines the path to project_symbol_map.json."""
     try:
         # Use import to find the directory of key_manager.py
         import cline_utils.dependency_system.core.key_manager as km
-        return normalize_path(os.path.join(os.path.dirname(os.path.abspath(km.__file__)), _PROJECT_SYMBOL_MAP_FILENAME_LOCAL))
+
+        return normalize_path(
+            os.path.join(
+                os.path.dirname(os.path.abspath(km.__file__)),
+                _PROJECT_SYMBOL_MAP_FILENAME_LOCAL,
+            )
+        )
     except Exception:
         # Fallback relative to this file
-        return normalize_path(os.path.join(os.path.dirname(os.path.dirname(__file__)), "core", _PROJECT_SYMBOL_MAP_FILENAME_LOCAL))
+        return normalize_path(
+            os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                "core",
+                _PROJECT_SYMBOL_MAP_FILENAME_LOCAL,
+            )
+        )
 
 
 # _OLD_PROJECT_SYMBOL_MAP_FILENAME_LOCAL = "project_symbol_map_old.json" # Not used by load, only by save
 def clear_caches():
     clear_all_caches()
-    if hasattr(_find_and_parse_tsconfig, "_cache"):
-        _find_and_parse_tsconfig._cache.clear()  
     _structural_import_map_cache.clear()
     _structural_resolved_path_cache.clear()
-    if hasattr(load_project_symbol_map, "_cache"):
-        load_project_symbol_map._cache.clear()  
 
 
 @cached("metadata", track_path_args=[0])
@@ -1728,8 +1735,8 @@ def suggest_semantic_dependencies_path_based(
                         with open(scans_file, "a", encoding="utf-8") as f:
                             for cand_ki, cand_conf in top_candidates:
                                 # Defensive: skip entries with missing source or target
-                                src_path = getattr(source_key_info, 'norm_path', None)
-                                tgt_path = getattr(cand_ki, 'norm_path', None)
+                                src_path = getattr(source_key_info, "norm_path", None)
+                                tgt_path = getattr(cand_ki, "norm_path", None)
                                 if not src_path or not tgt_path:
                                     logger.warning(
                                         f"Skipping scan log entry: missing "
@@ -1752,21 +1759,42 @@ def suggest_semantic_dependencies_path_based(
 
                 # Get the source text for reranking
                 try:
+                    ext = os.path.splitext(file_path)[1].lower()
+                    is_doc = ext in [".md", ".txt", ".rst"]
+
                     # Prepare query text (source file)
                     query_text = ""
-                    if project_symbol_map and file_path in project_symbol_map:
+
+                    if is_doc:
+                        # For docs, we prefer preprocess_doc_structure or the new doc-aware SES
+                        if project_symbol_map and file_path in project_symbol_map:
+                            query_text = generate_symbol_essence_string(
+                                file_path,
+                                project_symbol_map[file_path],
+                                symbol_map=project_symbol_map,
+                            )
+                        else:
+                            try:
+                                with open(file_path, "r", encoding="utf-8") as f:
+                                    content = f.read()
+                                query_text = preprocess_doc_structure(content)
+                            except Exception:
+                                query_text = f"[DOC: {os.path.basename(file_path)}]"
+                    elif project_symbol_map and file_path in project_symbol_map:
+                        # Code files in symbol map
                         query_text = generate_symbol_essence_string(
-                            file_path, project_symbol_map[file_path]
+                            file_path,
+                            project_symbol_map[file_path],
+                            symbol_map=project_symbol_map,
                         )
                     else:
-                        with open(file_path, "r", encoding="utf-8") as f:
-                            content = f.read()
-
-                        ext = os.path.splitext(file_path)[1].lower()
-                        if ext in [".md", ".txt", ".rst"]:
-                            query_text = preprocess_doc_structure(content)
-                        else:
+                        # Fallback for untracked code or other files
+                        try:
+                            with open(file_path, "r", encoding="utf-8") as f:
+                                content = f.read()
                             query_text = f"[FILE: {os.path.basename(file_path)}]\n{content[:8192]}"
+                        except Exception:
+                            query_text = f"[FILE: {os.path.basename(file_path)}]"
                 except Exception as e:
                     logger.warning(
                         f"Could not read source file {file_path} for reranking: {e}"
@@ -1790,14 +1818,43 @@ def suggest_semantic_dependencies_path_based(
                             # Use SES if available to reduce context size
                             candidate_text = ""
 
-                            # Check if target is in symbol map
-                            if (
+                            target_ext = os.path.splitext(target_ki.norm_path)[
+                                1
+                            ].lower()
+                            target_is_doc = target_ext in [".md", ".txt", ".rst"]
+
+                            # Read the actual content for reranking
+                            candidate_text = ""
+
+                            if target_is_doc:
+                                if (
+                                    project_symbol_map
+                                    and target_ki.norm_path in project_symbol_map
+                                ):
+                                    candidate_text = generate_symbol_essence_string(
+                                        target_ki.norm_path,
+                                        project_symbol_map[target_ki.norm_path],
+                                        symbol_map=project_symbol_map,
+                                    )
+                                else:
+                                    try:
+                                        with open(
+                                            target_ki.norm_path, "r", encoding="utf-8"
+                                        ) as f:
+                                            content = f.read()
+                                        candidate_text = preprocess_doc_structure(
+                                            content
+                                        )
+                                    except Exception:
+                                        candidate_text = f"[DOC: {os.path.basename(target_ki.norm_path)}]"
+                            elif (
                                 project_symbol_map
                                 and target_ki.norm_path in project_symbol_map
                             ):
                                 candidate_text = generate_symbol_essence_string(
                                     target_ki.norm_path,
                                     project_symbol_map[target_ki.norm_path],
+                                    symbol_map=project_symbol_map,
                                 )
                             else:
                                 # Fallback for non-code or untracked files
@@ -1806,19 +1863,10 @@ def suggest_semantic_dependencies_path_based(
                                         target_ki.norm_path, "r", encoding="utf-8"
                                     ) as f:
                                         content = f.read()
-
-                                    ext = os.path.splitext(target_ki.norm_path)[
-                                        1
-                                    ].lower()
-                                    if ext in [".md", ".txt", ".rst"]:
-                                        candidate_text = preprocess_doc_structure(
-                                            content
-                                        )
-                                    else:
-                                        # Limit raw content
-                                        candidate_text = f"[FILE: {os.path.basename(target_ki.norm_path)}]\n{content[:8192]}"
+                                    # Limit raw content
+                                    candidate_text = f"[FILE: {os.path.basename(target_ki.norm_path)}]\n{content[:8192]}"
                                 except Exception:
-                                    continue
+                                    candidate_text = f"[FILE: {os.path.basename(target_ki.norm_path)}]"
 
                             candidate_text = instruction + candidate_text
                             candidate_texts.append(candidate_text)

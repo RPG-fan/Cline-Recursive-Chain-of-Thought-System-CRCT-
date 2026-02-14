@@ -126,7 +126,7 @@ class Cache:
                 return None
 
             # Get value and metadata
-            value, _access_time, expiry = self.data[key]
+            value, current_time, expiry = self.data[key]
 
             # Check if expired
             if expiry and time.time() > expiry:
@@ -318,7 +318,9 @@ class Cache:
                 value, _, _ = self.data[key]
                 size = self._estimate_size(value)
                 del self.data[key]
-                self.metrics.total_size_bytes = max(0, self.metrics.total_size_bytes - size)
+                self.metrics.total_size_bytes = max(
+                    0, self.metrics.total_size_bytes - size
+                )
 
             # Clean up reverse dependencies: remove 'key' from the dependency lists of its dependents
             if key in self.reverse_deps:
@@ -500,17 +502,17 @@ class CacheManager:
             for active_cache in active_caches:
                 if total_usage <= target_usage:
                     break
-                
+
                 # Evict 20% of items or until we meet target
                 initial_size: int = active_cache.metrics.total_size_bytes
                 if initial_size == 0:
                     continue
-                
+
                 items_to_evict = max(1, len(active_cache.data) // 5)
                 # Ensure we don't evict everything if it's small
                 if len(active_cache.data) < 5 and total_usage > budget_bytes:
                     items_to_evict = 1
-                    
+
                 with active_cache._lock:
                     # Logic similar to _evict_items but forced
                     time_sorted: list[str] = sorted(
@@ -521,8 +523,8 @@ class CacheManager:
                     for key in keys_to_evict:
                         active_cache._remove_key(key)
                         active_cache.metrics.evictions += 1
-                
-                total_usage -= (initial_size - active_cache.metrics.total_size_bytes)
+
+                total_usage -= initial_size - active_cache.metrics.total_size_bytes
 
     @staticmethod
     def get_global_budget_mb() -> int:
@@ -538,6 +540,7 @@ class CacheManager:
             # Use psutil directly instead of ConfigManager to avoid an
             # import cycle (cache_manager ↔ config_manager).
             import psutil
+
             available_mb: int = psutil.virtual_memory().available // (1024 * 1024)
             if available_mb > 16384:  # > 16GB available
                 _global_budget_mb = 2048
@@ -742,11 +745,25 @@ def file_modified(file_path: str, project_root: str, cache_type: str = "all") ->
         else [cache_manager.get_cache(cache_type)]
     )
 
+    dep_key = f"file:{norm_path}"
+
     for cache_instance in caches_to_scan:
         if cache_instance:
+            # 1. Invalidate by key pattern check (existing logic)
             cache_instance.invalidate(key_pattern_to_invalidate)
+
+            # 2. Invalidate by dependency lookup (new logic)
+            with cache_instance._lock:
+                if dep_key in cache_instance.dependencies:
+                    # Get list of keys dependent on this file
+                    dependent_keys = list(cache_instance.dependencies[dep_key])
+                    if dependent_keys:
+                        # logger.debug(f"Cache '{cache_instance.name}': Invalidating {len(dependent_keys)} entries dependent on '{norm_path}'")
+                        for key in dependent_keys:
+                            cache_instance._remove_key(key)
+
     logger.debug(
-        f"Invalidated entries matching path '{norm_path}' (pattern '{key_pattern_to_invalidate}') in cache(s) type '{cache_type}'."
+        f"Invalidated entries matching path '{norm_path}' in cache(s) type '{cache_type}'."
     )
 
 

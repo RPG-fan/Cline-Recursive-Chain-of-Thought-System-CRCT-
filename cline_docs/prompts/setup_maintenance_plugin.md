@@ -109,8 +109,14 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
         *   Examine the output. Keys listed might be base keys (e.g., "1A1") or globally instanced keys (e.g., "2B1#1") if their base key string is used for multiple different paths in the project. Identify all lines ending with `(checks needed: ...)`. This indicates unresolved 'p', 's', or 'S' characters in that key's row *within this tracker*.
         *   Create a list of these keys needing verification for `doc_tracker.md`. If none, state this and proceed to Stage 2.
     *   **B. Verify Placeholders/Suggestions for Identified Keys**:
-        *   Iterate through the list of keys from Step 2.A.
-        *   For each `key_string` (row key):
+        *   **Automated Resolution (Optional)**:
+            *   You may use the local LLM to resolve 'p' placeholders in batches *before* manual verification.
+            *   Command: `python -m cline_utils.dependency_system.dependency_processor resolve-placeholders --tracker <path_to_doc_tracker.md>` (defaults to processing all 'p' placeholders).
+            *   *(Optional args: `--limit 50`, `--key <key_string>`, `--dep-char p`)*.
+            *   **Review**: Review the changes. The LLM will update 'p' to '<', '>', 'x', 'd', or 'n'.
+        *   **Manual/Targeted Verification**:
+            *   Iterate through the list of keys from Step 2.A (or remaining keys after automation).
+            *   For each `key_string` (row key):
             *   **Get Context**: Run `show-placeholders` targeting the current tracker and key. This command specifically lists the 'p', 's', and 'S' relationships for the given key *within this tracker*, providing a targeted list for verification.
             ```bash
             python -m cline_utils.dependency_system.dependency_processor show-placeholders --tracker <path_to_doc_tracker.md> --key <key_string>
@@ -173,8 +179,7 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
                     - Focus on Relational Necessity: Does one file provide the context or blueprint for the other?
                     - Err on the side of 'd' if the files share a logical flow or implementation goal.
                     - Mark 'n' only if the files are truly unrelated in terms of system operation or design.
-                    - The source file is about "{brief_description}" - likely related to {relevant_context}
-
+                    
                     Expected Output
                     A clear summary of dependency determinations for all target files in this group with reasoning for each.
                     ```
@@ -303,7 +308,8 @@ graph TD
     subgraph Verify_doc_tracker [Stage 1: doc_tracker.md]
         C1[Use show-keys --tracker doc_tracker.md] --> C2{Checks Needed?};
         C2 -- Yes --> C3[Identify Key(s)];
-        C3 --> C4[For Each Key needing check:];
+        C3 --> C3a[Optional: Run resolve-placeholders --auto];
+        C3a --> C4[For Each (remaining) Key needing check:];
         C4 --> C5(Run show-placeholders --tracker doc_tracker.md --key [key]);
         C5 --> C6{Many Targets >10?};
         C6 -- Yes --> C6a[Group Targets 5-10 per chunk];

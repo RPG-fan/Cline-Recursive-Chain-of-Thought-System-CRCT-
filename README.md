@@ -1,7 +1,12 @@
-# Cline Recursive Chain-of-Thought System (CRCT) - v8.1
+# Cline Recursive Chain-of-Thought System (CRCT) - v8.2
 
 Welcome to the **Cline Recursive Chain-of-Thought System (CRCT)**, a framework designed to manage context, dependencies, and tasks in large-scale Cline projects within VS Code. Built for the Cline extension, CRCT leverages a recursive, file-based approach with a modular dependency tracking system to maintain project state and efficiency as complexity increases.
 
+- Version **v8.2**: 🤖 **LOCAL LLM & DUAL-TOKEN EMBEDDINGS** - Automated Resolution & Precise Context
+    - **Automated Placeholder Resolution**: New `resolve-placeholders` command uses local LLMs (via `llama-cpp-python`) to verify 'p' dependencies in batches, significantly reducing manual verification time and API costs.
+    - **Dual-Token Schema**: Refactored metadata to track both `ses_tokens` (for embeddings) and `full_tokens` (for total file size), enabling smarter context window management.
+    - **Enhanced Documentation Parsing**: Specialized SES extraction for structured docs, improving semantic search for requirements and design specs.
+    - **Dependency-Aware Cache**: Cache invalidation now cascades through logical file dependencies, ensuring analysis consistency.
 - Version **v8.1**: ⚡ **PERFORMANCE & STABILITY** - Batching and Caching Overhaul
     - **Tracker Batch Collection**: New `TrackerBatchCollector` system for atomic, high-performance tracker writes with rollback support.
     - **Advanced Caching**: Enhanced `@cached` decorator with dynamic file dependencies (`file_deps`), mtime-based invalidation, and automated path tracking.
@@ -75,6 +80,10 @@ Welcome to the **Cline Recursive Chain-of-Thought System (CRCT)**, a framework d
     - `show-dependencies` aggregates dependency details (inbound/outbound, paths) from *all* trackers for a specific key, eliminating manual tracker deciphering.
     - `add-dependency` resolves placeholder ('p') or suggested ('s', 'S') relationships identified via this process. **Crucially, when targeting a mini-tracker (`*_module.md`), `add-dependency` now allows specifying a `--target-key` that doesn't exist locally, provided the target key is valid globally (known from `analyze-project`). The system automatically adds the foreign key definition and updates the grid, enabling manual linking to external dependencies.**
       *   **Tip:** This is especially useful for manually linking relevant documentation files (e.g., requirements, design specs, API descriptions) to code files within a mini-tracker, even if the code file is incomplete or doesn't trigger an automatic suggestion. This provides the LLM with crucial context during code generation or modification tasks, guiding it towards the intended functionality described in the documentation (`doc_key < code_key`).
+    - `resolve-placeholders`: **(NEW in v8.2)** Automates the verification of unverified dependencies ('p') using a local LLM. This makes the resolution process significantly more efficient and less costly than using larger API-based models.
+      *   Example: `python -m cline_utils.dependency_system.dependency_processor resolve-placeholders --tracker <path_to_tracker.md>`
+    - `determine-dependency`: **(NEW in v8.2)** Performs a detailed local LLM analysis between two specific keys to verify their relationship with full reasoning.
+      *   Example: `python -m cline_utils.dependency_system.dependency_processor determine-dependency --source-key <key> --target-key <key>`
    - **Dependency Visualization (`visualize-dependencies`)**: **(NEW in v7.8)**
     - Generates Mermaid diagrams for project overview, module scope (internal + interface), or specific key focus.
     - Auto-generates overview/module diagrams via `analyze-project`.
@@ -204,6 +213,7 @@ Cline-Recursive-Chain-of-Thought-System-CRCT-/
 
 ## Current Status & Future Plans
 
+- **v8.2**: 🤖 **Local LLM & Dual-Tokens** - Automated resolution of dependency placeholders and precise token-based context management.
 - **v8.1**: ⚡ **Performance Optimization** - Introduced batch tracker updates and advanced caching mechanisms to handle larger projects with lower I/O overhead.
 - **v8.0**: 🚀 **Major architecture evolution** - Symbol Essence Strings, Qwen3 reranker, hardware-adaptive models, runtime symbol inspection, enhanced UX with PhaseTracker. See [CHANGELOG.md](CHANGELOG.md) for complete details.
 - **v7.8**: Focus on **visual comprehension and planning robustness**. Introduced Mermaid dependency diagrams (`visualize-dependencies`, auto-generation via `analyze-project`). Overhauled the Strategy phase (`strategy_plugin.md`) for iterative, area-based roadmap planning, explicitly using visualizations. Refined HDTA templates, including a new `roadmap_summary_template.md`.
