@@ -28,10 +28,10 @@ class LocalLLMProcessor:
         # The context window orbits the actual needed size at a fixed radius,
         # both increasing AND decreasing as requirements change.
 
-        # Buffer margin to avoid edge cases (5% or minimum 256 tokens)
-        ctx_buffer = max(256, int(required_ctx * 0.05))
-        # Round up to nearest 1024 for memory alignment efficiency
-        round_to = 1024
+        # Buffer margin to avoid edge cases (5% or minimum 128 tokens)
+        ctx_buffer = max(128, int(required_ctx * 0.05))
+        # Round up to nearest 512 for memory alignment efficiency
+        round_to = 512
         # Threshold for context reduction (don't shrink unless savings exceed 15%)
         shrink_threshold = 0.15
 
@@ -70,7 +70,13 @@ class LocalLLMProcessor:
 
         logger.info(f"Loading local LLM from {self.model_path} with n_ctx={n_ctx}...")
         self._model = Llama(
-            model_path=self.model_path, n_ctx=n_ctx, n_gpu_layers=-1, verbose=False
+            model_path=self.model_path,
+            n_ctx=n_ctx,
+            n_gpu_layers=-1,
+            verbose=False,
+            type_k=8,
+            type_v=8,
+            flash_attn=True,
         )
         self.current_n_ctx = n_ctx
         return self._model
