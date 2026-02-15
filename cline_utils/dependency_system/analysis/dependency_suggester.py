@@ -67,7 +67,7 @@ _structural_resolved_path_cache: Dict[Tuple[str, Optional[str]], Optional[str]] 
 # s: Semantic dependency (weak .06-.07) - Adjusted based on .clinerules
 # S: Semantic dependency (strong .07+) - Added based on .clinerules
 
-GLOBAL_SCAN_LIMIT = 100
+GLOBAL_SCAN_LIMIT = 1500
 _PROJECT_SYMBOL_MAP_FILENAME_LOCAL = "project_symbol_map.json"
 
 
@@ -1707,7 +1707,7 @@ def suggest_semantic_dependencies_path_based(
                             shared_scan_counter.value = GLOBAL_SCAN_LIMIT
 
                 logger.debug(
-                    "Global reranker scan limit (20) reached. Skipping reranking for this file."
+                    "Global reranker scan limit reached. Skipping reranking for this file."
                 )
                 top_candidates = []
             else:

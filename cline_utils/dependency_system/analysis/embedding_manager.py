@@ -1276,23 +1276,26 @@ def _calculate_dynamic_batch_size(
     - Context=32000: ~2.5GB per sample -> Batch size ~2
     """
     # Empirical formula: MB per sample = base_overhead + (context_length * kb_per_token)
-    # These values are tuned from actual VRAM observations
-    base_overhead_mb = 175  # Base overhead per sample in MB
-    mb_per_1k_tokens = 80  # Additional MB per 1000 tokens
+    # Corrected based on Qwen 0.6B architecture (approx 80MB per 1k tokens for KV cache) and verified with reproduction script.
+    # Set base_overhead_mb to 30MB to cover per-item fixed metadata/overhead + safety.
+    # Set mb_per_1k_tokens to 120MB to cover KV cache + activations + padding overhead + safety.
+    base_overhead_mb = 30  # Base overhead per sample in MB
+    mb_per_1k_tokens = 120  # MB per 1000 tokens
 
     estimated_mb_per_sample = (
         base_overhead_mb + (context_length / 1000.0) * mb_per_1k_tokens
     )
     estimated_gb_per_sample = estimated_mb_per_sample / 1024.0
 
-    # Safety buffer: leave 10% or 1GB, whichever is larger
-    reserved_buffer = max(1.0, available_mem_gb * 0.1)
+    # Safety buffer: leave 10% or 0.5GB, whichever is larger
+    # Reduced constant buffer from 1.0GB to 0.5GB as reliability improves
+    reserved_buffer = max(0.5, available_mem_gb * 0.1)
     usable_mem_gb = max(0.0, available_mem_gb - reserved_buffer)
 
     max_batch = int(usable_mem_gb / estimated_gb_per_sample)
 
     # Clamp batch size
-    max_batch = max(1, min(max_batch, 15))  # Cap at 15
+    max_batch = max(1, min(max_batch, 50))  # Cap at 50
 
     # logger.debug(
     #     f"Dynamic Batch Sizing: Available={available_mem_gb:.2f}GB, "
@@ -1487,9 +1490,9 @@ def rerank_candidates_with_qwen3(
         batch_items = sorted_items[start_idx:end_idx]
 
         # Estimate VRAM needed for this batch and request allocation
-        # Use the same empirical model as _calculate_dynamic_batch_size:
-        # base_overhead=175MB/sample + 80MB per 1k tokens per sample
-        estimated_mb = len(batch_items) * (175 + (max_len_in_batch / 1000.0) * 80)
+        # Use the same verified model as _calculate_dynamic_batch_size:
+        # base_overhead=30MB/sample + 120MB per 1k tokens per sample
+        estimated_mb = len(batch_items) * (30 + (max_len_in_batch / 1000.0) * 120)
         estimated_vram_gb = estimated_mb / 1024.0
 
         logger.debug(

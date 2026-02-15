@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 HISTORY_DIR = "cline_utils/dependency_system/analysis/reranker_history"
-MAX_CYCLES_TO_KEEP = 10
+MAX_CYCLES_TO_KEEP = 5
 SUGGESTIONS_LOG_FILENAME = "suggestions.log"
 SCANS_LOG_FILENAME = "cline_utils/dependency_system/analysis/reranker_scans.jsonl"
 
@@ -277,7 +277,7 @@ def get_top_assignments(
 
 
 def get_bottom_assignments(
-    assignments: List[RerankerAssignment], n: int = 10
+    assignments: List[RerankerAssignment], n: int = 5
 ) -> List[Dict[str, Any]]:
     """Get bottom N least confident assignments."""
     sorted_assignments = sorted(assignments, key=lambda a: a.confidence)
@@ -315,7 +315,7 @@ def save_cycle_data(
         "total_suggestions": len(assignments),
         "metrics": metrics,
         "top_10_confident": get_top_assignments(assignments, 10),
-        "bottom_10_confident": get_bottom_assignments(assignments, 10),
+        "bottom_5_confident": get_bottom_assignments(assignments, 5),
         "all_pairs": all_pairs,
     }
 
@@ -508,8 +508,8 @@ def repair_history_file(filepath: str) -> bool:
             data["all_pairs"] = _resolve_and_clean(data["all_pairs"])
         if "top_10_confident" in data:
             data["top_10_confident"] = _resolve_and_clean(data["top_10_confident"])
-        if "bottom_10_confident" in data:
-            data["bottom_10_confident"] = _resolve_and_clean(data["bottom_10_confident"])
+        if "bottom_5_confident" in data:
+            data["bottom_5_confident"] = _resolve_and_clean(data["bottom_5_confident"])
 
         if modified:
             with open(filepath, "w", encoding="utf-8") as f:
@@ -648,7 +648,7 @@ def get_historical_pairs(
                     # Fallback to top/bottom lists (legacy format)
                     for item in data.get("top_10_confident", []):
                         historical_pairs.add((item["source"], item["target"]))
-                    for item in data.get("bottom_10_confident", []):
+                    for item in data.get("bottom_5_confident", []):
                         historical_pairs.add((item["source"], item["target"]))
             except (KeyError, TypeError) as ke:
                 logger.warning(f"Structural corruption in {filepath} ({ke}). Triggering repair...")
@@ -663,7 +663,7 @@ def get_historical_pairs(
                             else:
                                 for item in data.get("top_10_confident", []):
                                     historical_pairs.add((item["source"], item["target"]))
-                                for item in data.get("bottom_10_confident", []):
+                                for item in data.get("bottom_5_confident", []):
                                     historical_pairs.add((item["source"], item["target"]))
                     except Exception as re_err:
                          logger.error(f"Failed to recover historical pairs from {filepath} even after repair: {re_err}")
