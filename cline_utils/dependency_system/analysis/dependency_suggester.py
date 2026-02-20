@@ -9,30 +9,10 @@ Outputs path-based dependencies: List[Tuple[target_norm_path, char]]
 
 import ast
 import json
+import logging
 import os
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
-
-
-# Attempt to import jsonc-parser
-def _init_jsonc() -> Tuple[Any, bool, Any, Any, Any]:
-    try:
-        from jsonc_parser.parser import JsoncParser
-
-        return JsoncParser, True, Exception, Exception, Exception
-    except ImportError:
-        return None, False, Exception, Exception, Exception
-
-
-_jsonc_parser_instance, _jsonc_parser_available, _f_err, _p_err, _jp_err = _init_jsonc()
-
-JsoncParser: Any = _jsonc_parser_instance
-JSONC_PARSER_AVAILABLE: bool = _jsonc_parser_available
-FileError: Any = _f_err
-ParserError: Any = _p_err
-JsoncFunctionParameterError: Any = _jp_err
-
-import logging
+from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
 from cline_utils.dependency_system.core import key_manager
 
@@ -97,8 +77,12 @@ def _get_symbol_map_path() -> str:
 # _OLD_PROJECT_SYMBOL_MAP_FILENAME_LOCAL = "project_symbol_map_old.json" # Not used by load, only by save
 def clear_caches():
     clear_all_caches()
+    if hasattr(_find_and_parse_tsconfig, "_cache"):
+        _find_and_parse_tsconfig._cache.clear()
     _structural_import_map_cache.clear()
     _structural_resolved_path_cache.clear()
+    if hasattr(load_project_symbol_map, "_cache"):
+        load_project_symbol_map._cache.clear()
 
 
 @cached("metadata", track_path_args=[0])
@@ -129,11 +113,11 @@ def load_metadata(metadata_path: str) -> Dict[str, Any]:
 
 
 # --- TS/JS Config Helper ---
-def _tsconfig_cache_key(start_dir: Any, project_root_val: Any) -> str:
-    return f"tsconfig:{normalize_path(str(start_dir))}:{normalize_path(str(project_root_val))}"
-
-
-@cached("tsconfig_data", key_func=_tsconfig_cache_key, track_path_args=[0])
+@cached(
+    "tsconfig_data",
+    key_func=lambda start_dir, project_root_val: f"tsconfig:{normalize_path(start_dir)}:{normalize_path(project_root_val)}",
+    track_path_args=[0],
+)
 def _find_and_parse_tsconfig(
     start_dir: str, project_root_val: str
 ) -> Optional[Tuple[str, Dict[str, Any]]]:
@@ -154,22 +138,12 @@ def _find_and_parse_tsconfig(
             if os.path.exists(config_path) and os.path.isfile(config_path):
                 logger.debug(f"Found config file for JS/TS: {config_path}")
                 try:
-                    if (
-                        JSONC_PARSER_AVAILABLE and JsoncParser
-                    ):  # Check JsoncParser is not None
-                        # Ensure JsoncParser.parse_file is called correctly
-                        data: Dict[str, Any] = JsoncParser.parse_file(config_path)
-                        logger.debug(
-                            f"Successfully parsed {config_path} using jsonc-parser."
-                        )
-                        return config_path, data
-                    else:
-                        with open(config_path, "r", encoding="utf-8") as f:
-                            data: Dict[str, Any] = json.load(f)
-                        logger.debug(
-                            f"Successfully parsed {config_path} using standard json parser."
-                        )
-                        return config_path, data
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        data: Dict[str, Any] = json.load(f)
+                    logger.debug(
+                        f"Successfully parsed {config_path} using standard json parser."
+                    )
+                    return config_path, data
                 except Exception as e:
                     logger.warning(
                         f"Error parsing {config_path}: {e}. Skipping this config."
@@ -343,6 +317,39 @@ def suggest_dependencies(
             file_analysis_results,  # Pass the BIG map
         )
         # No AST links from CSS
+
+    elif file_ext == ".json":
+        char_suggestions = suggest_json_dependencies(
+            norm_path,
+            path_to_key_info,
+            project_root,
+            file_analysis_results,
+            threshold,
+            project_symbol_map,
+            shared_scan_counter,
+        )
+
+    elif file_ext == ".svelte":
+        char_suggestions = suggest_svelte_dependencies(
+            norm_path,
+            path_to_key_info,
+            project_root,
+            file_analysis_results,
+            threshold,
+            project_symbol_map,
+            shared_scan_counter,
+        )
+
+    elif file_ext == ".sql":
+        char_suggestions = suggest_sql_dependencies(
+            norm_path,
+            path_to_key_info,
+            project_root,
+            file_analysis_results,
+            threshold,
+            project_symbol_map,
+            shared_scan_counter,
+        )
 
     else:  # Generic
         char_suggestions = suggest_generic_dependencies(
@@ -1402,6 +1409,237 @@ def suggest_css_dependencies(
     )
 
 
+# --- JSON Dependencies ---
+def suggest_json_dependencies(
+    file_path: str,
+    path_to_key_info: Dict[str, KeyInfo],
+    project_root: str,
+    file_analysis_results: Dict[str, Any],
+    threshold: float,
+    project_symbol_map: Optional[Dict[str, Any]] = None,
+    shared_scan_counter: Any = None,
+) -> List[Tuple[str, str]]:
+    norm_file_path = normalize_path(file_path)
+    analysis = file_analysis_results.get(norm_file_path)
+    if analysis is None or "error" in analysis or "skipped" in analysis:
+        return []
+
+    explicit_deps: List[Tuple[str, str]] = []
+
+    def _resolve_json_ref(url: str) -> Optional[str]:
+        source_dir = os.path.dirname(norm_file_path)
+        if url.startswith("."):
+            resolved_path = normalize_path(os.path.join(source_dir, url))
+            if resolved_path in path_to_key_info:
+                return resolved_path
+        elif url.startswith("/"):
+            # Absolute path (unlikely in JSON but possible) or project-root relative
+            resolved_path = normalize_path(os.path.join(project_root, url.lstrip("/")))
+            if resolved_path in path_to_key_info:
+                return resolved_path
+        return None
+
+    # Check links
+    for link in analysis.get("links", []):
+        url = link.get("url") or link.get("href") or link.get("path")
+        if url:
+            resolved = _resolve_json_ref(url)
+            if resolved:
+                explicit_deps.append((resolved, "<"))
+
+    # Check structured JSON refs (key_path -> value)
+    for ref in analysis.get("json_refs", []):
+        value = ref.get("value")
+        if value:
+            resolved = _resolve_json_ref(value)
+            if resolved:
+                explicit_deps.append((resolved, "<"))
+
+    semantic_suggestions_paths = suggest_semantic_dependencies_path_based(
+        norm_file_path,
+        path_to_key_info,
+        project_root,
+        threshold,
+        project_symbol_map,
+        shared_scan_counter,
+    )
+    return combine_suggestions_path_based_with_char_priority(
+        explicit_deps + semantic_suggestions_paths, norm_file_path
+    )
+
+
+# --- Svelte Dependencies ---
+def suggest_svelte_dependencies(
+    file_path: str,
+    path_to_key_info: Dict[str, KeyInfo],
+    project_root: str,
+    file_analysis_results: Dict[str, Any],
+    threshold: float,
+    project_symbol_map: Optional[Dict[str, Any]] = None,
+    shared_scan_counter: Any = None,
+) -> List[Tuple[str, str]]:
+    norm_file_path = normalize_path(file_path)
+    analysis = file_analysis_results.get(norm_file_path)
+    if analysis is None or "error" in analysis or "skipped" in analysis:
+        return []
+
+
+    explicit_deps: List[Tuple[str, str]] = []
+    source_dir = os.path.dirname(norm_file_path)
+
+    # Check imports (script)
+    for imp in analysis.get("imports", []):
+        path = imp.get("source")
+        if path:
+            # Use JS resolution logic - reusing existing helper if possible, or simple
+            # Since imports are from script/ts, standard JS resolution applies
+            resolved = _resolve_js_import_path(
+                path,
+                source_dir,
+                project_root,
+                path_to_key_info,
+                None,  # No tsconfig for now, or could find one
+            )
+            if resolved:
+                explicit_deps.append((resolved, "<"))
+
+    # Check links (html)
+    for link in analysis.get("links", []):
+        url = link.get("url") or link.get("href") or link.get("path")
+        if url:
+            if url.startswith("."):
+                resolved = normalize_path(os.path.join(source_dir, url))
+                if resolved in path_to_key_info:
+                    explicit_deps.append((resolved, "<"))
+
+    semantic_suggestions_paths = suggest_semantic_dependencies_path_based(
+        norm_file_path,
+        path_to_key_info,
+        project_root,
+        threshold,
+        project_symbol_map,
+        shared_scan_counter,
+    )
+    return combine_suggestions_path_based_with_char_priority(
+        explicit_deps + semantic_suggestions_paths, norm_file_path
+    )
+
+
+# --- SQL Dependencies ---
+def _build_sql_table_map(project_symbol_map: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Build a mapping of table names to their defining SQL files.
+    Uses the project_symbol_map to find tables_defined in each SQL file.
+    """
+    table_map: Dict[str, str] = {}
+    for other_path, symbols in project_symbol_map.items():
+        if not isinstance(symbols, dict) or not other_path.lower().endswith(".sql"):
+            continue
+
+        symbols_dict = cast(Dict[str, Any], symbols)
+        if "tables_defined" in symbols_dict:
+            o_tables = symbols_dict["tables_defined"]
+            for table in o_tables:
+                table_map[table.lower()] = other_path
+    return table_map
+
+
+def suggest_sql_dependencies(
+    file_path: str,
+    path_to_key_info: Dict[str, KeyInfo],
+    project_root: str,
+    file_analysis_results: Dict[str, Any],
+    threshold: float,
+    project_symbol_map: Optional[Dict[str, Any]] = None,
+    shared_scan_counter: Any = None,
+) -> List[Tuple[str, str]]:
+    """
+    Suggests dependencies for SQL files using AST-extracted table definitions and references.
+    Builds table map on-demand from project_symbol_map (no global caching).
+    """
+    norm_file_path = normalize_path(file_path)
+    structural_suggestions: List[Tuple[str, str]] = []
+
+    logger.debug(f"[SQL_DEBUG] suggest_sql_dependencies START: {norm_file_path}")
+
+    # Get the analysis for THIS specific file from the global results map
+    analysis = file_analysis_results.get(norm_file_path)
+    if not analysis:
+        logger.debug(f"[SQL_DEBUG] No analysis found for {norm_file_path}")
+        return []
+
+    if analysis.get("error") or analysis.get("skipped"):
+        logger.debug(
+            f"[SQL_DEBUG] Analysis error/skipped for {norm_file_path}: {analysis}"
+        )
+        return []
+
+    # Use case-insensitive normalization for SQL logic
+    tables_defined: Set[str] = {t.lower() for t in analysis.get("tables_defined", [])}
+    tables_referenced: Set[str] = {
+        t.lower() for t in analysis.get("tables_referenced", [])
+    }
+
+    logger.debug(
+        f"[SQL_DEBUG] {norm_file_path} - defined: {len(tables_defined)}, referenced: {len(tables_referenced)}"
+    )
+
+    if project_symbol_map:
+        # Build table map on-demand (no global caching)
+        table_map = _build_sql_table_map(project_symbol_map)
+        logger.debug(f"[SQL_DEBUG] Table map built. Size: {len(table_map)}")
+
+        # Resolve forward dependencies: current file depends on files defining tables it references
+        logger.debug(f"[SQL_DEBUG] Resolving forward dependencies for {norm_file_path}")
+        for table in tables_referenced:
+            # Skip self-references
+            if table in tables_defined:
+                continue
+            if table in table_map:
+                target_path = table_map[table]
+                if target_path != norm_file_path:
+                    structural_suggestions.append((target_path, "<"))
+                    logger.debug(
+                        f"[SQL_DEBUG] Found dependencies < {target_path} (table: {table})"
+                    )
+
+        # Resolve inverse dependencies: files that reference our tables depend on us
+        logger.debug(f"[SQL_DEBUG] Resolving inverse dependencies for {norm_file_path}")
+        if tables_defined:
+            count = 0
+            for other_path, symbols in project_symbol_map.items():
+                if not isinstance(symbols, dict) or not other_path.lower().endswith(
+                    ".sql"
+                ):
+                    continue
+                if other_path == norm_file_path:
+                    continue
+
+                symbols_dict = cast(Dict[str, Any], symbols)
+                # Normalize referenced tables from other files
+                o_referenced = {
+                    t.lower() for t in symbols_dict.get("tables_referenced", [])
+                }
+
+                if any(m in tables_defined for m in o_referenced):
+                    structural_suggestions.append((other_path, ">"))
+                    count += 1
+            logger.debug(f"[SQL_DEBUG] Found {count} inverse dependencies >")
+
+    # Semantic fallback skipped for SQL (O(N^2) issue)
+    semantic_suggestions_paths: List[Tuple[str, str]] = []
+
+    # Combine structural and semantic
+    all_suggestions = combine_suggestions_path_based_with_char_priority(
+        structural_suggestions + semantic_suggestions_paths, norm_file_path
+    )
+
+    logger.debug(
+        f"[SQL_DEBUG] suggest_sql_dependencies END: {norm_file_path} - total: {len(all_suggestions)}"
+    )
+    return all_suggestions
+
+
 def suggest_generic_dependencies(
     file_path: str,
     path_to_key_info: Dict[str, KeyInfo],
@@ -1424,7 +1662,7 @@ def suggest_generic_dependencies(
     )
 
 
-@cached("ast_verified_links", ttl=300, track_path_args=[0])
+@cached("ast_verified_links", ttl=1200, track_path_args=[0])
 def _load_ast_verified_links(project_root: str) -> List[Dict[str, str]]:
     """
     Load AST-verified links from project_analyzer for structural evidence
@@ -1455,16 +1693,16 @@ def _build_ast_map(
     Build a map of target paths to AST relationships for a given source file.
     """
     source_norm = os.path.normpath(source_path).replace(os.sep, "/")
-    ast_map = {}
+    ast_map: Dict[str, str] = {}
     for link in ast_verified_links:
         link_from = link.get("source_path")
         link_to = link.get("target_path")
         # Also support 'char' key which is used in ast_verified_links.json
         relation = link.get("char") or link.get("relation", "")
 
-        if link_from == source_norm:
+        if link_from == source_norm and link_to:
             ast_map[link_to] = relation
-        elif link_to == source_norm:
+        elif link_to == source_norm and link_from:
             # For reverse direction, store the INVERSE relationship
             reverse_key = link_from
             original_relation = relation
@@ -1638,7 +1876,7 @@ def suggest_semantic_dependencies_path_based(
 
             # Filter candidates before reranking based on dependency character assignments
             # This filtering only applies during reranking to optimize performance
-            filtered_candidates = []
+            filtered_candidates: List[Tuple[KeyInfo, float]] = []
             for target_ki, confidence in candidates_with_similarity:
                 # Check if already verified with high-level dependency
                 target_norm = target_ki.norm_path
@@ -2299,9 +2537,16 @@ def _identify_python_dependencies(
     source_dir_norm = os.path.dirname(source_path)
     tracked_paths_globally = set(path_to_key_info.keys())
 
-    for (
-        import_name_str_from_ast
-    ) in imports_in_source:  # This is like "module" or ".module" or "..module.sub"
+    for import_item in imports_in_source:
+        if isinstance(import_item, dict):
+            import_dict = cast(Dict[str, Any], import_item)
+            import_name_str_from_ast = cast(str, import_dict.get("path", ""))
+        else:
+            import_name_str_from_ast = cast(str, import_item)
+
+        if not import_name_str_from_ast:
+            continue
+
         temp_import_name = import_name_str_from_ast
         level_for_convert = 0
         while temp_import_name.startswith("."):

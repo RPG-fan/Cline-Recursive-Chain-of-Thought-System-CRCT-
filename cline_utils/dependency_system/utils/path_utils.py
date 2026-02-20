@@ -78,6 +78,8 @@ def get_file_type(file_path: str) -> str:
             return "svelte"
         elif ext == ".sql":
             return "sql"
+        elif ext == ".csv":
+            return "csv"
         elif ext in (".yaml", ".yml"):
             return "yaml"
         elif ext == ".json":

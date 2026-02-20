@@ -1980,16 +1980,6 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
         return 0
 
     tasks = tasks[:limit]
-    print(f"Processing batch of {len(tasks)} items...")
-
-    processor = LocalLLMProcessor(model_path=model_path)
-    collector = TrackerBatchCollector()
-
-    batch_suggestions = defaultdict(list)
-    processed_count = 0
-    total_processed = 0
-
-    start_time = time.time()
 
     # Setup for token checks
     MAX_MODEL_TOKENS = 30000  # Leave buffer for system prompt (total ctx 32768)
@@ -2003,6 +1993,41 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
     # Load symbol map to check for SES availability
     symbol_map = _load_project_symbol_map()
 
+    # Helper to get appropriate token count (defined once, reused by sort and loop)
+    def get_tokens(path_norm: str, is_ses: bool) -> int:
+        data = token_map.get(path_norm, {})
+        if is_ses:
+            val = data.get("ses_tokens", data.get("tokens"))
+        else:
+            val = data.get("full_tokens", data.get("tokens"))
+        return val if val is not None else 0
+
+    # --- Context-Sorted Processing Order ---
+    # Sort pairs by estimated context size (largest first).
+    # This minimizes model reloads: the context window starts at max size
+    # and monotonically shrinks, avoiding "see-sawing" reloads.
+    def _estimate_pair_context(pair: Tuple[str, str, str, str]) -> int:
+        _sk, sp, _tk, tp = pair
+        sn = normalize_path(sp)
+        tn = normalize_path(tp)
+        s_ses = sn in symbol_map
+        t_ses = tn in symbol_map
+        st = get_tokens(sn, s_ses)
+        tt = get_tokens(tn, t_ses)
+        return st + tt + WRAPPER_OVERHEAD
+
+    tasks.sort(key=_estimate_pair_context, reverse=True)
+    print(f"Processing batch of {len(tasks)} items (sorted by descending context size)...")
+
+    processor = LocalLLMProcessor(model_path=model_path)
+    collector = TrackerBatchCollector()
+
+    batch_suggestions: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+    processed_count = 0
+    total_processed = 0
+
+    start_time = time.time()
+
     for src_key, src_path, tgt_key, tgt_path in tasks:
         try:
             # Check token limits before reading files
@@ -2011,15 +2036,6 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
             src_is_ses = src_norm in symbol_map
             tgt_is_ses = tgt_norm in symbol_map
-
-            # Helper to get appropriate token count
-            def get_tokens(path_norm: str, is_ses: bool) -> int:
-                data = token_map.get(path_norm, {})
-                if is_ses:
-                    val = data.get("ses_tokens", data.get("tokens"))
-                else:
-                    val = data.get("full_tokens", data.get("tokens"))
-                return val if val is not None else 0
 
             s_tokens = get_tokens(src_norm, src_is_ses)
             t_tokens = get_tokens(tgt_norm, tgt_is_ses)
@@ -2087,6 +2103,8 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                     tracker_type=tracker_type,
                     suggestions_external=batch_suggestions,
                     return_update=True,
+                    force_apply_suggestions=True,
+                    apply_ast_overrides=False,
                 )
 
                 if update_data:
@@ -2146,6 +2164,8 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
             tracker_type=tracker_type,
             suggestions_external=batch_suggestions,
             return_update=True,
+            force_apply_suggestions=True,
+            apply_ast_overrides=False,
         )
         if update_data:
             t_update = None

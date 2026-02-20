@@ -435,12 +435,27 @@ def analyze_project(
                 "globals_defined",
                 "exports",
                 "code_blocks",
+                "headers",
                 "scripts",
                 "stylesheets",
                 "images",
+                "props",
+                "state",
+                "reactive",
+                "logic",
+                "components",
+                "template_outline",
+                "json_keys",
+                "json_refs",
                 "decorators_used",
                 "exceptions_handled",
                 "with_contexts_used",
+                # SQL-specific analysis payload used by dependency_suggester
+                "definitions",
+                "columns",
+                "relationships",
+                "tables_defined",
+                "tables_referenced",
             ]:
                 if symbol_key in single_file_analysis_result:
                     value = single_file_analysis_result[symbol_key]
@@ -1015,6 +1030,9 @@ def analyze_project(
                             path_to_key_info=path_to_key_info,
                             existing_lines=prepared_data.get("existing_lines"),
                             tracker_exists=prepared_data.get("tracker_exists", False),
+                            manual_foreign_pins=prepared_data.get(
+                                "manual_foreign_pins", []
+                            ),
                         )
                         batch_collector.add(update)
                         analysis_results["tracker_updates"]["mini"][

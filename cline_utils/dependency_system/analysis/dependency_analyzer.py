@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import sys
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
 
 # Global tree-sitter variables and their corresponding language and parser instances.
 # These are imported and initialized directly at module load time.
@@ -18,6 +18,7 @@ import tree_sitter
 import tree_sitter_css as tscss
 import tree_sitter_html as tshtml
 import tree_sitter_javascript as tsjavascript
+import tree_sitter_language_pack as tslp
 import tree_sitter_python as tspython
 import tree_sitter_typescript as tstypescript
 
@@ -33,6 +34,13 @@ HTML_LANGUAGE = Language(tshtml.language())
 TS_LANGUAGE = Language(tstypescript.language_typescript())
 TSX_LANGUAGE = Language(tstypescript.language_tsx())
 PY_LANGUAGE = Language(tspython.language())
+
+# Extended languages via language pack
+JSON_LANGUAGE = tslp.get_language("json")
+MARKDOWN_LANGUAGE = tslp.get_language("markdown")
+MARKDOWN_INLINE_LANGUAGE = tslp.get_language("markdown_inline")
+SVELTE_LANGUAGE = tslp.get_language("svelte")
+SQL_LANGUAGE = tslp.get_language("sql")
 
 # --- FIX (MAJOR): Remove global Parser instances. They are NOT thread-safe. ---
 # Parsers will now be created locally within each analysis function.
@@ -270,7 +278,7 @@ def _consolidate_list_of_dicts(
         return []
 
     # Helper to get key tuple
-    def get_key(item):
+    def get_key(item: Dict[str, Any]) -> Tuple[Any, ...]:
         return tuple(item.get(k) for k in group_by_keys)
 
     grouped: Dict[Tuple[Any, ...], List[int]] = {}
@@ -287,11 +295,11 @@ def _consolidate_list_of_dicts(
             first_items[key] = item
 
         if isinstance(line, list):
-            grouped[key].extend(line)
+            grouped[key].extend(cast(List[int], line))
         else:
             grouped[key].append(line)
 
-    consolidated = []
+    consolidated: List[Dict[str, Any]] = []
     for key, lines in grouped.items():
         unique_lines = sorted(list(set(lines)))
 
@@ -308,6 +316,62 @@ def _get_ts_node_text(node: Any, content_bytes: bytes) -> str:
     return content_bytes[node.start_byte : node.end_byte].decode(
         "utf8", errors="ignore"
     )
+
+
+def _normalize_sql_identifier_text(text: str) -> str:
+    """
+    Normalizes an SQL identifier string.
+    Handles schema qualification and common quoting styles.
+    """
+    text = text.strip()
+
+    # Handle schema-qualified names: schema.table -> table
+    if "." in text:
+        parts = text.split(".")
+        text = parts[-1].strip()
+
+    # Strip matching quote/bracket pairs
+    while len(text) >= 2:
+        if (
+            (text[0] == '"' and text[-1] == '"')
+            or (text[0] == "'" and text[-1] == "'")
+            or (text[0] == "`" and text[-1] == "`")
+            or (text[0] == "[" and text[-1] == "]")
+        ):
+            text = text[1:-1]
+        else:
+            break
+
+    return text.strip()
+
+
+def _extract_sql_identifier(node: Any, content_bytes: bytes) -> str:
+    """
+    Robustly extracts an SQL identifier from a node.
+    Handles quotes (", ', `, []), schema qualifications, and special characters.
+    e.g. "public"."users" -> "users", public.users -> users, [dbo].[items] -> items
+    """
+    text = _get_ts_node_text(node, content_bytes)
+    return _normalize_sql_identifier_text(text)
+
+
+def _normalize_imports(result: Dict[str, Any]) -> None:
+    """Normalizes import structures to a consistent List[Dict[str, Any]]."""
+    raw_imports = cast(List[Any], result.get("imports", []) or [])
+    norm_imports: List[Dict[str, Any]] = []
+    for imp in raw_imports:
+        if isinstance(imp, dict):
+            imp_dict = cast(Dict[str, Any], imp)
+            if "path" in imp_dict:
+                norm_imports.append(imp_dict)
+            elif "source" in imp_dict:
+                rest_dict = {k: v for k, v in imp_dict.items() if k != "source"}
+                item = {"path": imp_dict["source"]}
+                item.update(rest_dict)
+                norm_imports.append(item)
+        elif isinstance(imp, str):
+            norm_imports.append({"path": imp})
+    result["imports"] = norm_imports
 
 
 # --- Main Analysis Function ---
@@ -444,7 +508,7 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
                 ast_cache.set(norm_file_path, ast_object)
 
             # --- ADDED: Tree-sitter analysis for Python ---
-            ts_result = {
+            ts_result: dict[str, Any] = {
                 "file_path": norm_file_path,
                 "file_type": file_type,
                 "imports": [],
@@ -452,6 +516,7 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
                 "classes": [],
                 "calls": [],
                 "globals_defined": [],
+                "_ts_tree": None,
             }
             _analyze_python_file_ts(norm_file_path, content, ts_result)
 
@@ -492,7 +557,11 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
                 ts_ast_cache.set(norm_file_path, ts_tree_object)
 
         elif file_type == "md":
-            _analyze_markdown_file(norm_file_path, content, analysis_result)
+            _analyze_markdown_file_ts(norm_file_path, content, analysis_result)
+            ts_tree_object = analysis_result.get("_ts_tree")
+            if ts_tree_object:
+                ts_ast_cache = cache_manager.get_cache("ts_ast_cache")
+                ts_ast_cache.set(norm_file_path, ts_tree_object)
 
         elif file_type == "html":
             _analyze_html_file_ts(norm_file_path, content, analysis_result)
@@ -503,6 +572,27 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
 
         elif file_type == "css":
             _analyze_css_file_ts(norm_file_path, content, analysis_result)
+            ts_tree_object = analysis_result.get("_ts_tree")
+            if ts_tree_object:
+                ts_ast_cache = cache_manager.get_cache("ts_ast_cache")
+                ts_ast_cache.set(norm_file_path, ts_tree_object)
+
+        elif file_type == "json":
+            _analyze_json_file_ts(norm_file_path, content, analysis_result)
+            ts_tree_object = analysis_result.get("_ts_tree")
+            if ts_tree_object:
+                ts_ast_cache = cache_manager.get_cache("ts_ast_cache")
+                ts_ast_cache.set(norm_file_path, ts_tree_object)            
+
+        elif file_type == "svelte":
+            _analyze_svelte_file_ts(norm_file_path, content, analysis_result)
+            ts_tree_object = analysis_result.get("_ts_tree")
+            if ts_tree_object:
+                ts_ast_cache = cache_manager.get_cache("ts_ast_cache")
+                ts_ast_cache.set(norm_file_path, ts_tree_object)            
+
+        elif file_type == "sql":
+            _analyze_sql_file_ts(norm_file_path, content, analysis_result)
             ts_tree_object = analysis_result.get("_ts_tree")
             if ts_tree_object:
                 ts_ast_cache = cache_manager.get_cache("ts_ast_cache")
@@ -523,10 +613,19 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
             "with_contexts_used": ["context_expr_str"],
             "code_blocks": ["language", "content"],  # MD
             "links": ["url"],  # HTML/MD
-            "scripts": ["url"],  # HTML
-            "stylesheets": ["url"],  # HTML
-            "images": ["url"],  # HTML
+            "headers": ["level", "text"],  # MD
+            "scripts": ["content", "url"],  # HTML/Svelte
+            "stylesheets": ["content", "url"],  # HTML/Svelte
+            "images": ["url", "src"],  # HTML/MD
+            "definitions": ["type", "summary"],  # SQL
+            "columns": ["name", "type"],  # SQL
+            "relationships": ["source_col", "target_table", "target_col"],  # SQL
+            "json_keys": ["path"],  # JSON
+            "json_refs": ["key_path", "value"],  # JSON
         }
+
+        # --- FIX: robustly normalize imports from all analyzers ---
+        _normalize_imports(analysis_result)
 
         for field, keys in consolidation_map.items():
             if analysis_result.get(field):
@@ -552,6 +651,10 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
                 "classes": analysis_result.get("classes", []) or [],
                 "calls": analysis_result.get("calls", []) or [],
                 "type_references": analysis_result.get("type_references", []) or [],
+                # SQL-specific
+                "tables_defined": analysis_result.get("tables_defined", []) or [],
+                "tables_referenced": analysis_result.get("tables_referenced", []) or [],
+                "relationships": analysis_result.get("relationships", []) or [],
             }
             analysis_result["symbol_summary"] = summary
         except Exception as e_summary:
@@ -565,10 +668,14 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
         try:
             if "ast_verified_links" not in analysis_result:
                 analysis_result["ast_verified_links"] = []
-            imports_list: List[Any] = analysis_result.get("imports", []) or []
+            imports_list: List[Dict[str, Any]] = cast(
+                List[Dict[str, Any]], analysis_result.get("imports", []) or []
+            )
             for imp in imports_list:
-                if isinstance(imp, dict) and imp.get("path"):
-                    analysis_result["ast_verified_links"].append(
+                if imp and imp.get("path"):
+                    cast(
+                        List[Dict[str, Any]], analysis_result["ast_verified_links"]
+                    ).append(
                         {
                             "source_file": norm_file_path,
                             "target_spec": imp.get("path"),
@@ -578,10 +685,14 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
                         }
                     )
             # Also emit links from export re-exports like `export ... from 'x'`
-            exports_list: List[Any] = analysis_result.get("exports", []) or []
+            exports_list: List[Dict[str, Any]] = cast(
+                List[Dict[str, Any]], analysis_result.get("exports", []) or []
+            )
             for ex in exports_list:
-                if isinstance(ex, dict) and ex.get("from"):
-                    analysis_result["ast_verified_links"].append(
+                if ex and ex.get("from"):
+                    cast(
+                        List[Dict[str, Any]], analysis_result["ast_verified_links"]
+                    ).append(
                         {
                             "source_file": norm_file_path,
                             "target_spec": ex.get("from"),
@@ -624,6 +735,45 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
     # --- ADDED: Key for storing the AST tree ---
     result.setdefault("_ast_tree", None)
     # ---
+
+    def _capture_significant_assignment(node: Union[ast.Assign, ast.AnnAssign], result: Dict[str, Any]):
+        """Helper to capture significant variable/attribute assignments for logical essence."""
+        # Check if there is a value to capture (AnnAssign might not have one)
+        value_node = getattr(node, "value", None)
+        if value_node is None:
+            return
+
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            target_name = _get_full_name_str(target)
+            if not target_name:
+                continue
+                
+            # User Request: Capture ALL assignments, minimal filtering.
+            
+            extracted_val: Optional[str] = None
+            
+            # Generalize extraction using ast.unparse for ANY node type
+            try:
+                val_repr = ast.unparse(value_node)
+                # Collapse whitespace for cleaner storage
+                val_repr = " ".join(val_repr.split())
+                extracted_val = val_repr
+            except Exception:
+                # Fallback or ignore if unparse fails
+                pass
+                    
+            if extracted_val:
+                if "literal_assignments" not in result:
+                    result["literal_assignments"] = []
+                # Avoid duplicates
+                if not any(a["name"] == target_name and a["value"] == extracted_val for a in result["literal_assignments"]):
+                    result["literal_assignments"].append({
+                        "name": target_name,
+                        "value": extracted_val,
+                        "line": node.lineno
+                    })
+                # USER DEMAND: ALL ASSIGNMENTS. NO EXCEPTIONS. NO LIMITS.
 
     # _get_full_name_str and _extract_type_names_from_annotation helpers
     def _get_full_name_str(node: ast.AST) -> Optional[str]:
@@ -787,6 +937,9 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                     result["globals_defined"].append(
                         {"name": node.target.id, "line": node.lineno, "annotated": True}
                     )
+                _capture_significant_assignment(node, result)
+            elif isinstance(node, ast.Assign):
+                _capture_significant_assignment(node, result)
 
         logger.debug(f"DEBUG DA: tree.body processed for {file_path}.")
 
@@ -866,6 +1019,13 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                                 "line": dec_node.lineno,
                             }
                         )
+            
+            # Significant Assignments (Top-level, Class-level, or Method-level)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                parent = getattr(node, "_parent", None)
+                # Allow assignments at module level, class level, or inside functions/methods
+                if parent is tree or isinstance(parent, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    _capture_significant_assignment(node, result)
 
             # Type References
             if isinstance(node, ast.AnnAssign):
@@ -900,7 +1060,7 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                 docstring = ast.get_docstring(node)
                 doc_summary = docstring.split("\n")[0] if docstring else None
 
-                params = []
+                params: List[str] = []
                 for arg in node.args.args:
                     params.append(arg.arg)
                 if node.args.vararg:
@@ -1052,6 +1212,15 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                                     "line": getattr(base, "lineno", node.lineno),
                                 }
                             )
+                
+                # Scan class body for significant assignments (NEW)
+                for class_item in node.body:
+                    if isinstance(class_item, (ast.Assign, ast.AnnAssign)):
+                        _capture_significant_assignment(class_item, result)
+
+            # --- NEW ENHANCEMENT: Capture Significant Assignments/Literals ---
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                _capture_significant_assignment(node, result)
 
             # --- PYTHON 3.10+ MATCH STATEMENTS ---
             elif hasattr(ast, "Match") and isinstance(node, ast.Match):
@@ -1103,10 +1272,12 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                     # For direct calls, the base name is the function/class being called
                     base_name = target_full_name.split("(")[0].split(".")[0]
                     if base_name in imports_map:
-                        potential_source = imports_map[base_name]
+                        potential_source = cast(str, imports_map[base_name])
 
                 if target_full_name and _is_useful_call(
-                    target_full_name, potential_source, imports_map
+                    target_full_name,
+                    potential_source,
+                    cast(Dict[str, str], imports_map),
                 ):
                     result["calls"].append(
                         {
@@ -1211,6 +1382,13 @@ def _analyze_javascript_file_ts(
           (call_expression function: (member_expression property: (property_identifier) @call.name))
         ]
         """
+        # Capture comments and string literals for SES
+        extra_query = """
+        [
+          (comment) @comment
+          (string) @literal
+        ]
+        """
         exports_query = """
         [
         (export_statement
@@ -1289,6 +1467,35 @@ def _analyze_javascript_file_ts(
                     }
                 )
 
+        # Extra literals and comments
+        result.setdefault("comments", [])
+        result.setdefault("literals", [])
+        for node, cap in run_query_js(extra_query):
+            text = _get_ts_node_text(node, content_bytes)
+            if cap == "comment":
+                # Clean up comment markers
+                clean = text.strip("/ \n*")
+                if len(clean) > 5 and clean not in result["comments"]:
+                    result["comments"].append(clean)
+            elif cap == "literal":
+                # Clean quotes
+                if len(text) >= 2 and text[0] in ("'", '"', "`") and text[-1] == text[0]:
+                    text = text[1:-1]
+                
+                # Filter for "meaningful" literals:
+                # - Paths or URLs (contains /)
+                # - Descriptive identifiers (long, contains space/underscore, or capital letters)
+                is_meaningful = (
+                    len(text) > 5 and (
+                        "/" in text or 
+                        " " in text or 
+                        "_" in text or 
+                        any(c.isupper() for c in text)
+                    )
+                )
+                if is_meaningful and text not in result["literals"]:
+                    result["literals"].append(text)
+
         # Exports (collect names and re-exports)
         result.setdefault("exports", [])
         for node, cap in run_query_js(exports_query):
@@ -1344,21 +1551,7 @@ def _analyze_javascript_file_ts(
         result.setdefault("calls", [])
         result.setdefault("exports", [])
         # ensure import dicts have "path" key
-        norm_imports: List[Dict[str, Any]] = []
-        for imp in result["imports"]:
-            if isinstance(imp, dict):
-                if "path" in imp:
-                    norm_imports.append(imp)
-                elif "source" in imp:
-                    norm_imports.append(
-                        {
-                            "path": imp["source"],
-                            **{k: v for k, v in imp.items() if k != "source"},
-                        }
-                    )
-            elif isinstance(imp, str):
-                norm_imports.append({"path": imp})
-        result["imports"] = norm_imports
+        _normalize_imports(result)
         # Tag analysis kind for consumers
         result["analysis_kind"] = "js"
         # Build exports (JS minimal): handle `export ... from "path"` re-exports if present
@@ -1561,21 +1754,7 @@ def _analyze_typescript_file_ts(
         result.setdefault("calls", [])
         result.setdefault("type_references", [])
         result.setdefault("exports", [])
-        norm_imports: List[Dict[str, Any]] = []
-        for imp in result["imports"]:
-            if isinstance(imp, dict):
-                if "path" in imp:
-                    norm_imports.append(imp)
-                elif "source" in imp:
-                    norm_imports.append(
-                        {
-                            "path": imp["source"],
-                            **{k: v for k, v in imp.items() if k != "source"},
-                        }
-                    )
-            elif isinstance(imp, str):
-                norm_imports.append({"path": imp})
-        result["imports"] = norm_imports
+        _normalize_imports(result)
         result["analysis_kind"] = "ts"
         # Ensure exports list exists for re-export links
         try:
@@ -1772,21 +1951,7 @@ def _analyze_tsx_file_ts(file_path: str, content: str, result: Dict[str, Any]) -
         result.setdefault("calls", [])
         result.setdefault("type_references", [])
         result.setdefault("exports", [])
-        norm_imports: List[Dict[str, Any]] = []
-        for imp in result["imports"]:
-            if isinstance(imp, dict):
-                if "path" in imp:
-                    norm_imports.append(imp)
-                elif "source" in imp:
-                    norm_imports.append(
-                        {
-                            "path": imp["source"],
-                            **{k: v for k, v in imp.items() if k != "source"},
-                        }
-                    )
-            elif isinstance(imp, str):
-                norm_imports.append({"path": imp})
-        result["imports"] = norm_imports
+        _normalize_imports(result)
         result["analysis_kind"] = "tsx"
         # Ensure exports list exists for re-export links
         try:
@@ -1795,33 +1960,154 @@ def _analyze_tsx_file_ts(file_path: str, content: str, result: Dict[str, Any]) -
             pass
 
 
-def _analyze_javascript_file_regex_fallback(
-    file_path: str, content: str, result: Dict[str, Any]
-) -> None:
-    """
-    Fallback analysis for JS files using regex (when tree-sitter unavailable or errors occur).
-    """
-    import_matches = JAVASCRIPT_IMPORT_PATTERN.finditer(content)
-    # Ensure imports are not duplicated if fallback is called after partial AST analysis
-    existing_imports = set(d["path"] for d in result.get("imports", []))
-    new_imports = [
-        m.group(1) or m.group(2) or m.group(3)
-        for m in import_matches
-        if m and (m.group(1) or m.group(2) or m.group(3))
-    ]
-    for imp in new_imports:
-        if imp not in existing_imports:
-            result["imports"].append(
-                {"path": imp, "line": -1, "symbols": []}
-            )  # Added symbols for consistency
+def _analyze_json_file_ts(file_path: str, content: str, result: Dict[str, Any]) -> None:
+    """Analyzes JSON file content using tree-sitter."""
+    for key in ["links", "json_keys", "json_refs", "_ts_tree"]:
+        result.setdefault(key, [] if key != "_ts_tree" else None)
+
+    try:
+        content_bytes = content.encode("utf8")
+        parser = Parser(JSON_LANGUAGE)
+        tree = parser.parse(content_bytes)
+        result["_ts_tree"] = tree
+        root_node = tree.root_node
+
+        # Look for strings that might be paths
+        query = Query(JSON_LANGUAGE, "(string) @str")
+        cursor = QueryCursor(query)
+        seen_links: Set[str] = set()
+        for _, captures in cursor.matches(root_node):
+            for node in captures.get("str", []):
+                text = _get_ts_node_text(node, content_bytes).strip("\"'")
+                # Heuristic for likely file references
+                ext = os.path.splitext(text)[1].lower()
+                looks_like_file = ext in {
+                    ".json",
+                    ".yaml",
+                    ".yml",
+                    ".sql",
+                    ".md",
+                    ".rst",
+                    ".txt",
+                    ".js",
+                    ".ts",
+                    ".tsx",
+                    ".svelte",
+                    ".py",
+                    ".css",
+                    ".html",
+                }
+                if (
+                    ("/" in text or "\\" in text or looks_like_file)
+                    and not text.startswith(("http:", "https:", "#", "mailto:", "tel:"))
+                    and text not in seen_links
+                ):
+                    seen_links.add(text)
+                    result["links"].append(
+                        {"url": text, "line": node.start_point[0] + 1}
+                    )
+
+        # Extract structured key paths for SES and traceability
+        seen_key_paths: Set[str] = set()
+        seen_ref_pairs: Set[str] = set()
+        max_keys = 2000
+        max_refs = 500
+
+        def _extract_json_string(node: Any) -> str:
+            return _get_ts_node_text(node, content_bytes).strip().strip("\"'")
+
+        def _walk_json(node: Any, parent_path: List[str]) -> None:
+            if len(cast(List[Dict[str, Any]], result["json_keys"])) >= max_keys:
+                return
+
+            if node.type == "pair":
+                key_node = node.child_by_field_name("key")
+                value_node = node.child_by_field_name("value")
+
+                if key_node is not None:
+                    key_text = _extract_json_string(key_node)
+                    if key_text:
+                        current_path = parent_path + [key_text]
+                        path_str = ".".join(current_path)
+                        if path_str not in seen_key_paths:
+                            seen_key_paths.add(path_str)
+                            cast(List[Dict[str, Any]], result["json_keys"]).append(
+                                {
+                                    "key": key_text,
+                                    "path": path_str,
+                                    "line": key_node.start_point[0] + 1,
+                                }
+                            )
+
+                        if (
+                            value_node is not None
+                            and value_node.type == "string"
+                            and len(cast(List[Dict[str, Any]], result["json_refs"]))
+                            < max_refs
+                        ):
+                            raw_value = _extract_json_string(value_node)
+                            raw_ext = os.path.splitext(raw_value)[1].lower()
+                            raw_looks_like_file = raw_ext in {
+                                ".json",
+                                ".yaml",
+                                ".yml",
+                                ".sql",
+                                ".md",
+                                ".rst",
+                                ".txt",
+                                ".js",
+                                ".ts",
+                                ".tsx",
+                                ".svelte",
+                                ".py",
+                                ".css",
+                                ".html",
+                            }
+                            if (
+                                raw_value
+                                and (
+                                    "/" in raw_value
+                                    or "\\" in raw_value
+                                    or raw_looks_like_file
+                                )
+                                and not raw_value.startswith(
+                                    ("http:", "https:", "#", "mailto:", "tel:")
+                                )
+                            ):
+                                ref_key = f"{path_str}|{raw_value}"
+                                if ref_key not in seen_ref_pairs:
+                                    seen_ref_pairs.add(ref_key)
+                                    cast(
+                                        List[Dict[str, Any]], result["json_refs"]
+                                    ).append(
+                                        {
+                                            "key_path": path_str,
+                                            "value": raw_value,
+                                            "line": value_node.start_point[0] + 1,
+                                        }
+                                    )
+
+                        if value_node is not None:
+                            _walk_json(value_node, current_path)
+                        return
+
+            for child in node.children:
+                if child.is_named:
+                    _walk_json(child, parent_path)
+
+        _walk_json(root_node, [])
+        result["analysis_kind"] = "json"
+    except Exception as e:
+        logger.error(f"Error parsing JSON {file_path} with tree-sitter: {e}")
+        result["error"] = f"Tree-sitter JSON parsing error: {e}"
 
 
-def _analyze_markdown_file(
+def _analyze_markdown_file_regex(
     file_path: str, content: str, result: Dict[str, Any]
 ) -> None:
-    """Analyzes Markdown file content using regex."""
-    result["links"] = []
-    result["code_blocks"] = []
+    """Analyzes Markdown file content using regex (legacy/fallback)."""
+    result.setdefault("links", [])
+    result.setdefault("code_blocks", [])
     try:
         for match in MARKDOWN_LINK_PATTERN.finditer(content):
             url = match.group(1)
@@ -1845,15 +2131,1065 @@ def _analyze_markdown_file(
     except Exception as e:
         logger.warning(f"Regex error during MD code block analysis in {file_path}: {e}")
 
+def _analyze_markdown_file_ts(
+    file_path: str, content: str, result: Dict[str, Any]
+) -> None:
+    """Analyzes Markdown file content using tree-sitter for blocks and inline for links."""
+    for key in ["links", "code_blocks", "headers", "images", "_ts_tree"]:
+        result.setdefault(key, [] if key != "_ts_tree" else None)
+
+    try:
+        content_bytes = content.encode("utf8")
+
+        # 1. Parse Block Structure (Code Blocks, Headers)
+        parser = Parser(MARKDOWN_LANGUAGE)
+        tree = parser.parse(content_bytes)
+        result["_ts_tree"] = tree
+        root_node = tree.root_node
+
+        # Extract Code Blocks
+        cb_query_str = (
+            "(fenced_code_block (info_string) @lang (code_fence_content) @content)"
+        )
+        cb_query = Query(MARKDOWN_LANGUAGE, cb_query_str)
+        cb_cursor = QueryCursor(cb_query)
+        for _, captures in cb_cursor.matches(root_node):
+            langs = captures.get("lang", [])
+            contents = captures.get("content", [])
+            if contents:
+                lang = _get_ts_node_text(langs[0], content_bytes) if langs else "text"
+                result["code_blocks"].append(
+                    {
+                        "language": lang.strip().lower(),
+                        "line": contents[0].start_point[0] + 1,
+                        "content": _get_ts_node_text(contents[0], content_bytes),
+                    }
+                )
+
+        # Extract Headers (ATX)
+        h_query_str = "(atx_heading [ (atx_h1_marker) (atx_h2_marker) (atx_h3_marker) (atx_h4_marker) (atx_h5_marker) (atx_h6_marker) ] @marker (inline) @text)"
+        try:
+            h_query = Query(MARKDOWN_LANGUAGE, h_query_str)
+            h_cursor = QueryCursor(h_query)
+            for _, captures in h_cursor.matches(root_node):
+                marker_node = captures["marker"][0]
+                text_node = captures["text"][0]
+                marker_text = _get_ts_node_text(marker_node, content_bytes)
+                level = marker_text.count("#")
+                result["headers"].append(
+                    {
+                        "level": level,
+                        "text": _get_ts_node_text(text_node, content_bytes).strip(),
+                        "line": marker_node.start_point[0] + 1,
+                    }
+                )
+        except Exception as qe:
+            logger.debug(f"Markdown header query error: {qe}")
+
+        # 2. Parse Inline Content (Links, Images)
+        inline_parser = Parser(MARKDOWN_INLINE_LANGUAGE)
+        inline_tree = inline_parser.parse(content_bytes)
+        inline_root = inline_tree.root_node
+
+        # Query for links and images
+        inline_query_str = """
+        [
+          (inline_link (link_destination) @link.url)
+          (image (link_text) @img.alt (link_destination) @img.url)
+          (image (link_destination) @img.url)
+        ]
+        """
+        try:
+            inline_query = Query(MARKDOWN_INLINE_LANGUAGE, inline_query_str)
+            inline_cursor = QueryCursor(inline_query)
+            for _, captures in inline_cursor.matches(inline_root):
+                # Handle Links
+                for node in captures.get("link.url", []):
+                    url = _get_ts_node_text(node, content_bytes)
+                    if url and not url.startswith(
+                        ("#", "http:", "https:", "mailto:", "tel:")
+                    ):
+                        result["links"].append(
+                            {"url": url, "line": node.start_point[0] + 1}
+                        )
+
+                # Handle Images
+                img_urls = captures.get("img.url", [])
+                img_alts = captures.get("img.alt", [])
+                for i, node in enumerate(img_urls):
+                    url = _get_ts_node_text(node, content_bytes)
+                    alt = ""
+                    if i < len(img_alts):
+                        alt = _get_ts_node_text(img_alts[i], content_bytes)
+                    result["images"].append(
+                        {
+                            "url": url,
+                            "src": url,
+                            "alt": alt,
+                            "line": node.start_point[0] + 1,
+                        }
+                    )
+        except Exception as qe:
+            logger.debug(f"Markdown inline query error: {qe}")
+
+        result["analysis_kind"] = "markdown_ts"
+
+    except Exception as e:
+        logger.error(f"Error parsing Markdown {file_path} with tree-sitter: {e}")
+        # Fallback to regex
+        _analyze_markdown_file_regex(file_path, content, result)
+
+
+def _extract_template_tree(node: Any, source_bytes: bytes) -> Dict[str, Any]:
+    """
+    Recursively extracts the FULL structure of the Svelte template.
+    Captures type, content, attributes, and children without truncation.
+    """
+    node_type = node.type
+
+    # Base dict
+    data = {
+        "type": node_type,
+        "start_point": node.start_point,
+        "end_point": node.end_point,
+    }
+
+    # Helper to get full text
+    # User said "FULL DATA", so let's store text for everything that isn't the root
+    if node_type != "document":
+        data["content"] = _get_ts_node_text(node, source_bytes)
+
+    # Specific handling for attributes to make them accessible
+    if node_type == "attribute":
+        # extract name and value
+        attr_name = ""
+        attr_value = ""
+        for child in node.children:
+            if child.type == "attribute_name":
+                attr_name = _get_ts_node_text(child, source_bytes)
+            elif child.type in ("attribute_value", "quoted_attribute_value"):
+                attr_value = _get_ts_node_text(child, source_bytes)
+        data["name"] = attr_name
+        data["value"] = attr_value
+
+    children: List[Dict[str, Any]] = []
+    for child in node.children:
+        # Filter out purely syntactic noise? User said "FULL DATA".
+        # But maybe skip unnamed nodes that aren't text?
+        # Tree-sitter 'named' nodes are usually what we want.
+        if child.is_named or child.type == "text":
+            children.append(_extract_template_tree(child, source_bytes))
+
+    if children:
+        data["children"] = children
+
+    return data
+
+
+def _analyze_ts_script_content(
+    script_content: str, result: Dict[str, Any], is_module: bool = False
+) -> None:
+    """
+    Analyzes TypeScript/JavaScript content from a Svelte script block.
+    Extracts imports, exports, functions, props, state, and calls.
+    """
+    try:
+        ts_parser = Parser(TS_LANGUAGE)
+        ts_tree = ts_parser.parse(script_content.encode("utf-8", errors="ignore"))
+        ts_root = ts_tree.root_node
+
+        # Helper to run queries using correct cursor pattern
+        def run_q(query_str: str, language: Any) -> list[Any]:
+            try:
+                q = Query(language, query_str)
+                cursor = QueryCursor(q)
+                matches = cursor.matches(ts_root)
+                return matches
+            except Exception:
+                # logger.debug(f"DEBUG: Query error: {e_q}")
+                return []
+
+        # 1. Imports
+        imports_query_str = """
+        [
+            (import_statement source: (string) @path)
+            (call_expression
+                function: (identifier) @req.fn
+                arguments: (arguments (string) @path)
+                (#match? @req.fn "^(require|import)$"))
+        ]
+        """
+        for _, caps in run_q(imports_query_str, TS_LANGUAGE):
+            for node in caps.get("path", []):
+                path = _get_ts_node_text(node, script_content.encode("utf-8")).strip(
+                    "\"'"
+                )
+                line = node.start_point[0] + 1
+                cast(List[Dict[str, Any]], result.setdefault("imports", [])).append(
+                    {"path": path, "line": line}
+                )
+
+        # 2. Exports (Robust)
+        # We query for the export statement and then inspect its children
+        # This avoids grammar specific node naming issues in the query itself
+        export_queries = ["(export_statement) @exp"]
+
+        for q_str in export_queries:
+            for _, caps in run_q(q_str, TS_LANGUAGE):
+                for node in caps.get("exp", []):
+                    # Inspect children to find the name
+                    name_node = None
+
+                    # Search for identifier in children
+                    def find_id(n: Optional[Node]) -> Optional[Node]:
+                        if n is None:
+                            return None
+                        if n.type == "identifier":
+                            return n
+                        if n.type == "type_identifier":
+                            return n
+                        for i in range(n.child_count):
+                            res = find_id(n.child(i))
+                            if res:
+                                return res
+                        return None
+
+                    # We want the identifier of the declaration, not the export keyword
+                    # usually export -> declaration -> declarator -> identifier
+                    # or export -> declaration -> identifier
+
+                    # Skip the 'export' keyword node
+                    start_index = 0
+                    for i in range(node.child_count):
+                        if node.child(i).type == "export":
+                            start_index = i + 1
+                            break
+
+                    # Search in the remaining siblings (the declaration part)
+                    for i in range(start_index, node.child_count):
+                        child = node.child(i)
+                        name_node = find_id(child)
+                        if name_node:
+                            break
+
+                    if name_node:
+                        name = _get_ts_node_text(
+                            name_node, script_content.encode("utf-8")
+                        )
+                        line = name_node.start_point[0] + 1
+
+                        if name not in [e["name"] for e in result.get("exports", [])]:
+                            cast(
+                                List[Dict[str, Any]], result.setdefault("exports", [])
+                            ).append(
+                                {
+                                    "name": name,
+                                    "line": line,
+                                    "context": "module" if is_module else "instance",
+                                }
+                            )
+
+                        # If it's a prop (export let/var in instance), also add to props
+                        if not is_module:
+                            if name not in [p["name"] for p in result.get("props", [])]:
+                                cast(
+                                    List[Dict[str, Any]], result.setdefault("props", [])
+                                ).append({"name": name, "line": line})
+
+        # 3. Functions (Robust)
+        # Similar to exports, we use broad queries and inspect in Python
+        functions_query_str = """
+        [
+            (function_declaration) @func
+            (generator_function_declaration) @func
+            (method_definition) @func
+            (lexical_declaration) @func
+        ]
+        """
+
+        try:
+            ts_q_funcs = Query(TS_LANGUAGE, functions_query_str)
+            ts_cursor_funcs = QueryCursor(ts_q_funcs)
+            for _, caps in ts_cursor_funcs.matches(ts_root):
+                for node in caps.get("func", []):
+                    f_name = None
+
+                    # Helper to extract name and params from function-like nodes
+                    def extract_func_info(n: Node) -> Optional[str]:
+                        name = None
+
+                        # Direct function declarations
+                        if n.type in (
+                            "function_declaration",
+                            "generator_function_declaration",
+                            "async_function_declaration",
+                            "method_definition",
+                        ):
+                            for i in range(n.child_count):
+                                child = n.child(i)
+                                if child and (
+                                    child.type == "identifier"
+                                    or child.type == "property_identifier"
+                                ):
+                                    name = _get_ts_node_text(
+                                        child, script_content.encode("utf-8")
+                                    )
+                                elif child and child.type == "formal_parameters":
+                                    # Extract params
+                                    pass  # For now just identifying the function is enough
+
+                        # Arrow functions / Function expressions in variables
+                        elif n.type == "lexical_declaration":
+                            # lexical_declaration -> variable_declarator -> name, value -> arrow_function
+                            for i in range(n.child_count):
+                                child = n.child(i)
+                                if child and child.type == "variable_declarator":
+                                    vd = child
+                                    var_name = None
+                                    is_func = False
+                                    for j in range(vd.child_count):
+                                        c = vd.child(j)
+                                        if c and c.type == "identifier":
+                                            var_name = _get_ts_node_text(
+                                                c, script_content.encode("utf-8")
+                                            )
+                                        elif c and c.type in (
+                                            "arrow_function",
+                                            "function_expression",
+                                        ):
+                                            is_func = True
+                                    if is_func and var_name:
+                                        name = var_name
+
+                        return name
+
+                    f_name = extract_func_info(node)
+
+                    if f_name:
+                        line = node.start_point[0] + 1
+                        # Avoid duplicates
+                        if f_name not in [
+                            f["name"] for f in result.get("functions", [])
+                        ]:
+                            cast(
+                                List[Dict[str, Any]], result.setdefault("functions", [])
+                            ).append({"name": f_name, "line": line})
+        except Exception:
+            # Fallback or just log, but the broad query should be safe
+            pass
+
+        # 4. State (Top-level variables, excluding exports/props)
+        state_query_str = """
+        (lexical_declaration
+            (variable_declarator
+                name: (identifier) @var.name))
+        """
+        known_exports = set(
+            e["name"]
+            for e in result.get("exports", [])
+            if e.get("context") == ("module" if is_module else "instance")
+        )
+
+        for _, caps in run_q(state_query_str, TS_LANGUAGE):
+            for node in caps.get("var.name", []):
+                var_name = _get_ts_node_text(node, script_content.encode("utf-8"))
+                # Exclude if it was exported (already captured as prop or export)
+                if var_name not in known_exports:
+                    cast(List[Dict[str, Any]], result.setdefault("state", [])).append(
+                        {
+                            "name": var_name,
+                            "line": node.start_point[0] + 1,
+                            "context": "module" if is_module else "instance",
+                        }
+                    )
+
+        # 5. Function Calls (Significant ones?)
+        # Let's capture all calls for now as requested
+        calls_query_str = """
+        (call_expression
+            function: [
+                (identifier) @call.id
+                (member_expression property: (property_identifier) @call.prop)
+            ]
+        )
+        """
+        ts_q_calls = Query(TS_LANGUAGE, calls_query_str)
+        for _, caps in QueryCursor(ts_q_calls).matches(ts_root):
+            for _key, nodes in caps.items():
+                for node in nodes:
+                    call_name = _get_ts_node_text(node, script_content.encode("utf-8"))
+                    cast(List[Dict[str, Any]], result.setdefault("calls", [])).append(
+                        {
+                            "name": call_name,
+                            "line": node.start_point[0] + 1,
+                            "context": "module" if is_module else "instance",
+                        }
+                    )
+
+        # 6. Reactive Statements ($: ...) - Only if instance
+        if not is_module:
+            # Fix: labeled_statement in TS/JS does not have a 'statement' field.
+            # It matches (labeled_statement (statement_identifier) @label (_) @stmt)
+            reactive_query_str = """
+             (labeled_statement
+                 label: (statement_identifier) @label
+                 (_) @stmt
+                 (#eq? @label "$"))
+             """
+            try:
+                ts_q_reactive = Query(TS_LANGUAGE, reactive_query_str.strip())
+                for _, caps in QueryCursor(ts_q_reactive).matches(ts_root):
+                    for node in caps.get("stmt", []):
+                        stmt_text = _get_ts_node_text(
+                            node, script_content.encode("utf-8")
+                        )
+                        cast(
+                            List[Dict[str, Any]], result.setdefault("reactive", [])
+                        ).append(
+                            {"content": stmt_text, "line": node.start_point[0] + 1}
+                        )
+            except Exception as e:
+                logger.debug(f"Reactive statement analysis failed: {e}")
+
+    except Exception as e_inner:
+        logger.debug(f"Inner TS analysis failed: {e_inner}")
+
+
+def _analyze_svelte_file_ts(
+    file_path: str, content: str, result: Dict[str, Any]
+) -> None:
+    """Analyzes Svelte file content using tree-sitter."""
+
+    for key in [
+        "imports",
+        "exports",
+        "functions",
+        "props",
+        "state",
+        "calls",
+        "reactive",
+        "scripts",
+        "stylesheets",
+        "links",
+        "images",
+        "components",
+        "_ts_tree",
+        "template_tree",
+        "template_outline",
+        "logic",
+    ]:
+        result.setdefault(key, [] if key != "_ts_tree" else None)
+
+    try:
+        content_bytes = content.encode("utf8")
+        parser = Parser(SVELTE_LANGUAGE)
+        tree = parser.parse(content_bytes)
+        result["_ts_tree"] = tree
+        root_node = tree.root_node
+
+        # 1. Extract and Analyze Scripts (Instance vs Module)
+        script_query = Query(SVELTE_LANGUAGE, "(script_element) @script")
+        cursor = QueryCursor(script_query)
+
+        for _, captures in cursor.matches(root_node):
+            for script_node in captures.get("script", []):
+                # Check for context="module"
+                is_module = False
+                script_content = ""
+
+                # Iterate children to find attributes and content
+                for child in script_node.children:
+                    if child.type == "start_tag":
+                        # Check attributes
+                        for sub in child.children:
+                            if sub.type == "attribute":
+                                attr_name = ""
+                                attr_val = ""
+                                for part in sub.children:
+                                    if part.type == "attribute_name":
+                                        attr_name = _get_ts_node_text(
+                                            part, content_bytes
+                                        )
+                                    elif part.type == "quoted_attribute_value":
+                                        attr_val = _get_ts_node_text(
+                                            part, content_bytes
+                                        )
+
+                                if attr_name == "context" and "module" in attr_val:
+                                    is_module = True
+                    elif child.type in ("script_body", "raw_text", "text"):
+                        if child.text:
+                            script_content = child.text.decode("utf-8", errors="ignore")
+
+                # Robust fallback: if no content found but node has text, it might be the content
+                if not script_content.strip() and script_node.text:
+                    full_text = script_node.text.decode("utf-8", errors="ignore")
+                    # Strip tags if they are included in .text
+                    import re
+
+                    script_content = re.sub(r"^<script[^>]*>", "", full_text)
+                    script_content = re.sub(r"</script>$", "", script_content)
+
+                if script_content.strip():
+                    # Find start line of the script content for offset
+                    offset = 0
+                    found_body = False
+                    for child in script_node.children:
+                        if child.type in ("script_body", "raw_text", "text"):
+                            offset = child.start_point[0]
+                            found_body = True
+                            break
+                    if not found_body:
+                        offset = script_node.start_point[0]
+
+                    temp_result: Dict[str, List[Any]] = {}
+                    _analyze_ts_script_content(
+                        script_content, cast(Dict[str, Any], temp_result), is_module
+                    )
+
+                    # Merge and adjust lines
+                    for key, items in temp_result.items():
+                        if key == "scripts":
+                            continue  # Skip scripts list if any
+                        for item in items:
+                            if isinstance(item, dict) and "line" in item:
+                                item["line"] += offset
+                            cast(
+                                List[Dict[str, Any]], result.setdefault(key, [])
+                            ).append(cast(Dict[str, Any], item))
+
+                # Store script content (NEW) - Avoid duplicates if script block matches multiple patterns
+                # We can key by start line to avoid dups
+                script_key = f"{script_node.start_point[0]}"
+                if script_key not in result.setdefault("_seen_scripts", set()):
+                    result["_seen_scripts"].add(script_key)
+                    result["scripts"].append(
+                        {
+                            "content": script_content,
+                            "line": script_node.start_point[0] + 1,
+                        }
+                    )
+
+        # 2. Extract Styles
+        style_query = Query(
+            SVELTE_LANGUAGE,
+            "((style_element (raw_text) @content)) ((style_element (start_tag) (raw_text) @content))",
+        )
+        cursor_style = QueryCursor(style_query)
+        for _, captures in cursor_style.matches(root_node):
+            for node in captures.get("content", []):
+                style_content = _get_ts_node_text(node, content_bytes)
+                result["stylesheets"].append(
+                    {"content": style_content, "line": node.start_point[0]}
+                )
+
+        # 3. Extract Links (HTML-style)
+        link_queries = {
+            "links": '(element (start_tag (tag_name) @tag (#eq? @tag "a") (attribute (attribute_name) @name (#eq? @name "href") (quoted_attribute_value (attribute_value) @path))))',
+            "images": '(element (start_tag (tag_name) @tag (#eq? @tag "img") (attribute (attribute_name) @name (#eq? @name "src") (quoted_attribute_value (attribute_value) @path))))',
+        }
+        for q_name, q_str in link_queries.items():
+            query = Query(SVELTE_LANGUAGE, q_str)
+            cursor = QueryCursor(query)
+            for _, captures in cursor.matches(root_node):
+                for node in captures.get("path", []):
+                    url = _get_ts_node_text(node, content_bytes)
+                    if url and not url.startswith(
+                        ("#", "http:", "https:", "mailto:", "tel:", "data:")
+                    ):
+                        line = node.start_point[0]
+                        if q_name == "links":
+                            result["links"].append({"url": url, "line": line})
+                        elif q_name == "images":
+                            result["images"].append({"url": url, "line": line})
+
+        # 4. Extract Components (Capitalized Tags)
+        # Matches: <MyComponent ... /> or <MyComponent>...</MyComponent>
+        # We query both start_tag (for <Comp>...</Comp>) and self_closing_tag (for <Comp />)
+        # and filter by capitalization.
+        component_query_str = """
+        (start_tag (tag_name) @tag)
+        (self_closing_tag (tag_name) @tag)
+        """
+        try:
+            comp_query = Query(SVELTE_LANGUAGE, component_query_str)
+            comp_cursor = QueryCursor(comp_query)
+            result.setdefault("components", [])
+            seen_comps: Set[str] = set()
+            for _, captures in comp_cursor.matches(root_node):
+                for node in captures.get("tag", []):
+                    tag_name = _get_ts_node_text(node, content_bytes)
+                    # Heuristic: Components usually start with Uppercase
+                    if tag_name and tag_name[0].isupper():
+                        if tag_name not in seen_comps:
+                            seen_comps.add(tag_name)
+                            result["components"].append(
+                                {"name": tag_name, "line": node.start_point[0] + 1}
+                            )
+        except Exception as e_comp:
+            logger.debug(f"Svelte component extraction failed: {e_comp}")
+
+        # 5. Extract Logic Blocks (Structure)
+        # Identify if/each/await blocks to show template control flow
+        logic_queries = {
+            "if": "(if_statement) @block",
+            "each": "(each_statement) @block",
+            "await": "(await_statement) @block",
+        }
+        for logic_type, q_str in logic_queries.items():
+            try:
+                l_query = Query(SVELTE_LANGUAGE, q_str)
+                l_cursor = QueryCursor(l_query)
+                for _, captures in l_cursor.matches(root_node):
+                    for node in captures.get("block", []):
+                        # Extract the condition/expression if possible
+                        # For 'if', it's usually the first child after 'if'
+                        # For 'each', it's after 'each'
+                        # We'll just grab the text of the opening part to be safe and simple
+                        block_text = _get_ts_node_text(node, content_bytes)
+                        # Truncate to first line or reasonable length to show "essence"
+                        first_line = block_text.split("\n")[0].strip()
+
+                        result.setdefault("logic", []).append(
+                            {
+                                "type": logic_type,
+                                "content": first_line,
+                                "line": node.start_point[0] + 1,
+                            }
+                        )
+            except Exception:
+                pass
+
+        # 6. Full Template Tree (NEW)
+        try:
+            # Extract children of the root document, excluding script/style
+            template_children: List[Dict[str, Any]] = []
+            for child in root_node.children:
+                if child.type not in ("script_element", "style_element"):
+                    template_children.append(
+                        _extract_template_tree(child, content_bytes)
+                    )
+
+            if template_children:
+                result["template_tree"] = template_children
+
+                # Build a compact outline for SES/token-efficient map storage.
+                outline: List[str] = []
+                max_outline_lines = 500
+
+                def _outline(nodes: List[Dict[str, Any]], depth: int = 0) -> None:
+                    if len(outline) >= max_outline_lines:
+                        return
+                    indent = "  " * depth
+                    for node_data in nodes:
+                        if len(outline) >= max_outline_lines:
+                            return
+                        n_type = cast(str, node_data.get("type", ""))
+                        children = cast(
+                            List[Dict[str, Any]], node_data.get("children", [])
+                        )
+
+                        if n_type == "element":
+                            tag = ""
+                            attrs = ""
+                            for child_data in children:
+                                c_type = child_data.get("type")
+                                if c_type in ("start_tag", "self_closing_tag"):
+                                    for sub in cast(
+                                        List[Dict[str, Any]],
+                                        child_data.get("children", []),
+                                    ):
+                                        s_type = sub.get("type")
+                                        if s_type == "tag_name":
+                                            tag = cast(str, sub.get("content", ""))
+                                        elif s_type == "attribute":
+                                            a_name = cast(str, sub.get("name", ""))
+                                            a_val = cast(str, sub.get("value", "")).strip(
+                                                "\"'"
+                                            )
+                                            if a_name == "id" and a_val:
+                                                attrs += f"#{a_val}"
+                                            elif a_name == "class" and a_val:
+                                                attrs += "." + ".".join(a_val.split())
+                                    break
+                            if tag:
+                                outline.append(f"{indent}<{tag}{attrs}>")
+                            _outline(children, depth + 1)
+                        elif n_type in (
+                            "if_statement",
+                            "each_statement",
+                            "await_statement",
+                            "key_statement",
+                        ):
+                            # Try to get the first line of content for logic blocks
+                            head = cast(str, node_data.get("content", "")).split("\n")[0].strip()
+                            if head:
+                                outline.append(f"{indent}{head}")
+                            _outline(children, depth + 1)
+                        elif n_type == "text":
+                            text_content = cast(str, node_data.get("content", "")).strip()
+                            if text_content and len(text_content) > 3:
+                                # Escape newlines for compact outline
+                                text_content = " ".join(text_content.split())
+                                if len(text_content) > 4000:
+                                    text_content = text_content[:4000] + "..."
+                                outline.append(f"{indent}{text_content}")
+                        else:
+                            _outline(children, depth)
+
+                _outline(template_children)
+                if outline:
+                    result["template_outline"] = outline
+        except Exception as e_tree:
+            logger.debug(f"Svelte template tree extraction failed: {e_tree}")
+
+        result["analysis_kind"] = "svelte"
+    except Exception as e:
+        logger.error(f"Error parsing Svelte {file_path} with tree-sitter: {e}")
+        result["error"] = f"Tree-sitter Svelte parsing error: {e}"
+
+
+def _analyze_sql_file_ts(file_path: str, content: str, result: Dict[str, Any]) -> None:
+    """Analyzes SQL file content using tree-sitter."""
+    result.setdefault("_ts_tree", None)
+    result.setdefault("links", [])
+    result.setdefault("definitions", [])  # New field for SQL statements
+    result.setdefault("columns", [])  # New field for column info
+    result.setdefault("relationships", [])  # New field for FKs
+    result.setdefault("tables_defined", [])  # EXPLICIT: Tables created in this file
+    result.setdefault("tables_referenced", [])  # EXPLICIT: Tables used in this file
+
+    try:
+        content_bytes = content.encode("utf8")
+        parser = Parser(SQL_LANGUAGE)
+        tree = parser.parse(content_bytes)
+        result["_ts_tree"] = tree
+        root_node = tree.root_node
+
+        def _add_table_defined(raw_name: str) -> None:
+            normalized = _normalize_sql_identifier_text(raw_name).lower()
+            if normalized and normalized not in result["tables_defined"]:
+                result["tables_defined"].append(normalized)
+
+        def _add_table_referenced(raw_name: str) -> None:
+            normalized = _normalize_sql_identifier_text(raw_name).lower()
+            if normalized and normalized not in result["tables_referenced"]:
+                result["tables_referenced"].append(normalized)
+
+        # 1. Capture Top-level Statements (Definitions and References)
+        # Using specific positional patterns to find table names properly
+        # Fixed syntax and capture names based on user feedback and AST inspection.
+        # "update" table is in a "relation" child.
+        # "delete" table is in a sibling "from" node.
+        sql_query_str = """
+        [
+            (create_table (object_reference) @table_defined) @create_stmt
+            (create_view (object_reference) @table_defined) @view_stmt
+            (cte (identifier) @table_defined) @cte_stmt
+            
+            (insert (object_reference) @table_used) @insert_stmt
+            (update (object_reference) @table_used) @update_stmt
+            (update (relation (object_reference) @table_used)) @update_stmt
+            
+            (statement (delete) (from (object_reference) @table_used)) @delete_stmt
+            
+            (statement (keyword_truncate) (keyword_table)? (object_reference) @table_used) @truncate_stmt
+            (statement (keyword_merge) (keyword_into)? (object_reference) @table_used) @merge_stmt
+            
+            (alter_table (object_reference) @table_used) @alter_stmt
+            (create_index (object_reference) @table_used) @index_stmt
+            (drop_table (object_reference) @table_used) @drop_stmt
+            
+            (from (object_reference) @table_used) @from_clause
+            (from (relation (object_reference) @table_used)) @from_clause
+            (join (relation (object_reference) @table_used)) @join_clause
+        ]
+        """
+        try:
+            query = Query(SQL_LANGUAGE, sql_query_str.strip())
+            cursor = QueryCursor(query)
+            for _, captures in cursor.matches(root_node):
+                # Definitions (CREATE TABLE, CREATE VIEW, CTE)
+                if "table_defined" in captures:
+                    for node in captures["table_defined"]:
+                        table = _extract_sql_identifier(node, content_bytes)
+                        if table:
+                            _add_table_defined(table)
+
+                # References (INSERT, UPDATE, DELETE, ALTER, INDEX, SELECT, DROP, TRUNCATE, MERGE, JOIN)
+                if "table_used" in captures:
+                    for node in captures["table_used"]:
+                        table = _extract_sql_identifier(node, content_bytes)
+                        if table:
+                            _add_table_referenced(table)
+
+                # Generic summary for definitions list (backward compatibility)
+                for name, nodes in captures.items():
+                    if name.endswith("_stmt") or name.endswith("_clause"):
+                        for node in nodes:
+                            stmt_text = _get_ts_node_text(node, content_bytes)
+                            summary = " ".join(
+                                [l.strip() for l in stmt_text.split("\n") if l.strip()]
+                            )
+
+                            cast(List[Dict[str, Any]], result["definitions"]).append(
+                                {
+                                    "type": name.replace("_stmt", "").replace(
+                                        "_clause", ""
+                                    ),
+                                    "summary": summary,
+                                    "line": node.start_point[0] + 1,
+                                }
+                            )
+        except Exception as qe:
+            logger.debug(f"SQL statement query error: {qe}")
+
+        # 1b. Regex fallback for dialect-specific statements (e.g. PostgreSQL dump COPY)
+        # This supplements tree-sitter coverage for statements that may parse inconsistently.
+        regex_fallbacks: List[Tuple[str, str, str]] = [
+            (
+                "create",
+                "table_defined",
+                r"(?im)^\s*create\s+(?:or\s+replace\s+)?table\s+(?:if\s+not\s+exists\s+)?([^\s(;]+)",
+            ),
+            (
+                "view",
+                "table_defined",
+                r"(?im)^\s*create\s+(?:or\s+replace\s+)?view\s+([^\s(;]+)",
+            ),
+            ("insert", "table_used", r"(?im)^\s*insert\s+into\s+([^\s(;]+)"),
+            ("update", "table_used", r"(?im)^\s*update\s+([^\s(;]+)"),
+            ("delete", "table_used", r"(?im)^\s*delete\s+from\s+([^\s(;]+)"),
+            ("alter", "table_used", r"(?im)^\s*alter\s+table\s+([^\s(;]+)"),
+            ("drop", "table_used", r"(?im)^\s*drop\s+table(?:\s+if\s+exists)?\s+([^\s(;]+)"),
+            ("truncate", "table_used", r"(?im)^\s*truncate\s+(?:table\s+)?([^\s(;]+)"),
+            ("copy", "table_used", r"(?im)^\s*copy\s+([^\s(]+)\s*\("),
+        ]
+        try:
+            for stmt_type, bucket, pattern in regex_fallbacks:
+                for match in re.finditer(pattern, content):
+                    raw_table = match.group(1).strip()
+                    if not raw_table:
+                        continue
+
+                    if bucket == "table_defined":
+                        _add_table_defined(raw_table)
+                    else:
+                        _add_table_referenced(raw_table)
+
+                    cast(List[Dict[str, Any]], result["definitions"]).append(
+                        {
+                            "type": stmt_type,
+                            "summary": f"{stmt_type.upper()} {raw_table}",
+                            "line": content[: match.start()].count("\n") + 1,
+                        }
+                    )
+        except Exception as re_fallback_err:
+            logger.debug(f"SQL regex fallback error: {re_fallback_err}")
+
+        # 2. Capture Column Definitions
+        col_query_str = """
+        (column_definition
+            name: (_) @name
+            type: (_) @type
+        ) @col
+        """
+        try:
+            col_query = Query(SQL_LANGUAGE, col_query_str)
+            col_cursor = QueryCursor(col_query)
+            for _, captures in col_cursor.matches(root_node):
+                node_name = _extract_sql_identifier(captures["name"][0], content_bytes)
+                node_type = _get_ts_node_text(captures["type"][0], content_bytes)
+                result["columns"].append(
+                    {
+                        "name": node_name,
+                        "type": node_type,
+                        "line": captures["col"][0].start_point[0] + 1,
+                    }
+                )
+        except Exception as qe:
+            logger.debug(f"SQL column query error: {qe}")
+
+        # 3. Capture Foreign Keys / Relationships
+        # Supports both inline (column_definition) and table-level (add_constraint)
+        fk_query_str = """
+        [
+          (column_definition
+            (identifier) @name
+            (keyword_references)
+            (object_reference) @ref_table
+            (identifier) @ref_col
+          )
+          (add_constraint
+            (identifier) @constraint_name
+            (constraint
+              (keyword_foreign)
+              (keyword_key)
+              (ordered_columns (column (identifier) @name))
+              (keyword_references)
+              (object_reference) @ref_table
+              (identifier) @ref_col
+            )
+          )
+        ]
+        """
+        try:
+            fk_query = Query(SQL_LANGUAGE, fk_query_str)
+            fk_cursor = QueryCursor(fk_query)
+            for _, captures in fk_cursor.matches(root_node):
+                name_nodes = captures.get("name")
+                ref_table_node = captures.get("ref_table")
+                ref_col_nodes = captures.get("ref_col")
+
+                if name_nodes and ref_table_node:
+                    col_name = _extract_sql_identifier(name_nodes[0], content_bytes)
+                    target_table = _extract_sql_identifier(
+                        ref_table_node[0], content_bytes
+                    )
+                    target_table_lower = target_table.lower() if target_table else ""
+
+                    target_col = ""
+                    if ref_col_nodes:
+                        target_col = _extract_sql_identifier(
+                            ref_col_nodes[0], content_bytes
+                        )
+
+                    result["relationships"].append(
+                        {
+                            "source_col": col_name,
+                            "target_table": target_table_lower,
+                            "target_col": target_col,
+                        }
+                    )
+                    # Add as reference as well
+                    if (
+                        target_table_lower
+                        and target_table_lower not in result["tables_referenced"]
+                    ):
+                        result["tables_referenced"].append(target_table_lower)
+        except Exception as qe:
+            logger.debug(f"SQL relationship query error: {qe}")
+
+        # 4. Extract INSERT Data Samples (for SES)
+        try:
+            # We want to capture string literals from INSERT statements.
+            max_values_per_file = 50
+            captured_values = 0
+            if "inserts" not in result:
+                result["inserts"] = []
+            
+            # Helper to extract relevant strings from a node tree
+            def _extract_strings_from_node(n: Any):
+                nonlocal captured_values
+                if captured_values >= max_values_per_file:
+                    return
+
+                # 1. Standard strings are aliased as "literal" in DerekStride/tree-sitter-sql
+                # 2. Postgres-style dollar-quoted strings are anonymous nodes like $tag$ content $tag$
+                #    We need to check the text content for the pattern or use a fallback check if node type matches
+                
+                is_standard_literal = n.type == "literal"
+                # Check for dollar quoted string (anonymous node check heuristic)
+                is_dollar_quoted = False
+                if not is_standard_literal and n.type == "string": # Some grammars map it to string
+                     is_dollar_quoted = True
+                
+                # Check text content for dollar quotes if type check fails or is ambiguous
+                text = _get_ts_node_text(n, content_bytes)
+                if not is_dollar_quoted and len(text) > 4 and text.startswith("$") and "$" in text[1:]:
+                     # Basic check for $...$...
+                     import re
+                     if re.match(r"^\$[^\$]*\$.*\$[^\$]*\$$", text, re.DOTALL):
+                         is_dollar_quoted = True
+
+                if is_standard_literal or is_dollar_quoted:
+                    clean_text = text
+                    if is_standard_literal:
+                         # Check if it starts/ends with quotes
+                        if len(text) >= 2 and text[0] in ("'", '"') and text[-1] == text[0]:
+                            clean_text = text[1:-1]
+                        else:
+                            # Might be a number or boolean, skip
+                            return
+                    
+                    if len(clean_text) > 3 or is_dollar_quoted:
+                        # Try to find table name if we are in an INSERT
+                        current = n
+                        table_name = "unknown"
+                        
+                        # Traverse up to find 'insert' node
+                        # Node name is 'insert', not 'insert_statement' in this grammar
+                        while current and current.type != "insert":
+                            current = current.parent
+                        
+                        if current:
+                            # In tree-sitter-sql (DerekStride), table is an object_reference child
+                            # There is no 'table' field.
+                            table_node = None
+                            for child in current.children:
+                                if child.type == "object_reference":
+                                    table_node = child
+                                    break
+                            
+                            if table_node:
+                                table_name = _extract_sql_identifier(table_node, content_bytes)
+
+                        # Find/Create entry for this table
+                        inserts_list = cast(List[Dict[str, Any]], result.get("inserts", []))
+                        
+                        # Ensure we work with the referenced list in the result dict
+                        if "inserts" not in result:
+                             result["inserts"] = []
+                             inserts_list = cast(List[Dict[str, Any]], result["inserts"])
+
+                        # Check if we already have an entry for this table
+                        table_entry: Optional[Dict[str, Any]] = next((i for i in inserts_list if i.get("table") == table_name), None)
+                        
+                        if not table_entry:
+                            table_entry = {"table": table_name, "columns": {}, "values": []} 
+                            inserts_list.append(table_entry)
+                        
+                        # Add value to the 'values' list for this table, for SES generation
+                        # We use 'columns' in embedding_manager, but here we just capturing raw values
+                        # Let's map it to a 'literals' key or similar that embedding_manager understands
+                        cols_dict = cast(Dict[str, str], table_entry.get("columns", {}))
+                        
+                        # If we just have values, maybe we can store them as "value_N": "literal"
+                        pk = f"val_{len(cols_dict)}"
+                        if "columns" not in table_entry:
+                            table_entry["columns"] = cols_dict
+                        
+                        # Avoid duplicates in the same table entry
+                        if clean_text not in cols_dict.values():
+                             cols_dict[pk] = clean_text
+                             captured_values += 1
+
+                for child in n.children:
+                    _extract_strings_from_node(child)
+
+            # Query for INSERT nodes
+            insert_nodes_query = Query(SQL_LANGUAGE, "(insert) @ins")
+            ins_cursor = QueryCursor(insert_nodes_query)
+            
+            for _, captures in ins_cursor.matches(root_node):
+                if captured_values >= max_values_per_file:
+                    break
+                for insert_node in captures.get("ins", []):
+                    _extract_strings_from_node(insert_node)
+
+        except Exception as e_data:
+            pass
+
+        result["analysis_kind"] = "sql"
+    except Exception as e:
+        logger.error(f"Error parsing SQL {file_path} with tree-sitter: {e}")
+        result["error"] = f"Tree-sitter SQL parsing error: {e}"
+
 
 def _analyze_html_file_ts(file_path: str, content: str, result: Dict[str, Any]) -> None:
     """Analyzes HTML file content using tree-sitter."""
     for key in ["links", "scripts", "stylesheets", "images", "_ts_tree"]:
         result.setdefault(key, [] if key != "_ts_tree" else None)
-
-    # HTML_PARSER, HTML_LANGUAGE, Query, QueryCursor are directly imported and initialized at module load.
-    # If they are None, a hard import error would have occurred.
-    # No explicit check for TREE_SITTER_AVAILABLE as imports are now direct.
 
     queries = {
         "scripts": '(script_element (start_tag (attribute (attribute_name) @name (#eq? @name "src") (quoted_attribute_value (attribute_value) @path))))',
@@ -1974,7 +3310,7 @@ def _merge_analysis_results(primary: Dict[str, Any], secondary: Dict[str, Any]) 
 
         # Create a set of existing identifiers in primary for O(1) lookup
         # For imports, it's usually a list of strings. For others, it's a list of dicts.
-        existing_ids = set()
+        existing_ids: Set[str] = set()
 
         if key == "imports":
             # Imports can be strings or dicts (if detailed)
@@ -1982,7 +3318,7 @@ def _merge_analysis_results(primary: Dict[str, Any], secondary: Dict[str, Any]) 
                 if isinstance(item, str):
                     existing_ids.add(item)
                 elif isinstance(item, dict) and "path" in item:
-                    existing_ids.add(item["path"])
+                    existing_ids.add(cast(str, item["path"]))
         elif key == "calls":
             for item in primary_items:
                 if isinstance(item, dict) and "target_name" in item:
@@ -1992,16 +3328,18 @@ def _merge_analysis_results(primary: Dict[str, Any], secondary: Dict[str, Any]) 
                     # If TS captures a call AST missed, we want it.
                     # If TS captures same call, we skip.
                     # Let's use target_name + line approximation.
-                    line = item.get("line", -1)
-                    existing_ids.add(f"{item['target_name']}:{line}")
+                    dict_item = cast(Dict[str, Any], item)
+                    line = dict_item.get("line", -1)
+                    existing_ids.add(f"{dict_item['target_name']}:{line}")
         else:
             # functions, classes, globals_defined
             for item in primary_items:
                 if isinstance(item, dict) and "name" in item:
                     # Use name + line to be specific, or just name?
                     # If we have multiple functions with same name (overloads?), line helps.
-                    line = item.get("line", -1)
-                    existing_ids.add(f"{item['name']}:{line}")
+                    dict_item = cast(Dict[str, Any], item)
+                    line = dict_item.get("line", -1)
+                    existing_ids.add(f"{dict_item['name']}:{line}")
 
         # Merge unique items from secondary
         for item in secondary_items:
@@ -2011,17 +3349,18 @@ def _merge_analysis_results(primary: Dict[str, Any], secondary: Dict[str, Any]) 
                     primary_items.append(item)
             elif key == "calls":
                 if isinstance(item, dict) and "target_name" in item:
-                    line = item.get("line", -1)
-                    unique_key = f"{item['target_name']}:{line}"
+                    d_item = cast(Dict[str, Any], item)
+                    line = d_item.get("line", -1)
+                    unique_key = f"{d_item['target_name']}:{line}"
                     if unique_key not in existing_ids:
                         primary_items.append(item)
             else:
                 if isinstance(item, dict) and "name" in item:
-                    line = item.get("line", -1)
-                    unique_key = f"{item['name']}:{line}"
+                    dict_item = cast(Dict[str, Any], item)
+                    line = dict_item.get("line", -1)
+                    unique_key = f"{dict_item['name']}:{line}"
                     if unique_key not in existing_ids:
                         primary_items.append(item)
-
 
 def _analyze_python_file_ts(
     file_path: str, content: str, result: Dict[str, Any]
@@ -2139,17 +3478,9 @@ def _analyze_python_file_ts(
         calls_query = tree_sitter.Query(PY_LANGUAGE, calls_query_str)
         cursor_calls = tree_sitter.QueryCursor(calls_query)
 
-        # Process captures.
-        # captures_calls is a dict: { "capture_name": [Node, Node, ...] }
-        # But we need to group them by match to associate obj with attr.
-        # Since `captures()` returns a flat dict of all captures, we can't easily group by match pattern instance
-        # if there are multiple matches.
-        # HOWEVER, `QueryCursor.matches()` returns a list of matches, where each match is (pattern_index, captures_dict).
-        # This is better for associating @call_obj with @call_attr.
-
         matches_calls = cursor_calls.matches(tree.root_node)
 
-        for pattern_index, match_captures in matches_calls:
+        for _, match_captures in matches_calls:
             # match_captures is { "capture_name": [Node, ...] }
             # Usually one node per capture name in a single match for these patterns.
 

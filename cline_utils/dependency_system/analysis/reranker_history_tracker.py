@@ -312,7 +312,11 @@ def save_cycle_data(
     data: Dict[str, Any] = {
         "cycle": cycle_number,
         "timestamp": datetime.now().isoformat(),
+        "activity_status": (
+            "no_activity" if (not assignments and not all_pairs) else "active"
+        ),
         "total_suggestions": len(assignments),
+        "total_scanned_pairs": len(all_pairs),
         "metrics": metrics,
         "top_10_confident": get_top_assignments(assignments, 10),
         "bottom_5_confident": get_bottom_assignments(assignments, 5),
@@ -396,8 +400,9 @@ def track_reranker_performance(cycle_number: int, project_root: str) -> bool:
     scanned_pairs = parse_scans_log(scans_path)
 
     if not assignments and not scanned_pairs:
-        logger.warning(f"No reranker activity found. Skipping performance tracking.")
-        return False
+        logger.warning(
+            f"No reranker activity found. Recording empty performance snapshot for cycle {cycle_number}."
+        )
 
     # If we have assignments but no scans (legacy/fallback), use assignments as scans
     if not scanned_pairs and assignments:
@@ -443,6 +448,11 @@ def track_reranker_performance(cycle_number: int, project_root: str) -> bool:
 
         logger.info(
             f"Reranker performance tracking completed for cycle {cycle_number}. Found {len(assignments)} assignments and {len(scanned_pairs)} scanned pairs."
+        )
+
+    else:
+        logger.error(
+            f"Reranker performance tracking failed for cycle {cycle_number}."
         )
 
     return success

@@ -31,6 +31,7 @@ class TrackerUpdate:
     last_key_edit: str
     last_grid_edit: str
     module_path: Optional[str] = None  # For mini trackers
+    manual_foreign_pins: Optional[List[str]] = None  # For mini trackers
     template_data: Optional[Dict[str, Any]] = None  # For mini trackers
     existing_lines: Optional[List[str]] = None  # Preserved content
     tracker_exists: bool = False
@@ -346,6 +347,7 @@ class TrackerBatchCollector:
                     ),
                     current_global_map=update.path_to_key_info or {},
                     module_path_for_template=update.module_path or "",
+                    manual_foreign_pins=set(update.manual_foreign_pins or []),
                 )
             else:
                 # Write main or doc tracker
@@ -425,6 +427,7 @@ def create_mini_tracker_update(
     path_to_key_info: Dict[str, Any],
     existing_lines: Optional[List[str]] = None,
     tracker_exists: bool = False,
+    manual_foreign_pins: Optional[List[str]] = None,
 ) -> TrackerUpdate:
     """
     Create a TrackerUpdate for a mini tracker.
@@ -439,6 +442,7 @@ def create_mini_tracker_update(
         path_to_key_info: Global path to KeyInfo mapping
         existing_lines: Existing file content lines (for template preservation)
         tracker_exists: Whether the tracker file already exists
+        manual_foreign_pins: Persisted manual foreign pins for mini-pruning
 
     Returns:
         TrackerUpdate object ready for batch collection
@@ -457,6 +461,7 @@ def create_mini_tracker_update(
         existing_lines=existing_lines,
         tracker_exists=tracker_exists,
         path_to_key_info=path_to_key_info,
+        manual_foreign_pins=manual_foreign_pins,
     )
 
 

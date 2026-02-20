@@ -73,6 +73,7 @@ PathMigrationInfo = Dict[str, Tuple[Optional[str], Optional[str]]]
 # --- Constant for AST verified links file (as provided) ---
 AST_VERIFIED_LINKS_FILENAME = "ast_verified_links.json"
 _CORE_DIR_FOR_AST_LINKS: Optional[str] = None
+MANUAL_FOREIGN_PINS_META_KEY = "manual_foreign_pins_json"
 try:
     _key_manager_module_for_path = __import__(
         "cline_utils.dependency_system.core.key_manager", fromlist=[""]
@@ -84,6 +85,46 @@ except ImportError:
     logger.error(
         "TrackerIO: Could not determine core directory for AST links file. Path may be incorrect."
     )
+
+
+def _read_manual_foreign_pins_from_lines(lines: List[str]) -> Set[str]:
+    """
+    Reads persisted mini-tracker manual foreign pins from metadata.
+    Format:
+      manual_foreign_pins_json: ["<norm_path_1>", "<norm_path_2>", ...]
+    """
+    parsed_pins: Set[str] = set()
+    meta_prefix = f"{MANUAL_FOREIGN_PINS_META_KEY.lower()}:"
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped.lower().startswith(meta_prefix):
+            continue
+
+        payload = stripped.split(":", 1)[1].strip()
+        if not payload:
+            return set()
+
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError as e_json:
+            logger.warning(
+                f"Mini metadata parse warning: could not decode {MANUAL_FOREIGN_PINS_META_KEY}: {e_json}"
+            )
+            return set()
+
+        if not isinstance(parsed, list):
+            logger.warning(
+                f"Mini metadata parse warning: {MANUAL_FOREIGN_PINS_META_KEY} is not a JSON list."
+            )
+            return set()
+
+        for item in parsed:
+            if isinstance(item, str) and item.strip():
+                parsed_pins.add(normalize_path(item))
+        return parsed_pins
+
+    return parsed_pins
 
 
 # --- build_path_migration_map (Keep existing as provided) ---
@@ -390,6 +431,7 @@ def write_mini_tracker_with_template_preservation(
     template_markers: Tuple[str, str],  # (start_marker, end_marker)
     current_global_map: Dict[str, KeyInfo],  # Passed in for display key logic
     module_path_for_template: str,  # Actual module path for formatting {module_name}
+    manual_foreign_pins: Optional[Set[str]] = None,
 ):
     logger.debug(f"Writing mini tracker: {output_file}")
     start_marker, end_marker = template_markers
@@ -429,6 +471,12 @@ def write_mini_tracker_with_template_preservation(
     global_key_counts_for_display = defaultdict(int)
     for ki_global in current_global_map.values():
         global_key_counts_for_display[ki_global.key_string] += 1
+
+    normalized_manual_pins = (
+        sorted({normalize_path(p) for p in manual_foreign_pins if p})
+        if manual_foreign_pins
+        else []
+    )
 
     try:
         with open(output_file, "w", encoding="utf-8", newline="\n") as f:
@@ -477,6 +525,9 @@ def write_mini_tracker_with_template_preservation(
             # 3. Write Metadata
             f.write(f"last_KEY_edit: {last_key_edit_msg}\n")
             f.write(f"last_GRID_edit: {last_grid_edit_msg}\n\n")
+            f.write(
+                f"{MANUAL_FOREIGN_PINS_META_KEY}: {json.dumps(normalized_manual_pins, ensure_ascii=True)}\n\n"
+            )
 
             # 4. Write Grid Data (uses current_global_map and global_key_counts)
             _write_grid_section(
@@ -1476,6 +1527,7 @@ def update_tracker(
     grid_structure_changed_flag = False  # Tracks if items added/removed or pruned
     output_file: str = ""
     module_path_for_mini: str = ""
+    manual_foreign_pins_set: Set[str] = set()
     relevant_key_infos_for_type: List[KeyInfo] = []
     suggestions_to_process_for_this_tracker: Dict[str, List[Tuple[str, str]]] = (
         defaultdict(list)
@@ -1653,6 +1705,25 @@ def update_tracker(
             try:
                 with open(output_file, "r", encoding="utf-8") as f_mini_read:
                     _lines = f_mini_read.readlines()
+
+                persisted_manual_pins = _read_manual_foreign_pins_from_lines(_lines)
+                if persisted_manual_pins:
+                    valid_persisted_manual_pins = {
+                        p for p in persisted_manual_pins if p in path_to_key_info
+                    }
+                    dropped_pins_ct = len(persisted_manual_pins) - len(
+                        valid_persisted_manual_pins
+                    )
+                    if dropped_pins_ct > 0:
+                        logger.debug(
+                            f"  Mini Scan '{os.path.basename(output_file)}': Dropped {dropped_pins_ct} stale manual foreign pin(s) not present in current global map."
+                        )
+                    manual_foreign_pins_set.update(valid_persisted_manual_pins)
+                    current_rel_paths_set.update(valid_persisted_manual_pins)
+                    logger.debug(
+                        f"  Mini Scan '{os.path.basename(output_file)}': Loaded {len(valid_persisted_manual_pins)} persisted manual foreign pin(s)."
+                    )
+
                 _existing_defs_pairs = read_key_definitions_from_lines(_lines)
                 _existing_grid_headers, _existing_grid_rows_tuples = (
                     read_grid_from_lines(_lines)
@@ -1783,10 +1854,36 @@ def update_tracker(
                             valid_deps
                         )
         if not force_apply_suggestions and suggestions_to_process_for_this_tracker:
+            gi_is_internal_map: Dict[str, bool] = {}
+            for ki in relevant_key_infos_for_type:
+                gi = get_key_global_instance_string(ki, path_to_key_info)
+                if gi:
+                    gi_is_internal_map[gi] = (
+                        ki.norm_path == module_path_for_mini
+                        or ki.parent_path == module_path_for_mini
+                    )
+
+            filtered_suggestions = defaultdict(list)
+            kept_suggestions_ct = 0
+            dropped_suggestions_ct = 0
+
+            for src_gi, deps_gi in suggestions_to_process_for_this_tracker.items():
+                src_is_internal = gi_is_internal_map.get(src_gi, False)
+                for tgt_gi, dep_char in deps_gi:
+                    tgt_is_internal = gi_is_internal_map.get(tgt_gi, False)
+                    # For non-forced mini updates, keep links that touch the module's
+                    # native scope. This allows SQL-derived internal links to persist
+                    # while still preventing unrelated foreign-foreign churn.
+                    if src_is_internal or tgt_is_internal:
+                        filtered_suggestions[src_gi].append((tgt_gi, dep_char))
+                        kept_suggestions_ct += 1
+                    else:
+                        dropped_suggestions_ct += 1
+
             logger.debug(
-                f"Mini Tracker '{os.path.basename(output_file)}': Clearing {len(suggestions_to_process_for_this_tracker)} non-forced suggestions."
+                f"Mini Tracker '{os.path.basename(output_file)}': Filtered non-forced suggestions (kept={kept_suggestions_ct}, dropped={dropped_suggestions_ct}, policy=touches_internal_endpoint)."
             )
-            suggestions_to_process_for_this_tracker.clear()
+            suggestions_to_process_for_this_tracker = filtered_suggestions
         logger.debug(
             f"Mini Tracker: Populated suggestions_to_process (count: {sum(len(v) for v in suggestions_to_process_for_this_tracker.values())})"
         )
@@ -2841,6 +2938,43 @@ def update_tracker(
                     continue
                 tgt_ki_in_this_tracker = final_key_info_list[tgt_local_idx]
 
+                if tracker_type == "mini" and force_apply_suggestions:
+                    src_is_internal_manual = (
+                        src_ki_in_this_tracker.norm_path == module_path_for_mini
+                        or src_ki_in_this_tracker.parent_path == module_path_for_mini
+                    )
+                    tgt_is_internal_manual = (
+                        tgt_ki_in_this_tracker.norm_path == module_path_for_mini
+                        or tgt_ki_in_this_tracker.parent_path == module_path_for_mini
+                    )
+                    foreign_paths_for_manual_link: Set[str] = set()
+                    if not src_is_internal_manual:
+                        foreign_paths_for_manual_link.add(src_ki_in_this_tracker.norm_path)
+                    if not tgt_is_internal_manual:
+                        foreign_paths_for_manual_link.add(tgt_ki_in_this_tracker.norm_path)
+
+                    if foreign_paths_for_manual_link:
+                        is_positive_manual_link = False
+                        if dep_char_sugg not in (
+                            PLACEHOLDER_CHAR,
+                            EMPTY_CHAR,
+                            DIAGONAL_CHAR,
+                            "n",
+                        ):
+                            try:
+                                is_positive_manual_link = (
+                                    get_priority(dep_char_sugg) >= min_positive_priority
+                                )
+                            except KeyError:
+                                is_positive_manual_link = False
+
+                        if is_positive_manual_link:
+                            manual_foreign_pins_set.update(foreign_paths_for_manual_link)
+                        else:
+                            manual_foreign_pins_set.difference_update(
+                                foreign_paths_for_manual_link
+                            )
+
                 existing_char_in_grid = temp_decomp_grid_rows[src_local_idx][
                     tgt_local_idx
                 ]
@@ -3171,6 +3305,20 @@ def update_tracker(
             }
             paths_to_keep_after_pruning_set = internal_paths_for_pruning_set.copy()
 
+            valid_paths_for_pruning = {
+                ki.norm_path for ki in original_final_key_info_list_before_pruning
+            }
+            manual_foreign_pins_set = {
+                p
+                for p in manual_foreign_pins_set
+                if p in valid_paths_for_pruning and p not in internal_paths_for_pruning_set
+            }
+            if manual_foreign_pins_set:
+                paths_to_keep_after_pruning_set.update(manual_foreign_pins_set)
+                logger.debug(
+                    f"  PruningKeep: Preserving {len(manual_foreign_pins_set)} manually pinned foreign path(s)."
+                )
+
             # Use the existing min_positive_priority for the pruning threshold
             pruning_priority_threshold = min_positive_priority
             logger.debug(
@@ -3354,6 +3502,20 @@ def update_tracker(
             logger.debug(
                 f"Mini Tracker ({os.path.basename(output_file)}): Skipping foreign key pruning because force_apply_suggestions is True."
             )
+
+        # Keep manual pin metadata aligned with current tracker scope.
+        final_paths_in_mini = {ki.norm_path for ki in final_key_info_list}
+        internal_paths_in_mini = {
+            ki.norm_path
+            for ki in final_key_info_list
+            if ki.parent_path == module_path_for_mini
+            or ki.norm_path == module_path_for_mini
+        }
+        manual_foreign_pins_set = {
+            p
+            for p in manual_foreign_pins_set
+            if p in final_paths_in_mini and p not in internal_paths_in_mini
+        }
     elif tracker_type == "doc" and final_key_info_list:
         logger.debug(
             f"Doc Tracker ({os.path.basename(output_file)}): Pruning items not in a doc root."
@@ -3517,29 +3679,41 @@ def update_tracker(
             row_idx = path_to_final_idx.get(source_path_from_ast)
             col_idx = path_to_final_idx.get(target_path_from_ast)
 
-            # If either endpoint isn’t in this tracker’s grid, auto-include foreign items per user policy (all tracker types; no guardrails)
+            # AST links should not explode tracker scope.
+            # - If both endpoints are outside this tracker: ignore.
+            # - For mini trackers, do NOT auto-add missing endpoints (pruning remains authoritative).
+            if row_idx is None and col_idx is None:
+                continue
             if row_idx is None or col_idx is None:
-                # Attempt to include missing endpoints into this tracker’s definitions
-                # Resolve KeyInfo objects from global map using paths from AST link
+                if tracker_type == "mini":
+                    continue
+
+                # Resolve endpoints from global map for non-mini trackers.
                 src_ki_global = path_to_key_info_global.get(source_path_from_ast)
                 tgt_ki_global = path_to_key_info_global.get(target_path_from_ast)
                 if not src_ki_global or not tgt_ki_global:
-                    # Cannot include if not in global map; skip this link
                     continue
 
-                # Extend final_key_info_list with any missing endpoints
+                # Snapshot old structure so we can preserve by path, not by index.
+                old_key_info_list = list(final_key_info_list)
+                old_grid = [list(row) for row in temp_decomp_grid_rows]
+                old_path_to_idx = {
+                    ki.norm_path: i for i, ki in enumerate(old_key_info_list)
+                }
+
                 added_any = False
-                if row_idx is None:
+                if row_idx is None and src_ki_global.norm_path not in old_path_to_idx:
                     final_key_info_list.append(src_ki_global)
                     added_any = True
-                if col_idx is None:
-                    # Avoid duplicating if both refer to the same path
-                    if src_ki_global.norm_path != tgt_ki_global.norm_path:
-                        final_key_info_list.append(tgt_ki_global)
-                        added_any = True
+                if (
+                    col_idx is None
+                    and tgt_ki_global.norm_path not in old_path_to_idx
+                    and src_ki_global.norm_path != tgt_ki_global.norm_path
+                ):
+                    final_key_info_list.append(tgt_ki_global)
+                    added_any = True
 
                 if added_any:
-                    # Re-sort the list deterministically (by hierarchical key then path)
                     final_key_info_list.sort(
                         key=lambda ki_sort: (
                             (
@@ -3550,42 +3724,39 @@ def update_tracker(
                             ki_sort.norm_path,
                         )
                     )
-                    # Rebuild path->index mapping
                     path_to_final_idx.clear()
                     path_to_final_idx.update(
                         {ki.norm_path: i for i, ki in enumerate(final_key_info_list)}
                     )
 
-                    # Resize temp_decomp_grid_rows to new NxN, preserving existing values
-                    old_n = len(temp_decomp_grid_rows)
                     new_n = len(final_key_info_list)
-                    if old_n == 0:
-                        # initialize fresh grid
-                        temp_decomp_grid_rows[:] = [
-                            [PLACEHOLDER_CHAR] * new_n for _ in range(new_n)
-                        ]
-                        for d in range(new_n):
-                            temp_decomp_grid_rows[d][d] = DIAGONAL_CHAR
-                    else:
-                        # build new grid and copy old into top-left
-                        new_grid = [[PLACEHOLDER_CHAR] * new_n for _ in range(new_n)]
-                        for d in range(new_n):
-                            new_grid[d][d] = DIAGONAL_CHAR
-                        # Determine old indices of paths present before expansion
-                        # We assume previous order corresponds to first old_n entries after resort; copy min-by-min
-                        lim = min(old_n, new_n)
-                        for r in range(lim):
-                            for c in range(lim):
-                                if r != c:
-                                    new_grid[r][c] = temp_decomp_grid_rows[r][c]
-                        # Replace
-                        temp_decomp_grid_rows[:] = new_grid
+                    rebuilt_grid = [[PLACEHOLDER_CHAR] * new_n for _ in range(new_n)]
+                    for d in range(new_n):
+                        rebuilt_grid[d][d] = DIAGONAL_CHAR
 
-                    # Update indices after expansion
-                    row_idx = path_to_final_idx.get(source_path_from_ast)
-                    col_idx = path_to_final_idx.get(target_path_from_ast)
+                    # Preserve prior values by matching endpoint paths.
+                    for old_r_path, old_r_idx in old_path_to_idx.items():
+                        new_r_idx = path_to_final_idx.get(old_r_path)
+                        if new_r_idx is None or old_r_idx >= len(old_grid):
+                            continue
+                        for old_c_path, old_c_idx in old_path_to_idx.items():
+                            if old_r_idx == old_c_idx:
+                                continue
+                            new_c_idx = path_to_final_idx.get(old_c_path)
+                            if (
+                                new_c_idx is None
+                                or new_r_idx == new_c_idx
+                                or old_c_idx >= len(old_grid[old_r_idx])
+                            ):
+                                continue
+                            rebuilt_grid[new_r_idx][new_c_idx] = old_grid[old_r_idx][
+                                old_c_idx
+                            ]
 
-                # If after expansion indices are still missing, skip
+                    temp_decomp_grid_rows[:] = rebuilt_grid
+
+                row_idx = path_to_final_idx.get(source_path_from_ast)
+                col_idx = path_to_final_idx.get(target_path_from_ast)
                 if row_idx is None or col_idx is None:
                     continue
 
@@ -3820,6 +3991,9 @@ def update_tracker(
             ),
             "tracker_exists": tracker_exists_and_is_sound,
             "path_to_key_info": path_to_key_info,
+            "manual_foreign_pins": (
+                sorted(manual_foreign_pins_set) if tracker_type == "mini" else []
+            ),
         }
 
     if tracker_type == "mini":
@@ -3847,6 +4021,7 @@ def update_tracker(
             markers_to_use,
             path_to_key_info,
             module_path_for_mini,  # Pass for template formatting {module_name}
+            manual_foreign_pins_set,
         )
         logger.debug(
             f"Mini tracker '{os.path.basename(output_file)}' write process completed."

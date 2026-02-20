@@ -27,7 +27,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 # Configuration
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 DEFAULT_MAX_SIZE = 10000  # Default max items per cache
-DEFAULT_TTL = 300  # 10 minutes in seconds
+DEFAULT_TTL = 600
 CACHE_SIZES = {
     "embeddings_generation": 300,  # Smaller for heavy data
     "key_generation": 5000,  # Larger for key maps

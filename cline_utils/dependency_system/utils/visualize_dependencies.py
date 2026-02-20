@@ -145,6 +145,9 @@ def _create_puppeteer_config_file(directory: str) -> str:
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--disable-dev-shm-usage",
+            "--disable-features=VizDisplayCompositor",
         ],
     }
 
@@ -197,7 +200,9 @@ def render_mermaid_to_image(mermaid_syntax: str, output_file_path: str):
     # Add puppeteer config for protocolTimeout (prevents timeouts on large diagrams)
     puppeteer_config_path = os.path.join(output_dir, "puppeteer_config.json")
     if os.path.isfile(puppeteer_config_path):
-        command.extend(["--puppeteerConfigFile", os.path.normpath(puppeteer_config_path)])
+        command.extend(
+            ["--puppeteerConfigFile", os.path.normpath(puppeteer_config_path)]
+        )
         logger.debug(f"Using Puppeteer config: {puppeteer_config_path}")
 
     # 15-minute subprocess timeout as a safety net beyond Puppeteer's protocolTimeout

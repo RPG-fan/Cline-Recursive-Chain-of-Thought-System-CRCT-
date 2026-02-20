@@ -53,6 +53,25 @@ def merge_runtime_and_ast(
         merged["file_type"] = ast_data.get("file_type", "py")
         merged["imports"] = ast_data.get("imports", [])
         merged["calls"] = ast_data.get("calls", [])  # Call graph with line numbers
+
+        # Preserve additional AST-derived structure for SES and cross-language analysis.
+        # Runtime data remains authoritative for overlapping rich runtime fields.
+        for ast_key, ast_val in ast_data.items():
+            if ast_key in {
+                "file_path",
+                "file_type",
+                "imports",
+                "calls",
+                "classes",
+                "functions",
+                "error",
+                "skipped",
+                "_ast_tree",
+                "_ts_tree",
+            }:
+                continue
+            if ast_key not in merged or not merged.get(ast_key):
+                merged[ast_key] = ast_val
         
         # Enhance classes with AST metadata if available
         runtime_classes = merged.get("classes", [])

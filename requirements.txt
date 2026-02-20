@@ -12,7 +12,6 @@ transformers
 torch
 numpy
 sentence-transformers
-jsonc-parser
 psutil
 llama-cpp-python
 pytest

@@ -45,15 +45,15 @@ PATTERNS = {
 # Patterns to exclude from false positive matches (e.g., sql.Placeholder, include_placeholder=False)
 EXCLUSION_PATTERNS = {
     "placeholder": [
-        re.compile(r"_placeholder", re.IGNORECASE),  # _placeholder (variable suffix)
-        re.compile(r"placeholder_", re.IGNORECASE),  # placeholder_ (variable prefix)
+        re.compile(r"_placeholder", re.IGNORECASE),   # _placeholder (variable suffix)
+        re.compile(r"placeholder_", re.IGNORECASE),   # placeholder_ (variable prefix)
         re.compile(r"sql\.Placeholder", re.IGNORECASE),  # sql.Placeholder()
         re.compile(r"placeholders\s*=", re.IGNORECASE),  # placeholders = ...
-        re.compile(r"placeholder\s*=", re.IGNORECASE),  # placeholder=False
-        re.compile(r"placeholder\s*:", re.IGNORECASE),  # placeholder: type hint
-        re.compile(r"Placeholder\(\)", re.IGNORECASE),  # Placeholder() call
-        re.compile(r"\.placeholder\.", re.IGNORECASE),  # .placeholder. (method calls)
-        re.compile(r'"placeholder"', re.IGNORECASE),  # "placeholder" (string literal)
+        re.compile(r"placeholder\s*=", re.IGNORECASE),   # placeholder=False
+        re.compile(r"placeholder\s*:", re.IGNORECASE),   # placeholder: type hint
+        re.compile(r"Placeholder\(\)", re.IGNORECASE),   # Placeholder() call
+        re.compile(r"\.placeholder\.", re.IGNORECASE),   # .placeholder. (method calls)
+        re.compile(r'"placeholder"', re.IGNORECASE),     # "placeholder" (string literal)
     ],
 }
 
@@ -226,10 +226,10 @@ def scan_file(filepath):
                                 if excl_pattern.search(line):
                                     excluded = True
                                     break
-
+                        
                         if excluded:
                             continue
-
+                            
                         issues.append(
                             {
                                 "type": "Incomplete/Improper",
@@ -316,9 +316,7 @@ def generate_report(issues, unused):
         f.write("## Incomplete & Improper Items\n")
         if issues:
             # Sort by file, subtype, and content for grouping
-            issues.sort(
-                key=lambda x: (x["file"], x["subtype"], x["content"], x["line"])
-            )
+            issues.sort(key=lambda x: (x["file"], x["subtype"], x["content"], x["line"]))
 
             # Group issues by (file, subtype, content)
             grouped = {}
@@ -327,10 +325,10 @@ def generate_report(issues, unused):
                 if key not in grouped:
                     grouped[key] = []
                 grouped[key].append(issue["line"])
-
+            
             # Sort groups by file and first line
             sorted_groups = sorted(grouped.items(), key=lambda x: (x[0][0], x[1][0]))
-
+            
             for (filepath, subtype, content), lines in sorted_groups:
                 if len(lines) == 1:
                     # Single occurrence - original format
