@@ -13,7 +13,7 @@ import os
 import re
 import shutil  # Added for renaming
 from collections import defaultdict
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.path_utils import (
@@ -955,7 +955,7 @@ def get_key_from_path(path: str, path_to_key_info: Dict[str, KeyInfo]) -> Option
     return info.key_string if info else None
 
 
-def get_sortable_parts_for_key(key_str: str) -> list:
+def get_sortable_parts_for_key(key_str: str) -> List[Union[str, int]]:
     """
     Splits a key string into parts and converts numeric parts to integers
     for hierarchical/natural sorting.
@@ -964,7 +964,7 @@ def get_sortable_parts_for_key(key_str: str) -> list:
         return []
     parts = re.findall(KEY_PATTERN, key_str)
     try:
-        converted_parts = [(int(p) if p.isdigit() else p) for p in parts]
+        converted_parts: List[Union[str, int]] = [(int(p) if p.isdigit() else p) for p in parts]
     except (ValueError, TypeError):
         logger.warning(
             f"Could not convert parts for sorting key string '{key_str}', using original string parts."
@@ -985,7 +985,7 @@ def sort_key_strings_hierarchically(keys: List[str]) -> List[str]:
         A new list containing the sorted key strings.
     """
 
-    def sort_key_func(key_str: str):
+    def sort_key_func(key_str: str) -> List[Union[str, int]]:
         if not key_str:
             return []  # Handle invalid input
         parts = re.findall(KEY_PATTERN, key_str)
@@ -993,7 +993,7 @@ def sort_key_strings_hierarchically(keys: List[str]) -> List[str]:
         try:
             # Ensure tier (first part if numeric) is handled correctly
             # The pattern splits correctly, just need conversion
-            converted_parts = [(int(p) if p.isdigit() else p) for p in parts]
+            converted_parts: List[Union[str, int]] = [(int(p) if p.isdigit() else p) for p in parts]
         except (ValueError, TypeError):
             logger.warning(
                 f"Could not convert parts for sorting key string '{key_str}', using basic string sort."

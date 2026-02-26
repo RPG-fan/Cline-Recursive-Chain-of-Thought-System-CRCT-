@@ -1,5 +1,4 @@
 PyYAML
-psycopg[binary]
 tree-sitter
 tree-sitter-language-pack
 tree-sitter-css

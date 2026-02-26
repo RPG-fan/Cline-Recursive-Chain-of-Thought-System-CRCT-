@@ -39,7 +39,7 @@ CACHE_VERSION = "1.1"  # Bumped: now includes GPU/VRAM metrics
 DEFAULT_CACHE_TTL_SECONDS = 604800  # 7 days (hardware resources rarely change)
 
 
-def _get_cache_path() -> str:
+def get_cache_path() -> str:
     """Get path to validation cache file."""
     from .. import core
 
@@ -50,7 +50,7 @@ def _get_cache_path() -> str:
 def _load_validation_cache() -> Optional[Dict[str, Any]]:
     """Load cached validation results if available."""
     try:
-        cache_path = _get_cache_path()
+        cache_path = get_cache_path()
         if not os.path.exists(cache_path):
             return None
 
@@ -66,7 +66,7 @@ def _load_validation_cache() -> Optional[Dict[str, Any]]:
 def _save_validation_cache(project_path: str, results: Dict[str, Any]) -> None:
     """Save validation results to cache."""
     try:
-        cache_path = _get_cache_path()
+        cache_path = get_cache_path()
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
 
         cache_data = {

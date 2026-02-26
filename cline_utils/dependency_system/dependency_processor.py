@@ -16,11 +16,10 @@ from logging import LogRecord
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from cline_utils.dependency_system.analysis.dependency_analyzer import analyze_file
-
+from cline_utils.dependency_system.analysis.dependency_suggester import load_project_symbol_map
 # Type alias for sortable parts
 SortableParts = list[str]
 from cline_utils.dependency_system.analysis.embedding_manager import (
-    _load_project_symbol_map,
     generate_symbol_essence_string,
 )
 from cline_utils.dependency_system.analysis.local_llm_processor import LocalLLMProcessor
@@ -82,6 +81,7 @@ from cline_utils.dependency_system.utils.tracker_utils import (
     read_grid_from_lines,
     read_key_definitions_from_lines,
     resolve_key_global_instance_to_ki,
+    read_tracker_file_structured,
 )
 from cline_utils.dependency_system.utils.visualize_dependencies import (
     generate_mermaid_diagram,
@@ -229,7 +229,7 @@ def handle_determine_dependency(args: argparse.Namespace) -> int:
         return 1
 
     # Load symbol map
-    symbol_map = _load_project_symbol_map()
+    symbol_map = load_project_symbol_map()
 
     try:
         # Use SES for source if available
@@ -363,9 +363,9 @@ def command_handler_analyze_project(args: argparse.Namespace) -> int:
         # Clear validation cache if --force-validate flag is set
         if getattr(args, "force_validate", False):
             try:
-                from .utils.resource_validator import _get_cache_path
+                from .utils.resource_validator import get_cache_path
 
-                cache_path = _get_cache_path()
+                cache_path = get_cache_path()
                 if os.path.exists(cache_path):
                     os.remove(cache_path)
                     logger.info("Cleared validation cache (--force-validate)")
@@ -1912,8 +1912,8 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
     import time
 
     tracker_path = normalize_path(args.tracker)
-    if not os.path.exists(tracker_path):
-        print(f"Error: Tracker file not found: {tracker_path}", file=sys.stderr)
+    if not os.path.isfile(tracker_path):
+        print(f"Error: Tracker file not found or is a directory: {tracker_path}", file=sys.stderr)
         return 1
 
     limit = args.limit
@@ -1981,6 +1981,150 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
     tasks = tasks[:limit]
 
+    algo_tasks: List[Tuple[str, str, str, str]] = []
+    llm_tasks: List[Tuple[str, str, str, str]] = []
+    for pair in tasks:
+        _, sp, _, tp = pair
+        if os.path.isdir(sp) or os.path.isdir(tp):
+            algo_tasks.append(pair)
+        else:
+            llm_tasks.append(pair)
+            
+    if algo_tasks:
+        print(f"\n--- Resolving {len(algo_tasks)} directory placeholders algorithmically ---")
+
+        config_mgr = ConfigManager()
+        get_prio = config_mgr.get_char_priority
+        all_tp = find_all_tracker_paths(config_mgr, get_project_root())
+        
+        edges: Dict[str, Dict[str, str]] = {}
+        for tp in all_tp:
+            try:
+                t_data = read_tracker_file_structured(tp)
+                defs = t_data.get("definitions_ordered", [])
+                grid = t_data.get("grid_rows_ordered", [])
+                key_to_path = {k: normalize_path(p) for k,p in defs}
+                keys_list = [k for k, p in defs]
+                
+                for row_k, comp_row in grid:
+                    try:
+                        src_path_norm = key_to_path.get(str(row_k))
+                        if not src_path_norm: continue
+                        if src_path_norm not in edges:
+                            edges[src_path_norm] = {}
+                        
+                        decomp = list(decompress(str(comp_row)))
+                        for col_idx, char in enumerate(decomp):
+                            char_str = str(char)
+                            if char_str in (PLACEHOLDER_CHAR, DIAGONAL_CHAR, " "): continue
+                            if col_idx < len(keys_list):
+                                tgt_k = keys_list[col_idx]
+                                tgt_path_norm = key_to_path.get(tgt_k)
+                                if tgt_path_norm:
+                                    existing: str = edges[src_path_norm].get(tgt_path_norm, " ")
+                                    if get_prio(char_str) > get_prio(existing):
+                                        edges[src_path_norm][tgt_path_norm] = char_str
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        algo_suggestions: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+        for src_key, src_path, tgt_key, tgt_path in algo_tasks:
+            sn: str = normalize_path(src_path)
+            tn: str = normalize_path(tgt_path)
+            
+            if sn == tn or sn.startswith(tn + os.sep) or tn.startswith(sn + os.sep):
+                print(f"Algorithmically resolved {src_key} -> {tgt_key}: 'x' (Parent-Child relation)")
+                algo_suggestions[src_key].append((tgt_key, 'x'))
+                continue
+                
+            s_children: List[str] = [k for k, v in global_map.items() if (k == sn or k.startswith(sn + os.sep)) and not v.is_directory]
+            t_children: List[str] = [k for k, v in global_map.items() if (k == tn or k.startswith(tn + os.sep)) and not v.is_directory]
+            
+            if not s_children and os.path.isfile(sn): s_children = [sn]
+            if not t_children and os.path.isfile(tn): t_children = [tn]
+            
+            best_char: str = ' '
+            best_prio: int = -1
+            found_chars: Set[str] = set()
+            
+            for sc in s_children:
+                for tc in t_children:
+                    char = edges.get(sc, {}).get(tc)
+                    if char:
+                        prio = get_prio(char)
+                        found_chars.add(char)
+                        if prio > best_prio:
+                            best_prio = prio
+                            best_char = char
+            
+            if best_prio > -1:
+                if {'<', '>'} <= found_chars:
+                    best_char = 'x'
+                print(f"Algorithmically resolved {src_key} -> {tgt_key}: '{best_char}' (Rolled up)")
+                algo_suggestions[src_key].append((tgt_key, best_char))
+            else:
+                print(f"Algorithmically resolved {src_key} -> {tgt_key}: 'n' (No dependencies found)")
+                algo_suggestions[src_key].append((tgt_key, 'n'))
+
+        if algo_suggestions:
+            algo_collector = TrackerBatchCollector()
+            update_data = update_tracker(
+                output_file_suggestion=tracker_path,
+                path_to_key_info=global_map,
+                tracker_type=tracker_type,
+                suggestions_external=algo_suggestions,
+                return_update=True,
+                force_apply_suggestions=True,
+                apply_ast_overrides=False
+            )
+            
+            if update_data:
+                t_update = None
+                if tracker_type == "mini":
+                    t_update = create_mini_tracker_update(
+                        output_file=update_data["output_file"],
+                        key_info_list=update_data["key_info_list"],
+                        grid_rows=update_data["grid_rows"],
+                        last_key_edit=update_data["last_key_edit"],
+                        last_grid_edit=update_data["last_grid_edit"],
+                        module_path=update_data["module_path"],
+                        path_to_key_info=update_data["path_to_key_info"],
+                        existing_lines=update_data["existing_lines"],
+                        tracker_exists=update_data["tracker_exists"],
+                    )
+                elif tracker_type == "doc":
+                    t_update = create_doc_tracker_update(
+                        output_file=tracker_path,
+                        key_info_list=update_data["key_info_list"],
+                        grid_rows=update_data["grid_rows"],
+                        last_key_edit=update_data["last_key_edit"],
+                        last_grid_edit=update_data["last_grid_edit"],
+                        path_to_key_info=global_map,
+                    )
+                else:
+                    t_update = create_main_tracker_update(
+                        output_file=tracker_path,
+                        key_info_list=update_data["key_info_list"],
+                        grid_rows=update_data["grid_rows"],
+                        last_key_edit=update_data["last_key_edit"],
+                        last_grid_edit=update_data["last_grid_edit"],
+                        path_to_key_info=global_map,
+                    )
+                if t_update:
+                    algo_collector.add(t_update)
+                    algo_collector.commit_all()
+                else:
+                    print("Error: Failed to create tracker update object for algorithmic tasks.")
+
+    tasks = llm_tasks
+    if not tasks:
+        if algo_tasks:
+            print("No LLM tasks required. Finished resolving algorithmically.")
+        return 0
+
+
     # Setup for token checks
     MAX_MODEL_TOKENS = 30000  # Leave buffer for system prompt (total ctx 32768)
     WRAPPER_OVERHEAD = 1000  # Approximate system prompt + overhead
@@ -1991,7 +2135,7 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
     token_map = _load_token_metadata(get_project_root())
 
     # Load symbol map to check for SES availability
-    symbol_map = _load_project_symbol_map()
+    symbol_map = load_project_symbol_map()
 
     # Helper to get appropriate token count (defined once, reused by sort and loop)
     def get_tokens(path_norm: str, is_ses: bool) -> int:
