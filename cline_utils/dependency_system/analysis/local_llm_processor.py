@@ -1,6 +1,7 @@
 # cline_utils/dependency_system/analysis/local_llm_processor.py
 
 import logging
+import re
 from typing import Any, Optional, Tuple
 
 try:
@@ -222,18 +223,29 @@ A clear summary of dependency determination for the source and target files with
         valid_chars = ["<", ">", "x", "d", "n"]
 
         lines = result_text.split("\n")
+        reasoning_idx = -1
         for i, line in enumerate(lines):
             if line.strip().startswith("Reasoning:"):
-                # Get the line above and extract its last character
-                if i > 0:
-                    prev_line = lines[i - 1].strip()
-                    if prev_line:
-                        char = prev_line[-1]
-                        if char in valid_chars:
-                            return char, result_text
+                reasoning_idx = i
                 break
 
-        logger.warning(f"Unexpected model output: {result_text}. Defaulting to 'p'.")
+        if reasoning_idx > 0:
+            for j in range(reasoning_idx - 1, -1, -1):
+                prev_line = lines[j].strip()
+                if prev_line:
+                    # Look for -> followed by our character, allowing quotes/backticks
+                    match = re.search(r"->\s*[`'\"*]*([<>xdn])", prev_line)
+                    if match:
+                        return match.group(1), result_text
+
+                    # Fallback: just check the end of the cleaned line
+                    clean_line = prev_line.strip("`'\"* ")
+                    if clean_line and clean_line[-1] in valid_chars:
+                        return clean_line[-1], result_text
+                    break  # Stop at the first non-empty line above "Reasoning:"
+
+        safe_text = result_text.encode("ascii", "backslashreplace").decode("ascii")
+        logger.warning(f"Unexpected model output: {safe_text}. Defaulting to 'p'.")
         return "p", result_text
 
     def close(self):
