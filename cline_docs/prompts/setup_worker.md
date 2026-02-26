@@ -72,3 +72,7 @@ Reasoning: [Evidence-backed reasoning]
 ```
 
 If evidence is insufficient, state exactly what is missing and why.
+
+## File Paths
+
+If you do not have the paths to the files or the correct keys, you can look them up in the global_key_map.json file located at `cline_utils\dependency_system\core\global_key_map.json`.
