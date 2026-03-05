@@ -2949,9 +2949,13 @@ def update_tracker(
                     )
                     foreign_paths_for_manual_link: Set[str] = set()
                     if not src_is_internal_manual:
-                        foreign_paths_for_manual_link.add(src_ki_in_this_tracker.norm_path)
+                        foreign_paths_for_manual_link.add(
+                            src_ki_in_this_tracker.norm_path
+                        )
                     if not tgt_is_internal_manual:
-                        foreign_paths_for_manual_link.add(tgt_ki_in_this_tracker.norm_path)
+                        foreign_paths_for_manual_link.add(
+                            tgt_ki_in_this_tracker.norm_path
+                        )
 
                     if foreign_paths_for_manual_link:
                         is_positive_manual_link = False
@@ -2969,7 +2973,9 @@ def update_tracker(
                                 is_positive_manual_link = False
 
                         if is_positive_manual_link:
-                            manual_foreign_pins_set.update(foreign_paths_for_manual_link)
+                            manual_foreign_pins_set.update(
+                                foreign_paths_for_manual_link
+                            )
                         else:
                             manual_foreign_pins_set.difference_update(
                                 foreign_paths_for_manual_link
@@ -3020,9 +3026,9 @@ def update_tracker(
                             existing_char_in_grid
                         ):
                             apply_this_suggestion_to_cell = True
-                            logger.info(
-                                f"    Applying stronger suggestion '{final_char_to_set_in_grid}' over '{existing_char_in_grid}' for {src_ki_in_this_tracker.norm_path} -> {tgt_ki_in_this_tracker.norm_path}"
-                            )
+                            # logger.debug(
+                            #     f"    Applying stronger suggestion '{final_char_to_set_in_grid}' over '{existing_char_in_grid}' for {src_ki_in_this_tracker.norm_path} -> {tgt_ki_in_this_tracker.norm_path}"
+                            # )
                     except KeyError:
                         logger.warning(
                             f"    Priority lookup failed for '{final_char_to_set_in_grid}' or '{existing_char_in_grid}'."
@@ -3311,7 +3317,8 @@ def update_tracker(
             manual_foreign_pins_set = {
                 p
                 for p in manual_foreign_pins_set
-                if p in valid_paths_for_pruning and p not in internal_paths_for_pruning_set
+                if p in valid_paths_for_pruning
+                and p not in internal_paths_for_pruning_set
             }
             if manual_foreign_pins_set:
                 paths_to_keep_after_pruning_set.update(manual_foreign_pins_set)

@@ -379,7 +379,7 @@ class Cache:
 
     def invalidate(self, key_pattern: str) -> None:
         """Invalidate entries matching a key pattern (supports regex). Also invalidates dependent entries."""
-        with self._lock:  # <<< SUGGESTION: Add lock here
+        with self._lock:
             compiled_pattern = re.compile(key_pattern)
             # Iterate over a copy of keys for safety during removal
             keys_to_remove_initial = [

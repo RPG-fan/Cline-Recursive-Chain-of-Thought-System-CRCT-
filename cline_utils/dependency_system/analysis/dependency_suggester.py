@@ -18,7 +18,10 @@ from cline_utils.dependency_system.core import key_manager
 
 # Import only from lower-level modules
 from cline_utils.dependency_system.core.key_manager import KeyInfo
-from cline_utils.dependency_system.utils.cache_manager import cached, clear_all_caches
+from cline_utils.dependency_system.utils.cache_manager import (
+    cached,
+    clear_all_caches,
+)
 from cline_utils.dependency_system.utils.cache_manager import (
     normalize_path_cached as normalize_path,
 )
@@ -32,9 +35,7 @@ KEY_MANAGER_DIR = os.path.dirname(os.path.abspath(key_manager.__file__))
 
 logger = logging.getLogger(__name__)
 
-# Caches for structural dependency analysis to avoid using function attributes
-_structural_import_map_cache: Dict[str, Dict[str, str]] = {}
-_structural_resolved_path_cache: Dict[Tuple[str, Optional[str]], Optional[str]] = {}
+# Caches for structural dependency analysis moved to cache_manager
 
 # Character Definitions:
 # <: Row depends on column.
@@ -79,8 +80,6 @@ def clear_caches():
     clear_all_caches()
     if hasattr(_find_and_parse_tsconfig, "_cache"):
         _find_and_parse_tsconfig._cache.clear()
-    _structural_import_map_cache.clear()
-    _structural_resolved_path_cache.clear()
     if hasattr(load_project_symbol_map, "_cache"):
         load_project_symbol_map._cache.clear()
 
@@ -445,6 +444,13 @@ def _identify_structural_dependencies(
     exceptions_handled = source_analysis.get("exceptions_handled", [])
     with_contexts_used = source_analysis.get("with_contexts_used", [])
 
+    def _import_map_key(current_source_path: str, tree: Optional[ast.AST] = None) -> str:
+        return normalize_path(current_source_path)
+
+    @cached(
+        "structural_import_map",
+        key_func=_import_map_key,
+    )
     def _build_import_map(
         current_source_path: str, tree: Optional[ast.AST]
     ) -> Dict[str, str]:  # Add tree parameter
@@ -460,9 +466,6 @@ def _identify_structural_dependencies(
         - `from my_package.another_module import specific_item as si` -> map `{"si": "/abs/path/to/my_package/another_module.py"}`
         """
         norm_source_path = normalize_path(current_source_path)
-        if norm_source_path in _structural_import_map_cache:
-            return _structural_import_map_cache[norm_source_path]
-
         local_import_map: Dict[str, str] = {}
 
         # ast_cache = cache_manager.get_cache("ast_cache")
@@ -470,9 +473,8 @@ def _identify_structural_dependencies(
 
         if not tree:
             logger.error(
-                f"ImportMap: AST tree not found in 'ast_cache' for {norm_source_path}. Cannot build import map accurately. This may indicate a parsing failure during the analysis phase or a cache miss/eviction."
+                f"ImportMap: AST tree not found for {norm_source_path}. Cannot build import map accurately. This may indicate a parsing failure during the analysis phase or a cache miss/eviction."
             )
-            _structural_import_map_cache[norm_source_path] = local_import_map
             return local_import_map  # Return empty map if AST is not available
 
         try:
@@ -555,19 +557,15 @@ def _identify_structural_dependencies(
                             name_in_scope = alias.asname or alias.name
 
                             # Verify if item_name_actually_imported exists in resolved_module_file_path's symbols
-                            is_defined_in_module_symbols = (
-                                any(
-                                    f.get("name") == item_name_actually_imported
-                                    for f in module_symbols.get("functions", [])
-                                )
-                                or any(
-                                    c.get("name") == item_name_actually_imported
-                                    for c in module_symbols.get("classes", [])
-                                )
-                                or any(
-                                    g.get("name") == item_name_actually_imported
-                                    for g in module_symbols.get("globals_defined", [])
-                                )
+                            is_defined_in_module_symbols = any(
+                                s_item.get("name") == item_name_actually_imported
+                                for s_list_key in [
+                                    "functions",
+                                    "classes",
+                                    "globals_defined",
+                                    "exports",
+                                ]
+                                for s_item in module_symbols.get(s_list_key, [])
                             )
 
                             is_submodule_or_package = False
@@ -626,21 +624,21 @@ def _identify_structural_dependencies(
                 exc_info=False,
             )
 
-        _structural_import_map_cache[norm_source_path] = local_import_map
         return local_import_map
 
     source_ast_tree = source_analysis.get("_ast_tree")
     current_file_import_map = _build_import_map(source_path, source_ast_tree)
 
+    def _resolve_name_key(name_to_resolve: Optional[str] = None) -> str:
+        return f"{source_path}:{name_to_resolve}"
+
+    @cached(
+        "structural_resolved_path",
+        key_func=_resolve_name_key,
+    )
     def _resolve_name_to_path(name_to_resolve: Optional[str]) -> Optional[str]:
         if not name_to_resolve:
             return None
-
-        # Use a cache specific to this run of _identify_structural_dependencies for this source_path
-        # The cache key should remain the same as it's for the (source_path, name_to_resolve) pair.
-        cache_key_res = (source_path, name_to_resolve)
-        if cache_key_res in _structural_resolved_path_cache:
-            return _structural_resolved_path_cache[cache_key_res]
 
         parts = name_to_resolve.split(".")
         resolved_module_path_val: Optional[str] = None
@@ -667,15 +665,14 @@ def _identify_structural_dependencies(
                         f"_resolve_name_to_path: Prefix '{current_prefix_to_check}' mapped to '{path_from_import_map}', but path not in path_to_key_info. Import map might be stale or contain unresolved external refs."
                     )
 
-        if not resolved_module_path_val:
-            # If no prefix was found in the import map, it means the name_to_resolve
-            # was not from an import statement (e.g., it's a local variable, global in current file, or built-in).
-            # In this context, for finding *external module dependencies*, we return None.
-            logger.debug(
-                f"_resolve_name_to_path: Name '{name_to_resolve}' or its prefixes not found in import map for '{source_path}'. Assumed local or built-in."
-            )
+        # if not resolved_module_path_val:
+        # If no prefix was found in the import map, it means the name_to_resolve
+        # was not from an import statement (e.g., it's a local variable, global in current file, or built-in).
+        # In this context, for finding *external module dependencies*, we return None.
+        # logger.debug(
+        #     f"_resolve_name_to_path: Name '{name_to_resolve}' or its prefixes not found in import map for '{source_path}'. Assumed local or built-in."
+        # )
 
-        _structural_resolved_path_cache[cache_key_res] = resolved_module_path_val
         return resolved_module_path_val
 
     # --- MODIFIED: Process Calls and Attributes with symbol verification ---
@@ -719,7 +716,12 @@ def _identify_structural_dependencies(
                 module_symbols = project_symbol_map.get(target_path_val, {})
                 is_verified = any(
                     s_item.get("name") == actual_item_name_to_check
-                    for s_list_key in ["functions", "classes", "globals_defined"]
+                    for s_list_key in [
+                        "functions",
+                        "classes",
+                        "globals_defined",
+                        "exports",
+                    ]
                     for s_item in module_symbols.get(s_list_key, [])
                 )
 
@@ -778,7 +780,7 @@ def _identify_structural_dependencies(
             # Check if the attribute_name_accessed is a global/function/class directly in the module
             is_verified = any(
                 s_item.get("name") == attribute_name_accessed
-                for s_list_key in ["functions", "classes", "globals_defined"]
+                for s_list_key in ["functions", "classes", "globals_defined", "exports"]
                 for s_item in module_symbols.get(s_list_key, [])
             )
 
@@ -1483,7 +1485,6 @@ def suggest_svelte_dependencies(
     if analysis is None or "error" in analysis or "skipped" in analysis:
         return []
 
-
     explicit_deps: List[Tuple[str, str]] = []
     source_dir = os.path.dirname(norm_file_path)
 
@@ -1560,7 +1561,7 @@ def suggest_sql_dependencies(
     norm_file_path = normalize_path(file_path)
     structural_suggestions: List[Tuple[str, str]] = []
 
-    logger.debug(f"[SQL_DEBUG] suggest_sql_dependencies START: {norm_file_path}")
+    # logger.debug(f"[SQL_DEBUG] suggest_sql_dependencies START: {norm_file_path}")
 
     # Get the analysis for THIS specific file from the global results map
     analysis = file_analysis_results.get(norm_file_path)
@@ -1580,9 +1581,9 @@ def suggest_sql_dependencies(
         t.lower() for t in analysis.get("tables_referenced", [])
     }
 
-    logger.debug(
-        f"[SQL_DEBUG] {norm_file_path} - defined: {len(tables_defined)}, referenced: {len(tables_referenced)}"
-    )
+    # logger.debug(
+    #     f"[SQL_DEBUG] {norm_file_path} - defined: {len(tables_defined)}, referenced: {len(tables_referenced)}"
+    # )
 
     if project_symbol_map:
         # Build table map on-demand (no global caching)
@@ -1590,7 +1591,7 @@ def suggest_sql_dependencies(
         logger.debug(f"[SQL_DEBUG] Table map built. Size: {len(table_map)}")
 
         # Resolve forward dependencies: current file depends on files defining tables it references
-        logger.debug(f"[SQL_DEBUG] Resolving forward dependencies for {norm_file_path}")
+        # logger.debug(f"[SQL_DEBUG] Resolving forward dependencies for {norm_file_path}")
         for table in tables_referenced:
             # Skip self-references
             if table in tables_defined:
@@ -1599,12 +1600,12 @@ def suggest_sql_dependencies(
                 target_path = table_map[table]
                 if target_path != norm_file_path:
                     structural_suggestions.append((target_path, "<"))
-                    logger.debug(
-                        f"[SQL_DEBUG] Found dependencies < {target_path} (table: {table})"
-                    )
+                    # logger.debug(
+                    #     f"[SQL_DEBUG] Found dependencies < {target_path} (table: {table})"
+                    # )
 
         # Resolve inverse dependencies: files that reference our tables depend on us
-        logger.debug(f"[SQL_DEBUG] Resolving inverse dependencies for {norm_file_path}")
+        # logger.debug(f"[SQL_DEBUG] Resolving inverse dependencies for {norm_file_path}")
         if tables_defined:
             count = 0
             for other_path, symbols in project_symbol_map.items():
@@ -1624,7 +1625,7 @@ def suggest_sql_dependencies(
                 if any(m in tables_defined for m in o_referenced):
                     structural_suggestions.append((other_path, ">"))
                     count += 1
-            logger.debug(f"[SQL_DEBUG] Found {count} inverse dependencies >")
+            # logger.debug(f"[SQL_DEBUG] Found {count} inverse dependencies >")
 
     # Semantic fallback skipped for SQL (O(N^2) issue)
     semantic_suggestions_paths: List[Tuple[str, str]] = []
@@ -1634,9 +1635,9 @@ def suggest_sql_dependencies(
         structural_suggestions + semantic_suggestions_paths, norm_file_path
     )
 
-    logger.debug(
-        f"[SQL_DEBUG] suggest_sql_dependencies END: {norm_file_path} - total: {len(all_suggestions)}"
-    )
+    # logger.debug(
+    #     f"[SQL_DEBUG] suggest_sql_dependencies END: {norm_file_path} - total: {len(all_suggestions)}"
+    # )
     return all_suggestions
 
 
@@ -1855,8 +1856,8 @@ def suggest_semantic_dependencies_path_based(
 
         # Only collect candidates that meet minimum threshold for potential reranking
         if (
-            confidence >= threshold * 0.5
-        ):  # Use half threshold to catch potential candidates
+            confidence >= threshold * 0.35
+        ):  # Use ~third of threshold to catch potential candidates
             candidates_with_similarity.append((target_ki, confidence))
 
     # This variable will hold the results from either reranking or the fallback logic
@@ -1877,6 +1878,67 @@ def suggest_semantic_dependencies_path_based(
             # Filter candidates before reranking based on dependency character assignments
             # This filtering only applies during reranking to optimize performance
             filtered_candidates: List[Tuple[KeyInfo, float]] = []
+
+            # Extract tracker dependencies to augment existing_relation checks
+            tracker_map: Dict[str, str] = {}
+            try:
+                from cline_utils.dependency_system.core.dependency_grid import (
+                    get_dependencies_from_grid,
+                )
+                from cline_utils.dependency_system.utils.tracker_utils import (
+                    find_all_tracker_paths,
+                    read_tracker_file_structured,
+                )
+
+                tracker_paths = find_all_tracker_paths(config, project_root)
+                key_str_to_ki = {ki.key_string: ki for ki in path_to_key_info.values()}
+
+                for t_path in tracker_paths:
+                    t_data = read_tracker_file_structured(t_path)
+                    grid_rows = t_data.get("grid_rows_ordered", [])
+                    grid_headers = t_data.get("grid_headers_ordered", [])
+
+                    source_key_str = source_key_info.key_string
+                    if not any(r_label == source_key_str for r_label, _ in grid_rows):
+                        continue
+
+                    grid_dict = {r_label: r_data for r_label, r_data in grid_rows}
+                    tracker_ki_list = [
+                        key_str_to_ki.get(hdr)
+                        or KeyInfo(
+                            key_string=hdr,
+                            norm_path="",
+                            parent_path=None,
+                            tier=0,
+                            is_directory=False,
+                        )
+                        for hdr in grid_headers
+                    ]
+
+                    deps = get_dependencies_from_grid(
+                        grid_dict, source_key_str, tracker_ki_list
+                    )
+                    for char, targets in deps.items():
+                        if char in ["<", ">", "x", "d", "S", "s"]:
+                            for tgt_key_str in targets:
+                                if tgt_key_str in key_str_to_ki:
+                                    tgt_norm = key_str_to_ki[tgt_key_str].norm_path
+                                    if tgt_norm not in tracker_map or char in [
+                                        "<",
+                                        ">",
+                                        "x",
+                                        "d",
+                                    ]:
+                                        tracker_map[tgt_norm] = char
+
+                for tgt_norm, char in tracker_map.items():
+                    if not ast_map.get(tgt_norm):
+                        ast_map[tgt_norm] = char
+            except Exception as e:
+                logger.warning(
+                    f"Error extracting tracker dependencies for reranking skip: {e}"
+                )
+
             for target_ki, confidence in candidates_with_similarity:
                 # Check if already verified with high-level dependency
                 target_norm = target_ki.norm_path
@@ -1908,9 +1970,9 @@ def suggest_semantic_dependencies_path_based(
                     filtered_candidates.append((target_ki, confidence))
 
             candidates_with_similarity = filtered_candidates
-            logger.debug(
-                f"Pre-reranking filter: {len(candidates_with_similarity)} candidates remaining from original collection"
-            )
+            # logger.debug(
+            #     f"Pre-reranking filter: {len(candidates_with_similarity)} candidates remaining from original collection"
+            # )
 
             # Use shared counter if available (preferred for parallel execution)
             if shared_scan_counter is not None:
@@ -1949,49 +2011,49 @@ def suggest_semantic_dependencies_path_based(
                 )
                 top_candidates = []
             else:
-                # Prepare for reranking - get top candidates
+                # All candidates (including doc-code) share the same budget
                 top_candidates = sorted(
                     candidates_with_similarity, key=lambda x: x[1], reverse=True
                 )[:remaining_slots]
 
-                if len(top_candidates) > 1:
-                    # Update shared counter immediately
-                    if shared_scan_counter is not None:
-                        with shared_scan_counter.get_lock():
-                            shared_scan_counter.value += 1
+            if len(top_candidates) > 1:
+                # Update shared counter immediately
+                if shared_scan_counter is not None:
+                    with shared_scan_counter.get_lock():
+                        shared_scan_counter.value += 1
 
-                    # Log to file
-                    try:
-                        scans_file = os.path.join(
-                            project_root,
-                            "cline_utils",
-                            "dependency_system",
-                            "analysis",
-                            "reranker_scans.jsonl",
-                        )
-                        os.makedirs(os.path.dirname(scans_file), exist_ok=True)
-                        with open(scans_file, "a", encoding="utf-8") as f:
-                            for cand_ki, cand_conf in top_candidates:
-                                # Defensive: skip entries with missing source or target
-                                src_path = getattr(source_key_info, "norm_path", None)
-                                tgt_path = getattr(cand_ki, "norm_path", None)
-                                if not src_path or not tgt_path:
-                                    logger.warning(
-                                        f"Skipping scan log entry: missing "
-                                        f"source={src_path!r} or target={tgt_path!r}"
-                                    )
-                                    continue
-                                json.dump(
-                                    {
-                                        "source": src_path,
-                                        "target": tgt_path,
-                                        "confidence": float(cand_conf),
-                                    },
-                                    f,
+                # Log to file
+                try:
+                    scans_file = os.path.join(
+                        project_root,
+                        "cline_utils",
+                        "dependency_system",
+                        "analysis",
+                        "reranker_scans.jsonl",
+                    )
+                    os.makedirs(os.path.dirname(scans_file), exist_ok=True)
+                    with open(scans_file, "a", encoding="utf-8") as f:
+                        for cand_ki, cand_conf in top_candidates:
+                            # Defensive: skip entries with missing source or target
+                            src_path = getattr(source_key_info, "norm_path", None)
+                            tgt_path = getattr(cand_ki, "norm_path", None)
+                            if not src_path or not tgt_path:
+                                logger.warning(
+                                    f"Skipping scan log entry: missing "
+                                    f"source={src_path!r} or target={tgt_path!r}"
                                 )
-                                f.write("\n")
-                    except Exception as e:
-                        logger.warning(f"Failed to log reranker scans: {e}")
+                                continue
+                            json.dump(
+                                {
+                                    "source": src_path,
+                                    "target": tgt_path,
+                                    "confidence": float(cand_conf),
+                                },
+                                f,
+                            )
+                            f.write("\n")
+                except Exception as e:
+                    logger.warning(f"Failed to log reranker scans: {e}")
 
             if len(top_candidates) > 1:
 
