@@ -129,8 +129,8 @@ class LocalLLMProcessor:
     *   **Logic & Purpose**: Does the *row file* provide the business logic, requirements, or purpose that the *column file* implements? (Leads to 'd' or '<').
     *   **Technical Reliance**: Does the code in the *row file* directly **import, call, or inherit from** code in the *column file*? (Leads to '<' or 'x').
     *   **Knowledge Requirement**: Does a developer/LLM need to read the *column file* to safely or correctly modify the *row file*? (Leads to '<' or 'd').
-    *   **Implementation Link**: Is the *row file* **essential documentation** for understanding or implementing the concepts/code in the *column file*? (Leads to 'd' or potentially '>').
-    *   **Architectural Fit**: Are these files part of the same specific feature or architectural pattern where changing one without the other would cause conceptual drift or technical debt? (Leads to 'x' or 'd').
+    *   **Implementation Link**: Is the *row file* **essential documentation** for understanding or implementing the concepts/code in the *column file*? (Leads to 'd' or '>').
+    *   **Architectural Fit**: Are these files part of the same specific feature or architectural pattern where changing one without the other would cause conceptual drift or technical debt? (Leads to 'x', '<', '>', or 'd').
 *   **Purpose of Dependencies**: Remember, these verified dependencies guide the **Strategy phase** (determining task order) and the **Execution phase** (loading minimal necessary context). A dependency should mean "This file is part of the necessary context required to work effectively on the other."
 *   **Assign 'n' ONLY for Unrelated Content**: If the relationship is purely coincidental, uses similar common terms in a different context, or is an unrelated legacy file, assign 'n' (verified no dependency). **If there is any doubt regarding conceptual relevance, err on the side of 'd' (Documentation/Conceptual link) rather than 'n'.**
 
@@ -154,7 +154,7 @@ class LocalLLMProcessor:
 Important Notes
 - Focus on Relational Necessity: Does one file provide the context or blueprint for the other?
 - Err on the side of 'd' if the files share a logical flow or implementation goal.
-- 'x', '<', and '>' are directional. If a clear directional dependency exists their use should be prioritized over 'd'.
+- 'x', '<', and '>' are directional and apply to *all* files, not just code. If a clear directional dependency exists their use should be prioritized over 'd'.
 - DO NOT add decorators (**) or other characters (``) to the dependency character.
 
 Expected Output
