@@ -23,6 +23,19 @@ class LocalLLMProcessor:
         self.max_n_ctx = 32768
         self.current_n_ctx = n_ctx
         self._model: Optional[Any] = None
+        self._pinned_state: Optional[Any] = None
+
+    def save_pinned_state(self):
+        """Saves the current KV cache state (e.g., after processing a system prompt)."""
+        if self._model and hasattr(self._model, "save_state"):
+            self._pinned_state = self._model.save_state()
+            logger.debug("KV cache state pinned successfully.")
+
+    def restore_pinned_state(self):
+        """Restores the previously pinned KV cache state."""
+        if self._model and self._pinned_state and hasattr(self._model, "load_state"):
+            self._model.load_state(self._pinned_state)
+            logger.debug("Pinned KV cache state restored.")
 
     def _load_model(self, required_ctx: int):
         # Context sizing strategy: dynamic "orbiting" allocation
@@ -141,6 +154,7 @@ class LocalLLMProcessor:
 Important Notes
 - Focus on Relational Necessity: Does one file provide the context or blueprint for the other?
 - Err on the side of 'd' if the files share a logical flow or implementation goal.
+- 'x', '<', and '>' are directional. If a clear directional dependency exists their use should be prioritized over 'd'.
 - DO NOT add decorators (**) or other characters (``) to the dependency character.
 
 Expected Output
@@ -148,9 +162,9 @@ A clear summary of dependency determination for the source and target files with
             """
 
         # Base overhead for prompt structure
-        # Hardcoded based on measurement of the static template (793) + response margin
-        wrapper_tokens = 793
-        response_margin = 500
+        # Hardcoded based on measurement of the static template (810) + response margin
+        wrapper_tokens = 810
+        response_margin = 520
 
         # Initial estimate to decide n_ctx
         # If tokens provided, use them, otherwise use char count / 4

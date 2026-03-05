@@ -685,7 +685,9 @@ def generate_symbol_essence_string(
     # Small-file full-content mode is intentionally limited to documentation-like files.
     # Structured/code files (especially SQL/JSON/Svelte) must stay distilled.
     file_type = str(symbol_data.get("file_type", "")).lower()
-    is_doc_like = file_type == "md" or file_path.lower().endswith((".md", ".txt", ".rst"))
+    is_doc_like = file_type == "md" or file_path.lower().endswith(
+        (".md", ".txt", ".rst")
+    )
     if full_tokens and full_tokens < 8192 and content and is_doc_like:
         current_len = len("\n".join(parts))
         max_content_chars = max(0, max_chars - current_len - len("CONTENT:\n"))
@@ -717,7 +719,9 @@ def generate_symbol_essence_string(
         class_count = len(cast(List[Any], symbol_data.get("classes", [])))
         function_count = len(cast(List[Any], symbol_data.get("functions", [])))
         call_count = len(cast(List[Any], symbol_data.get("calls", [])))
-        attr_access_count = len(cast(List[Any], symbol_data.get("attribute_accesses", [])))
+        attr_access_count = len(
+            cast(List[Any], symbol_data.get("attribute_accesses", []))
+        )
         type_ref_count = len(cast(List[Any], symbol_data.get("type_references", [])))
         parts.append(
             "PY_RUNTIME_PROFILE: "
@@ -738,7 +742,7 @@ def generate_symbol_essence_string(
                 f"{k} x{v}" if v > 1 else k
                 for k, v in sorted(
                     top_decorators.items(), key=lambda kv: (-kv[1], kv[0])
-                )[:20]
+                )[:100]
             )
             parts.append(f"PY_TOP_DECORATORS: {decorator_summary}")
 
@@ -754,7 +758,7 @@ def generate_symbol_essence_string(
                 f"{k} x{v}" if v > 1 else k
                 for k, v in sorted(
                     top_exceptions.items(), key=lambda kv: (-kv[1], kv[0])
-                )[:20]
+                )[:100]
             )
             parts.append(f"PY_TOP_EXCEPTIONS: {exception_summary}")
 
@@ -770,7 +774,7 @@ def generate_symbol_essence_string(
                 f"{k} x{v}" if v > 1 else k
                 for k, v in sorted(
                     top_type_refs.items(), key=lambda kv: (-kv[1], kv[0])
-                )[:25]
+                )[:100]
             )
             parts.append(f"PY_TOP_TYPES: {type_ref_summary}")
 
@@ -782,8 +786,8 @@ def generate_symbol_essence_string(
                 continue
             c_name = cast(str, c.get("name", "unknown"))
             c_doc = (c.get("docstring") or "").strip()
-            if len(c_doc) > 280:
-                c_doc = c_doc[:280] + "..."
+            if len(c_doc) > 500:
+                c_doc = c_doc[:500] + "..."
             parts.append(f"CLASS: {c_name}")
 
             # Add inheritance info (runtime)
@@ -810,11 +814,13 @@ def generate_symbol_essence_string(
                         if m_name:
                             method_names.append(m_name)
                 if method_names:
-                    shown_names = method_names[:60]
-                    suffix = ", ..." if len(method_names) > 60 else ""
+                    shown_names = method_names[:500]
+                    suffix = ", ..." if len(method_names) > 500 else ""
                     parts.append(f"  METHODS: {', '.join(shown_names)}{suffix}")
 
-                max_method_details = 18 if (full_tokens and full_tokens > 20000) else 60
+                max_method_details = (
+                    100 if (full_tokens and full_tokens > 20000) else 500
+                )
                 for m in cast(List[Any], methods)[:max_method_details]:
                     if not isinstance(m, dict):
                         continue
@@ -831,8 +837,8 @@ def generate_symbol_essence_string(
                         parts.append(f"  METHOD: {m_name}({m_param_str})")
 
                     m_doc = (m.get("docstring") or "").strip()
-                    if len(m_doc) > 180:
-                        m_doc = m_doc[:180] + "..."
+                    if len(m_doc) > 500:
+                        m_doc = m_doc[:500] + "..."
                     if m_doc:
                         parts.append(f"    DOC: {m_doc}")
 
@@ -880,9 +886,7 @@ def generate_symbol_essence_string(
                                 "set",
                                 "tuple",
                             ]
-                        ][
-                            :10
-                        ]  # Limit to top 10
+                        ][:100]
                         if significant_globals:
                             parts.append(
                                 f"    GLOBALS: {', '.join(significant_globals)}"
@@ -895,7 +899,9 @@ def generate_symbol_essence_string(
                     # Closure dependencies (runtime)
                     closure_deps = m.get("closure_dependencies", [])
                     if closure_deps:
-                         parts.append(f"    CLOSURE_DEPENDENCIES: {', '.join(closure_deps)}")
+                        parts.append(
+                            f"    CLOSURE_DEPENDENCIES: {', '.join(closure_deps)}"
+                        )
 
                     # Add attribute accesses (runtime) - shows duck-typing contracts
                     attr_accesses = m.get("attribute_accesses", [])
@@ -916,7 +922,7 @@ def generate_symbol_essence_string(
     functions = symbol_data.get("functions", [])
     if functions:
         parts.append("FUNCTIONS:")
-        for f in cast(List[Any], functions)[:180]:
+        for f in cast(List[Any], functions)[:1000]:
             if not isinstance(f, dict):
                 continue
             name = f["name"]
@@ -932,8 +938,8 @@ def generate_symbol_essence_string(
                 parts.append(f"  {name}({param_str})")
 
             doc = (f.get("docstring") or "").strip()
-            if len(doc) > 280:
-                doc = doc[:280] + "..."
+            if len(doc) > 500:
+                doc = doc[:500] + "..."
             if doc:
                 parts.append(f"    DOC: {doc}")
 
@@ -986,7 +992,7 @@ def generate_symbol_essence_string(
             closure_deps = f.get("closure_dependencies", [])
             if closure_deps:
                 parts.append(f"    CLOSURE_DEPENDENCIES: {', '.join(closure_deps)}")
-        if len(cast(List[Any], functions)) > 180:
+        if len(cast(List[Any], functions)) > 1000:
             parts.append("  ... (functions truncated)")
 
     # 4. Outgoing Calls (from AST/runtime)
@@ -1012,7 +1018,7 @@ def generate_symbol_essence_string(
             parts.append("CALLS:")
             for call_key, count in sorted(
                 call_counts.items(), key=lambda kv: (-kv[1], kv[0])
-            )[:80]:
+            )[:350]:
                 if count > 1:
                     parts.append(f"  {call_key} x{count}")
                 else:
@@ -1067,7 +1073,7 @@ def generate_symbol_essence_string(
             if line not in seen_exports:
                 seen_exports.add(line)
                 parts.append(f"  {line}")
-            if len(seen_exports) >= 80:
+            if len(seen_exports) >= 400:
                 break
 
     # Significant literal assignments (useful for constants/config wiring)
@@ -1082,13 +1088,13 @@ def generate_symbol_essence_string(
             a_val = cast(str, a.get("value", "")).replace("\n", " ").strip()
             if not a_val:
                 continue
-            if len(a_val) > 240:
-                a_val = a_val[:240] + "..."
+            if len(a_val) > 500:
+                a_val = a_val[:500] + "..."
             line = f"{a_name} = {a_val}"
             if line not in seen_assigns:
                 seen_assigns.add(line)
                 parts.append(f"  {line}")
-            if len(seen_assigns) >= 80:
+            if len(seen_assigns) >= 250:
                 break
 
     # Python runtime-heavy fields (already collected in symbol_map)
@@ -1103,7 +1109,7 @@ def generate_symbol_essence_string(
                 if g_name:
                     g_names.append(g_name)
             if g_names:
-                parts.append(f"GLOBALS_DEFINED: {', '.join(sorted(set(g_names))[:60])}")
+                parts.append(f"GLOBALS_DEFINED: {', '.join(sorted(set(g_names)))}")
 
         decorators_used = symbol_data.get("decorators_used", [])
         if decorators_used:
@@ -1115,7 +1121,7 @@ def generate_symbol_essence_string(
                 if d_name:
                     d_names.append(d_name)
             if d_names:
-                parts.append(f"DECORATORS_USED: {', '.join(sorted(set(d_names))[:60])}")
+                parts.append(f"DECORATORS_USED: {', '.join(sorted(set(d_names)))}")
 
         exceptions_handled = symbol_data.get("exceptions_handled", [])
         if exceptions_handled:
@@ -1127,9 +1133,7 @@ def generate_symbol_essence_string(
                 if ex_name:
                     ex_names.append(ex_name)
             if ex_names:
-                parts.append(
-                    f"EXCEPTIONS_HANDLED: {', '.join(sorted(set(ex_names))[:60])}"
-                )
+                parts.append(f"EXCEPTIONS_HANDLED: {', '.join(sorted(set(ex_names)))}")
 
         with_contexts_used = symbol_data.get("with_contexts_used", [])
         if with_contexts_used:
@@ -1139,11 +1143,11 @@ def generate_symbol_essence_string(
                     continue
                 context_expr = cast(str, w.get("context_expr_str", "")).strip()
                 if context_expr:
-                    if len(context_expr) > 120:
-                        context_expr = context_expr[:120] + "..."
+                    if len(context_expr) > 500:
+                        context_expr = context_expr[:500] + "..."
                     with_entries.append(context_expr)
             if with_entries:
-                parts.append(f"WITH_CONTEXTS: {', '.join(sorted(set(with_entries))[:40])}")
+                parts.append(f"WITH_CONTEXTS: {', '.join(sorted(set(with_entries)))}")
 
         inheritance = symbol_data.get("inheritance", [])
         if inheritance:
@@ -1157,7 +1161,7 @@ def generate_symbol_essence_string(
                     pairs.add(f"{cls} -> {base}")
             if pairs:
                 parts.append("INHERITANCE:")
-                for pair in sorted(pairs)[:60]:
+                for pair in sorted(pairs)[:500]:
                     parts.append(f"  {pair}")
 
         type_references = symbol_data.get("type_references", [])
@@ -1174,7 +1178,7 @@ def generate_symbol_essence_string(
                 parts.append("TYPE_REFERENCES:")
                 for t_name, count in sorted(
                     type_counts.items(), key=lambda kv: (-kv[1], kv[0])
-                )[:80]:
+                )[:500]:
                     if count > 1:
                         parts.append(f"  {t_name} x{count}")
                     else:
@@ -1199,7 +1203,7 @@ def generate_symbol_essence_string(
                 parts.append("ATTRIBUTE_ACCESS_PATTERNS:")
                 for access_key, count in sorted(
                     access_counts.items(), key=lambda kv: (-kv[1], kv[0])
-                )[:100]:
+                )[:350]:
                     if count > 1:
                         parts.append(f"  {access_key} x{count}")
                     else:
@@ -1237,7 +1241,9 @@ def generate_symbol_essence_string(
         link_urls: List[str] = []
         seen_link_urls: Set[str] = set()
         for lnk in cast(List[Dict[str, Any]], links):
-            u = cast(Optional[str], lnk.get("url") or lnk.get("href") or lnk.get("path"))
+            u = cast(
+                Optional[str], lnk.get("url") or lnk.get("href") or lnk.get("path")
+            )
             if u:
                 # Clean up URL to just filename for essence
                 if u.startswith("file:///"):
@@ -1436,7 +1442,7 @@ def generate_symbol_essence_string(
     js_comments = symbol_data.get("comments", [])
     if js_comments:
         parts.append("COMMENTS / JSDOC:")
-        for c in cast(List[str], js_comments)[:120]:
+        for c in cast(List[str], js_comments)[:500]:
             parts.append(f"  // {c}")
 
     js_literals = symbol_data.get("literals", [])
@@ -1459,10 +1465,10 @@ def generate_symbol_essence_string(
                     ".sql",
                 ]
             )
-            or len(l) > 10
+            or len(l) > 500
         ]
-        for l in significant_literals[:120]:
-            parts.append(f"  \"{l}\"")
+        for l in significant_literals[:500]:
+            parts.append(f'  "{l}"')
 
     # JS/TS Body Essence (from enhanced analyzer)
     for f in cast(List[Any], symbol_data.get("functions", [])):
@@ -1483,7 +1489,7 @@ def generate_symbol_essence_string(
         def _track_sql_operation(table_name: str, op_name: str) -> None:
             if not table_name:
                 return
-            normalized_table = table_name.strip().strip("\"").lower()
+            normalized_table = table_name.strip().strip('"').lower()
             if not normalized_table:
                 return
             if normalized_table not in sql_table_ops:
@@ -1506,8 +1512,8 @@ def generate_symbol_essence_string(
                     .upper()
                 )
                 summary = cast(str, defn.get("summary", "")).strip()
-                if len(summary) > 280:
-                    summary = summary[:280] + "..."
+                if len(summary) > 2500:
+                    summary = summary[:2500] + "..."
 
                 # Deduplicate based on type + summary
                 summary_key = (type_name, summary)
@@ -1515,7 +1521,7 @@ def generate_symbol_essence_string(
                     seen_defs.add(summary_key)
                     parts.append(f"  [{type_name}] {summary}")
                     added_defs += 1
-                    if added_defs >= 180:
+                    if added_defs >= 3000:
                         parts.append("  ... (truncated)")
                         break
 
@@ -1546,37 +1552,37 @@ def generate_symbol_essence_string(
                 if key not in seen_inserts:
                     seen_inserts.add(key)
                     unique_inserts.append(i)
-            
-            for i in unique_inserts[:120]:
+
+            for i in unique_inserts[:500]:
                 table = i.get("table", "unknown")
                 cols = i.get("columns", {})
                 cols_str = ", ".join([f"{k}={v}" for k, v in list(cols.items())])
                 parts.append(f"  INSERT INTO {table} ({cols_str})")
                 _track_sql_operation(cast(str, table), "insert")
-            if len(unique_inserts) > 120:
+            if len(unique_inserts) > 500:
                 parts.append("  ... (truncated)")
 
         columns = symbol_data.get("columns", [])
         if columns:
             parts.append("COLUMNS:")
-            for col in cast(List[Any], columns)[:220]:
+            for col in cast(List[Any], columns)[:500]:
                 if not isinstance(col, dict):
                     continue
                 parts.append(f"  {col.get('name')} ({col.get('type')})")
-            if len(cast(List[Dict[str, Any]], columns)) > 220:
+            if len(cast(List[Dict[str, Any]], columns)) > 500:
                 parts.append("  ... (truncated)")
 
         relationships = symbol_data.get("relationships", [])
         if relationships:
             parts.append("RELATIONSHIPS:")
-            for rel in cast(List[Any], relationships)[:180]:
+            for rel in cast(List[Any], relationships)[:1000]:
                 if not isinstance(rel, dict):
                     continue
                 parts.append(
                     f"  {rel.get('source_col')} -> {rel.get('target_table')}({rel.get('target_col')})"
                 )
                 _track_sql_operation(cast(str, rel.get("target_table", "")), "fk_ref")
-            if len(cast(List[Dict[str, Any]], relationships)) > 180:
+            if len(cast(List[Dict[str, Any]], relationships)) > 1000:
                 parts.append("  ... (truncated)")
 
         # SQL-specific: Tables defined and referenced (from AST analysis)
@@ -1604,11 +1610,11 @@ def generate_symbol_essence_string(
             copy_matches = list(copy_stmt_pattern.finditer(content))
             if copy_matches:
                 parts.append("COPY_BLOCKS:")
-                for copy_match in copy_matches[:120]:
+                for copy_match in copy_matches[:500]:
                     table_name = copy_match.group(1).strip()
                     raw_columns = copy_match.group(2).strip()
                     column_names = [
-                        c.strip().strip("\"")
+                        c.strip().strip('"')
                         for c in raw_columns.split(",")
                         if c.strip()
                     ]
@@ -1619,12 +1625,10 @@ def generate_symbol_essence_string(
                     data_rows = [ln for ln in data_block.splitlines() if ln.strip()]
                     row_count = len(data_rows)
                     sample_row = data_rows[0] if data_rows else ""
-                    if len(sample_row) > 200:
-                        sample_row = sample_row[:200] + "..."
+                    if len(sample_row) > 1000:
+                        sample_row = sample_row[:1000] + "..."
 
-                    column_preview = ", ".join(column_names[:12])
-                    if len(column_names) > 12:
-                        column_preview = column_preview + ", ..."
+                    column_preview = ", ".join(column_names)
 
                     parts.append(
                         f"  {table_name} cols={len(column_names)} rows~{row_count} [{column_preview}]"
@@ -1633,16 +1637,16 @@ def generate_symbol_essence_string(
                         parts.append(f"    sample: {sample_row}")
                     _track_sql_operation(table_name, "copy")
 
-                if len(copy_matches) > 120:
+                if len(copy_matches) > 500:
                     parts.append("  ... (truncated)")
 
         if file_type == "sql" and sql_table_ops:
             parts.append("TABLE_OPERATIONS:")
             sorted_tables = sorted(sql_table_ops.keys())
-            for table_name in sorted_tables[:220]:
+            for table_name in sorted_tables[:500]:
                 ops = ", ".join(sorted(sql_table_ops[table_name]))
                 parts.append(f"  {table_name}: {ops}")
-            if len(sorted_tables) > 220:
+            if len(sorted_tables) > 500:
                 parts.append("  ... (truncated)")
 
         # JSON-specific structured context
@@ -1673,7 +1677,9 @@ def generate_symbol_essence_string(
     if is_doc:
         headers = symbol_data.get("headers", [])
         code_blocks = symbol_data.get("code_blocks", [])
-        doc_link_count = len(cast(List[Dict[str, Any]], links)) if isinstance(links, list) else 0
+        doc_link_count = (
+            len(cast(List[Dict[str, Any]], links)) if isinstance(links, list) else 0
+        )
         doc_image_count = (
             len(cast(List[Dict[str, Any]], images)) if isinstance(images, list) else 0
         )
@@ -1687,7 +1693,7 @@ def generate_symbol_essence_string(
         if headers:
             parts.append("HEADERS:")
             seen_headers: Set[str] = set()
-            for h in cast(List[Dict[str, Any]], headers)[:220]:
+            for h in cast(List[Dict[str, Any]], headers)[:500]:
                 raw_level = h.get("level", 1)
                 level = raw_level if isinstance(raw_level, int) else 1
                 indent = "  " * max(0, min(level - 1, 5))
@@ -1698,7 +1704,7 @@ def generate_symbol_essence_string(
                 if header_line not in seen_headers:
                     seen_headers.add(header_line)
                     parts.append(header_line)
-            if len(cast(List[Dict[str, Any]], headers)) > 220:
+            if len(cast(List[Dict[str, Any]], headers)) > 500:
                 parts.append("  ... (truncated)")
 
         if code_blocks:
@@ -1713,7 +1719,7 @@ def generate_symbol_essence_string(
                     f"{lang}:{count}"
                     for lang, count in sorted(
                         lang_counts.items(), key=lambda kv: (-kv[1], kv[0])
-                    )[:20]
+                    )[:30]
                 )
                 parts.append(f"CODE_LANGS: {lang_summary}")
 
@@ -1727,41 +1733,51 @@ def generate_symbol_essence_string(
                 if not cb_content:
                     continue
 
-                candidate_lines = [ln.strip() for ln in cb_content.splitlines() if ln.strip()]
+                candidate_lines = [
+                    ln.strip() for ln in cb_content.splitlines() if ln.strip()
+                ]
                 signature_line = ""
-                for line in candidate_lines[:20]:
+                for line in candidate_lines:
                     lowered = line.lower()
-                    if (
-                        line.startswith(("def ", "class ", "CREATE ", "INSERT ", "UPDATE ", "SELECT ", "DELETE ", "COPY "))
-                        or lowered.startswith(
-                            (
-                                "def ",
-                                "class ",
-                                "create ",
-                                "insert ",
-                                "update ",
-                                "select ",
-                                "delete ",
-                                "copy ",
-                                "function ",
-                                "const ",
-                                "let ",
-                                "var ",
-                            )
+                    if line.startswith(
+                        (
+                            "def ",
+                            "class ",
+                            "CREATE ",
+                            "INSERT ",
+                            "UPDATE ",
+                            "SELECT ",
+                            "DELETE ",
+                            "COPY ",
+                        )
+                    ) or lowered.startswith(
+                        (
+                            "def ",
+                            "class ",
+                            "create ",
+                            "insert ",
+                            "update ",
+                            "select ",
+                            "delete ",
+                            "copy ",
+                            "function ",
+                            "const ",
+                            "let ",
+                            "var ",
                         )
                     ):
                         signature_line = line
                         break
                 if not signature_line:
                     signature_line = candidate_lines[0]
-                if len(signature_line) > 200:
-                    signature_line = signature_line[:200] + "..."
+                if len(signature_line) > 500:
+                    signature_line = signature_line[:500] + "..."
 
                 block_summary = f"  [{lang}] {signature_line}"
                 if block_summary not in seen_signatures:
                     seen_signatures.add(block_summary)
                     parts.append(block_summary)
-                if len(seen_signatures) >= 120:
+                if len(seen_signatures) >= 500:
                     parts.append("  ... (truncated)")
                     break
 
@@ -1772,10 +1788,12 @@ def generate_symbol_essence_string(
 
     # 5. Generic Fallback (Crucial for unanalyzed file types or symbols-sparse files)
     current_ses_len = len("\n".join(parts))
-    if content and current_ses_len < 2500 and len(content) > current_ses_len:
+    if content and current_ses_len < 3500 and len(content) > current_ses_len:
         parts.append("CONTENT_PREVIEW:")
-        snippet = content[:2500].strip()
-        parts.append(textwrap.indent(snippet + ("..." if len(content) > 2500 else ""), "  "))
+        snippet = content[:3500].strip()
+        parts.append(
+            textwrap.indent(snippet + ("..." if len(content) > 3500 else ""), "  ")
+        )
 
     # Join and truncate if needed
     result = "\n".join(parts)
@@ -1887,14 +1905,14 @@ def preprocess_doc_structure(content: str) -> str:
         return ""
 
     transcript_markers = 0
-    for line in lines[:600]:
+    for line in lines[:1000]:
         lower = line.lower()
         if (
             '"user"' in lower
             or '"model"' in lower
             or '"assistant"' in lower
-            or "# \"user\"" in lower
-            or "# \"model\"" in lower
+            or '# "user"' in lower
+            or '# "model"' in lower
         ):
             transcript_markers += 1
 
@@ -1904,13 +1922,9 @@ def preprocess_doc_structure(content: str) -> str:
         for i, line in enumerate(lines):
             lower = line.lower()
             role = ""
-            if '"user"' in lower or "# \"user\"" in lower:
+            if '"user"' in lower or '# "user"' in lower:
                 role = "USER"
-            elif (
-                '"model"' in lower
-                or '"assistant"' in lower
-                or "# \"model\"" in lower
-            ):
+            elif '"model"' in lower or '"assistant"' in lower or '# "model"' in lower:
                 role = "MODEL"
             if not role:
                 continue
@@ -1930,8 +1944,8 @@ def preprocess_doc_structure(content: str) -> str:
                 break
 
             if snippet:
-                if len(snippet) > 240:
-                    snippet = snippet[:240] + "..."
+                if len(snippet) > 500:
+                    snippet = snippet[:500] + "..."
                 turns.append(f"{role}: {snippet}")
             if len(turns) >= 140:
                 break
@@ -1945,7 +1959,7 @@ def preprocess_doc_structure(content: str) -> str:
 
     for i, line in enumerate(lines):
         if line.startswith("#"):
-            header = line[:220]
+            header = line[:500]
             if header not in seen_lines:
                 seen_lines.add(header)
                 essence_parts.append(header)
@@ -1960,8 +1974,8 @@ def preprocess_doc_structure(content: str) -> str:
         ):
             if not any(line.startswith(c) for c in ["http", "file://"]):
                 snippet = line
-                if len(snippet) > 240:
-                    snippet = snippet[:240] + "..."
+                if len(snippet) > 500:
+                    snippet = snippet[:500] + "..."
                 candidate = f"  {snippet}"
                 if candidate not in seen_lines:
                     seen_lines.add(candidate)
@@ -1970,7 +1984,7 @@ def preprocess_doc_structure(content: str) -> str:
 
         # Capture informative bullets in long freeform docs.
         if line.startswith(("- ", "* ")):
-            bullet = line[:220]
+            bullet = line[:500]
             if bullet not in seen_lines:
                 seen_lines.add(bullet)
                 essence_parts.append(bullet)
@@ -1980,7 +1994,7 @@ def preprocess_doc_structure(content: str) -> str:
             if not any(
                 line.startswith(c) for c in ["> ", "http", "file://", "```", "|"]
             ):
-                para = line[:240]
+                para = line[:500]
                 if para not in seen_lines:
                     seen_lines.add(para)
                     essence_parts.append(para)
@@ -2012,9 +2026,9 @@ total_files_to_rerank: int = 0
 # stale VRAM snapshot. Forward passes still run concurrently.
 _RERANKER_PLAN_LOCK = threading.Lock()
 MIN_RERANK_BATCH_SIZE = 6  # Don't thrash with items=1; wait for VRAM instead
-RERANK_MAX_PROMPT_TOKENS = 8192
-RERANK_WAIT_TIMEOUT_SEC = 10.0
-RERANK_ALLOC_TIMEOUT_SEC = 20.0
+RERANK_MAX_PROMPT_TOKENS = 16384
+RERANK_WAIT_TIMEOUT_SEC = 20.0
+RERANK_ALLOC_TIMEOUT_SEC = 120.0
 
 # Qwen3 Reranker Configuration
 RERANKER_REPO_ID = "ManiKumarAdapala/Qwen3-Reranker-0.6B-Q8_0-Safetensors"

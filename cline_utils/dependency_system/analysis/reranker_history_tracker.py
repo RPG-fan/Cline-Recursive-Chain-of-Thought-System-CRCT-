@@ -602,7 +602,7 @@ def get_performance_comparison(
     return comparison
 
 
-@cached("reranker_history", ttl=300, track_path_args=[0])
+@cached("reranker_history", ttl=600, track_path_args=[0])
 def get_historical_pairs(
     project_root: str, max_age_cycles: int = 10
 ) -> set[Tuple[str, str]]:

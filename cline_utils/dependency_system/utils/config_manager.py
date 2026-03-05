@@ -113,12 +113,12 @@ DEFAULT_CONFIG = {
         ".clinerules.config.json",
     ],
     "thresholds": {
-        "doc_similarity": 0.65,
+        "doc_similarity": 0.65,  # Threshold for doc<->doc relations
         "code_similarity": 0.7,
-        "doc_code_similarity": 0.68,  # Threshold for doc<->code relations
+        "doc_code_similarity": 0.58,  # Threshold for doc<->code relations
         "reranker_promotion_threshold": 0.9,  # Threshold for < promotion
         "reranker_strong_semantic_threshold": 0.70,  # Threshold for S
-        "reranker_weak_semantic_threshold": 0.60,  # Threshold for s
+        "reranker_weak_semantic_threshold": 0.65,  # Threshold for s
     },
     "models": {
         "doc_model_name": "all-mpnet-base-v2",
@@ -172,9 +172,9 @@ DEFAULT_CONFIG = {
         "embedding_batch_size": 16,  # Smaller batch for embedding generation
         "enable_parallel_processing": True,  # Enable parallel file analysis
         "max_workers": None,  # None = auto-detect based on CPU cores
-        "cache_size_limit": 5000,  # Maximum cache entries
-        "cache_ttl_seconds": 300,  # Cache time-to-live (5 minutes)
-        "memory_limit_mb": 2048,  # Memory limit for analysis
+        "cache_size_limit": 10000,  # Maximum cache entries
+        "cache_ttl_seconds": 600,  # Cache time-to-live (10 minutes)
+        "memory_limit_mb": 4096,  # Memory limit for analysis
         "strict_mode": False,  # Fail on warnings if True
     },
     # Enhanced analysis configuration
@@ -183,7 +183,7 @@ DEFAULT_CONFIG = {
         "check_file_signatures": True,  # Check file signatures for binary detection
         "null_byte_threshold": 0.1,  # Threshold for binary detection
         "python_ast_enabled": True,  # Enable AST parsing for Python
-        "max_ast_file_size_mb": 1,  # Maximum file size for AST parsing
+        "max_ast_file_size_mb": 4,  # Maximum file size for AST parsing
         "js_tree_sitter_enabled": True,  # Enable tree-sitter for JavaScript
         "typescript_tree_sitter_enabled": True,  # Enable tree-sitter for TypeScript
         "extract_comments": False,  # Extract comments from code
@@ -222,7 +222,7 @@ DEFAULT_CONFIG = {
         # Timeout for blocking allocation requests (seconds)
         "allocation_timeout_seconds": 300,
         # Backpressure: pause batch submission when VRAM < this threshold (GB)
-        "backpressure_threshold_gb": 0.5,
+        "backpressure_threshold_gb": 0.75,
     },
     # Enhanced output configuration
     "output": {
@@ -262,11 +262,11 @@ DEFAULT_CONFIG = {
 # Define character priorities (Higher number = higher priority) - Centralized definition
 # Conforms to the existing convention in dependency_suggester.py
 CHARACTER_PRIORITIES = {
-    "x": 5,
-    "<": 4,
-    ">": 4,
-    "n": 4,
-    "d": 3,
+    "x": 6,
+    "<": 5,
+    ">": 5,
+    "n": 5,
+    "d": 4,
     "S": 3,
     "s": 2,
     "p": 1,
