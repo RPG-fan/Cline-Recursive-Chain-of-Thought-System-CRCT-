@@ -418,7 +418,7 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
         or os.path.splitext(norm_file_path)[1].lower() in excluded_extensions
         or os.path.basename(norm_file_path).endswith("_module.md")
     ):  # Check tracker file name pattern
-        logger.debug(f"Skipping analysis of excluded/tracker file: {norm_file_path}")
+        # logger.debug(f"Skipping analysis of excluded/tracker file: {norm_file_path}")
         return {
             "skipped": True,
             "reason": "Excluded path, extension, or tracker file",
@@ -582,14 +582,14 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
             ts_tree_object = analysis_result.get("_ts_tree")
             if ts_tree_object:
                 ts_ast_cache = cache_manager.get_cache("ts_ast_cache")
-                ts_ast_cache.set(norm_file_path, ts_tree_object)            
+                ts_ast_cache.set(norm_file_path, ts_tree_object)
 
         elif file_type == "svelte":
             _analyze_svelte_file_ts(norm_file_path, content, analysis_result)
             ts_tree_object = analysis_result.get("_ts_tree")
             if ts_tree_object:
                 ts_ast_cache = cache_manager.get_cache("ts_ast_cache")
-                ts_ast_cache.set(norm_file_path, ts_tree_object)            
+                ts_ast_cache.set(norm_file_path, ts_tree_object)
 
         elif file_type == "sql":
             _analyze_sql_file_ts(norm_file_path, content, analysis_result)
@@ -736,7 +736,9 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
     result.setdefault("_ast_tree", None)
     # ---
 
-    def _capture_significant_assignment(node: Union[ast.Assign, ast.AnnAssign], result: Dict[str, Any]):
+    def _capture_significant_assignment(
+        node: Union[ast.Assign, ast.AnnAssign], result: Dict[str, Any]
+    ):
         """Helper to capture significant variable/attribute assignments for logical essence."""
         # Check if there is a value to capture (AnnAssign might not have one)
         value_node = getattr(node, "value", None)
@@ -748,11 +750,11 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
             target_name = _get_full_name_str(target)
             if not target_name:
                 continue
-                
+
             # User Request: Capture ALL assignments, minimal filtering.
-            
+
             extracted_val: Optional[str] = None
-            
+
             # Generalize extraction using ast.unparse for ANY node type
             try:
                 val_repr = ast.unparse(value_node)
@@ -762,17 +764,22 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
             except Exception:
                 # Fallback or ignore if unparse fails
                 pass
-                    
+
             if extracted_val:
                 if "literal_assignments" not in result:
                     result["literal_assignments"] = []
                 # Avoid duplicates
-                if not any(a["name"] == target_name and a["value"] == extracted_val for a in result["literal_assignments"]):
-                    result["literal_assignments"].append({
-                        "name": target_name,
-                        "value": extracted_val,
-                        "line": node.lineno
-                    })
+                if not any(
+                    a["name"] == target_name and a["value"] == extracted_val
+                    for a in result["literal_assignments"]
+                ):
+                    result["literal_assignments"].append(
+                        {
+                            "name": target_name,
+                            "value": extracted_val,
+                            "line": node.lineno,
+                        }
+                    )
                 # USER DEMAND: ALL ASSIGNMENTS. NO EXCEPTIONS. NO LIMITS.
 
     # _get_full_name_str and _extract_type_names_from_annotation helpers
@@ -881,14 +888,14 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
         result["_ast_tree"] = tree
         tree_obj_for_debug = tree
 
-        logger.debug(
-            f"DEBUG DA: Parsed {file_path}. AST tree assigned to result['_ast_tree']. Type: {type(result['_ast_tree'])}"
-        )
+        # logger.debug(
+        #     f"DEBUG DA: Parsed {file_path}. AST tree assigned to result['_ast_tree']. Type: {type(result['_ast_tree'])}"
+        # )
 
         for node_with_parent in ast.walk(tree):
             for child in ast.iter_child_nodes(node_with_parent):
                 setattr(child, "_parent", node_with_parent)
-        logger.debug(f"DEBUG DA: Parent pointers added for {file_path}.")
+        # logger.debug(f"DEBUG DA: Parent pointers added for {file_path}.")
 
         # Pass 1: Populate top-level definitions
         imports_map = {}
@@ -941,7 +948,7 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
             elif isinstance(node, ast.Assign):
                 _capture_significant_assignment(node, result)
 
-        logger.debug(f"DEBUG DA: tree.body processed for {file_path}.")
+        # logger.debug(f"DEBUG DA: tree.body processed for {file_path}.")
 
         # Pass 2: ast.walk for detailed analysis
         for node in ast.walk(tree):
@@ -1019,12 +1026,14 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                                 "line": dec_node.lineno,
                             }
                         )
-            
+
             # Significant Assignments (Top-level, Class-level, or Method-level)
             elif isinstance(node, (ast.Assign, ast.AnnAssign)):
                 parent = getattr(node, "_parent", None)
                 # Allow assignments at module level, class level, or inside functions/methods
-                if parent is tree or isinstance(parent, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                if parent is tree or isinstance(
+                    parent, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
                     _capture_significant_assignment(node, result)
 
             # Type References
@@ -1212,7 +1221,7 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                                     "line": getattr(base, "lineno", node.lineno),
                                 }
                             )
-                
+
                 # Scan class body for significant assignments (NEW)
                 for class_item in node.body:
                     if isinstance(class_item, (ast.Assign, ast.AnnAssign)):
@@ -1318,7 +1327,7 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                             }
                         )
 
-        logger.debug(f"DEBUG DA: Second ast.walk completed for {file_path}.")
+        # logger.debug(f"DEBUG DA: Second ast.walk completed for {file_path}.")
 
     except SyntaxError as e:
         logger.warning(
@@ -1334,9 +1343,9 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
         result["error"] = f"Unexpected AST analysis error: {e}"
 
     is_tree_none_at_end = result.get("_ast_tree") is None
-    logger.debug(
-        f"DEBUG DA: End of _analyze_python_file for {file_path}. result['_ast_tree'] is None: {is_tree_none_at_end}. tree_obj_for_debug type: {type(tree_obj_for_debug)}. Keys: {list(result.keys())}"
-    )
+    # logger.debug(
+    #     f"DEBUG DA: End of _analyze_python_file for {file_path}. result['_ast_tree'] is None: {is_tree_none_at_end}. tree_obj_for_debug type: {type(tree_obj_for_debug)}. Keys: {list(result.keys())}"
+    # )
 
 
 def _analyze_javascript_file_ts(
@@ -1479,19 +1488,21 @@ def _analyze_javascript_file_ts(
                     result["comments"].append(clean)
             elif cap == "literal":
                 # Clean quotes
-                if len(text) >= 2 and text[0] in ("'", '"', "`") and text[-1] == text[0]:
+                if (
+                    len(text) >= 2
+                    and text[0] in ("'", '"', "`")
+                    and text[-1] == text[0]
+                ):
                     text = text[1:-1]
-                
+
                 # Filter for "meaningful" literals:
                 # - Paths or URLs (contains /)
                 # - Descriptive identifiers (long, contains space/underscore, or capital letters)
-                is_meaningful = (
-                    len(text) > 5 and (
-                        "/" in text or 
-                        " " in text or 
-                        "_" in text or 
-                        any(c.isupper() for c in text)
-                    )
+                is_meaningful = len(text) > 5 and (
+                    "/" in text
+                    or " " in text
+                    or "_" in text
+                    or any(c.isupper() for c in text)
                 )
                 if is_meaningful and text not in result["literals"]:
                     result["literals"].append(text)
@@ -2130,6 +2141,7 @@ def _analyze_markdown_file_regex(
             )
     except Exception as e:
         logger.warning(f"Regex error during MD code block analysis in {file_path}: {e}")
+
 
 def _analyze_markdown_file_ts(
     file_path: str, content: str, result: Dict[str, Any]
@@ -2804,9 +2816,9 @@ def _analyze_svelte_file_ts(
                                             tag = cast(str, sub.get("content", ""))
                                         elif s_type == "attribute":
                                             a_name = cast(str, sub.get("name", ""))
-                                            a_val = cast(str, sub.get("value", "")).strip(
-                                                "\"'"
-                                            )
+                                            a_val = cast(
+                                                str, sub.get("value", "")
+                                            ).strip("\"'")
                                             if a_name == "id" and a_val:
                                                 attrs += f"#{a_val}"
                                             elif a_name == "class" and a_val:
@@ -2822,12 +2834,18 @@ def _analyze_svelte_file_ts(
                             "key_statement",
                         ):
                             # Try to get the first line of content for logic blocks
-                            head = cast(str, node_data.get("content", "")).split("\n")[0].strip()
+                            head = (
+                                cast(str, node_data.get("content", ""))
+                                .split("\n")[0]
+                                .strip()
+                            )
                             if head:
                                 outline.append(f"{indent}{head}")
                             _outline(children, depth + 1)
                         elif n_type == "text":
-                            text_content = cast(str, node_data.get("content", "")).strip()
+                            text_content = cast(
+                                str, node_data.get("content", "")
+                            ).strip()
                             if text_content and len(text_content) > 3:
                                 # Escape newlines for compact outline
                                 text_content = " ".join(text_content.split())
@@ -2961,7 +2979,11 @@ def _analyze_sql_file_ts(file_path: str, content: str, result: Dict[str, Any]) -
             ("update", "table_used", r"(?im)^\s*update\s+([^\s(;]+)"),
             ("delete", "table_used", r"(?im)^\s*delete\s+from\s+([^\s(;]+)"),
             ("alter", "table_used", r"(?im)^\s*alter\s+table\s+([^\s(;]+)"),
-            ("drop", "table_used", r"(?im)^\s*drop\s+table(?:\s+if\s+exists)?\s+([^\s(;]+)"),
+            (
+                "drop",
+                "table_used",
+                r"(?im)^\s*drop\s+table(?:\s+if\s+exists)?\s+([^\s(;]+)",
+            ),
             ("truncate", "table_used", r"(?im)^\s*truncate\s+(?:table\s+)?([^\s(;]+)"),
             ("copy", "table_used", r"(?im)^\s*copy\s+([^\s(]+)\s*\("),
         ]
@@ -3077,7 +3099,7 @@ def _analyze_sql_file_ts(file_path: str, content: str, result: Dict[str, Any]) -
             captured_values = 0
             if "inserts" not in result:
                 result["inserts"] = []
-            
+
             # Helper to extract relevant strings from a node tree
             def _extract_strings_from_node(n: Any):
                 nonlocal captured_values
@@ -3087,41 +3109,53 @@ def _analyze_sql_file_ts(file_path: str, content: str, result: Dict[str, Any]) -
                 # 1. Standard strings are aliased as "literal" in DerekStride/tree-sitter-sql
                 # 2. Postgres-style dollar-quoted strings are anonymous nodes like $tag$ content $tag$
                 #    We need to check the text content for the pattern or use a fallback check if node type matches
-                
+
                 is_standard_literal = n.type == "literal"
                 # Check for dollar quoted string (anonymous node check heuristic)
                 is_dollar_quoted = False
-                if not is_standard_literal and n.type == "string": # Some grammars map it to string
-                     is_dollar_quoted = True
-                
+                if (
+                    not is_standard_literal and n.type == "string"
+                ):  # Some grammars map it to string
+                    is_dollar_quoted = True
+
                 # Check text content for dollar quotes if type check fails or is ambiguous
                 text = _get_ts_node_text(n, content_bytes)
-                if not is_dollar_quoted and len(text) > 4 and text.startswith("$") and "$" in text[1:]:
-                     # Basic check for $...$...
-                     import re
-                     if re.match(r"^\$[^\$]*\$.*\$[^\$]*\$$", text, re.DOTALL):
-                         is_dollar_quoted = True
+                if (
+                    not is_dollar_quoted
+                    and len(text) > 4
+                    and text.startswith("$")
+                    and "$" in text[1:]
+                ):
+                    # Basic check for $...$...
+                    import re
+
+                    if re.match(r"^\$[^\$]*\$.*\$[^\$]*\$$", text, re.DOTALL):
+                        is_dollar_quoted = True
 
                 if is_standard_literal or is_dollar_quoted:
                     clean_text = text
                     if is_standard_literal:
-                         # Check if it starts/ends with quotes
-                        if len(text) >= 2 and text[0] in ("'", '"') and text[-1] == text[0]:
+                        # Check if it starts/ends with quotes
+                        if (
+                            len(text) >= 2
+                            and text[0] in ("'", '"')
+                            and text[-1] == text[0]
+                        ):
                             clean_text = text[1:-1]
                         else:
                             # Might be a number or boolean, skip
                             return
-                    
+
                     if len(clean_text) > 3 or is_dollar_quoted:
                         # Try to find table name if we are in an INSERT
                         current = n
                         table_name = "unknown"
-                        
+
                         # Traverse up to find 'insert' node
                         # Node name is 'insert', not 'insert_statement' in this grammar
                         while current and current.type != "insert":
                             current = current.parent
-                        
+
                         if current:
                             # In tree-sitter-sql (DerekStride), table is an object_reference child
                             # There is no 'table' field.
@@ -3130,39 +3164,50 @@ def _analyze_sql_file_ts(file_path: str, content: str, result: Dict[str, Any]) -
                                 if child.type == "object_reference":
                                     table_node = child
                                     break
-                            
+
                             if table_node:
-                                table_name = _extract_sql_identifier(table_node, content_bytes)
+                                table_name = _extract_sql_identifier(
+                                    table_node, content_bytes
+                                )
 
                         # Find/Create entry for this table
-                        inserts_list = cast(List[Dict[str, Any]], result.get("inserts", []))
-                        
+                        inserts_list = cast(
+                            List[Dict[str, Any]], result.get("inserts", [])
+                        )
+
                         # Ensure we work with the referenced list in the result dict
                         if "inserts" not in result:
-                             result["inserts"] = []
-                             inserts_list = cast(List[Dict[str, Any]], result["inserts"])
+                            result["inserts"] = []
+                            inserts_list = cast(List[Dict[str, Any]], result["inserts"])
 
                         # Check if we already have an entry for this table
-                        table_entry: Optional[Dict[str, Any]] = next((i for i in inserts_list if i.get("table") == table_name), None)
-                        
+                        table_entry: Optional[Dict[str, Any]] = next(
+                            (i for i in inserts_list if i.get("table") == table_name),
+                            None,
+                        )
+
                         if not table_entry:
-                            table_entry = {"table": table_name, "columns": {}, "values": []} 
+                            table_entry = {
+                                "table": table_name,
+                                "columns": {},
+                                "values": [],
+                            }
                             inserts_list.append(table_entry)
-                        
+
                         # Add value to the 'values' list for this table, for SES generation
                         # We use 'columns' in embedding_manager, but here we just capturing raw values
                         # Let's map it to a 'literals' key or similar that embedding_manager understands
                         cols_dict = cast(Dict[str, str], table_entry.get("columns", {}))
-                        
+
                         # If we just have values, maybe we can store them as "value_N": "literal"
                         pk = f"val_{len(cols_dict)}"
                         if "columns" not in table_entry:
                             table_entry["columns"] = cols_dict
-                        
+
                         # Avoid duplicates in the same table entry
                         if clean_text not in cols_dict.values():
-                             cols_dict[pk] = clean_text
-                             captured_values += 1
+                            cols_dict[pk] = clean_text
+                            captured_values += 1
 
                 for child in n.children:
                     _extract_strings_from_node(child)
@@ -3170,7 +3215,7 @@ def _analyze_sql_file_ts(file_path: str, content: str, result: Dict[str, Any]) -
             # Query for INSERT nodes
             insert_nodes_query = Query(SQL_LANGUAGE, "(insert) @ins")
             ins_cursor = QueryCursor(insert_nodes_query)
-            
+
             for _, captures in ins_cursor.matches(root_node):
                 if captured_values >= max_values_per_file:
                     break
@@ -3361,6 +3406,7 @@ def _merge_analysis_results(primary: Dict[str, Any], secondary: Dict[str, Any]) 
                     unique_key = f"{dict_item['name']}:{line}"
                     if unique_key not in existing_ids:
                         primary_items.append(item)
+
 
 def _analyze_python_file_ts(
     file_path: str, content: str, result: Dict[str, Any]

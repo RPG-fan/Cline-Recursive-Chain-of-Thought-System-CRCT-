@@ -34,6 +34,9 @@ from cline_utils.dependency_system.utils.cache_manager import (
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.path_utils import is_subpath
 from cline_utils.dependency_system.utils.phase_tracker import PhaseTracker
+from cline_utils.dependency_system.utils.resource_validator import (
+    get_cached_resource_metrics,
+)
 from cline_utils.dependency_system.utils.template_generator import (
     generate_final_review_checklist,
 )
@@ -50,9 +53,6 @@ from cline_utils.dependency_system.utils.tracker_utils import (
 from cline_utils.dependency_system.utils.visualize_dependencies import (
     generate_mermaid_diagram,
     render_mermaid_to_image,
-)
-from cline_utils.dependency_system.utils.resource_validator import (
-    get_cached_resource_metrics,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,9 +116,7 @@ def _cleanup_orphaned_render_processes(parent_pid: int) -> None:
 
         if killed:
             # Give killed processes a moment to release resources
-            psutil.wait_procs(
-                [c for c in children if not c.is_running()], timeout=5
-            )
+            psutil.wait_procs([c for c in children if not c.is_running()], timeout=5)
             logger.info("Cleaned up %d orphaned render process(es).", killed)
         else:
             logger.debug("Cleanup: no orphaned render processes found.")
@@ -143,9 +141,7 @@ def _cleanup_orphaned_render_processes(parent_pid: int) -> None:
             except Exception:
                 pass
         if killed:
-            logger.info(
-                "Cleaned up render processes via taskkill (fallback)."
-            )
+            logger.info("Cleaned up render processes via taskkill (fallback).")
     else:
         logger.warning(
             "Cannot clean up orphaned render processes: "
@@ -369,7 +365,7 @@ def analyze_project(
                     )  # Use original pattern list from config
                 )
                 if is_excluded:
-                    logger.debug(f"Skipping excluded file: {file_path_abs}")
+                    # logger.debug(f"Skipping excluded file: {file_path_abs}")
                     continue
                 if file_path_abs in path_to_key_info:  # Check against the generated map
                     files_to_analyze_abs.append(file_path_abs)
@@ -541,9 +537,9 @@ def analyze_project(
                 file_path = key_info_obj.norm_path
                 module_path = key_info_obj.parent_path  # Direct parent directory path
                 file_to_module[file_path] = module_path
-                logger.debug(
-                    f"Mapped file '{file_path}' to module '{module_path}'"
-                )  # Optional debug log
+                # logger.debug(
+                #     f"Mapped file '{file_path}' to module '{module_path}'"
+                # )
 
             else:
                 logger.warning(
@@ -1199,7 +1195,6 @@ def analyze_project(
             analysis_results["status"] = "error"
     else:
         logger.info("No tracker updates to commit")
-
 
     # --- Template Generation ---
     logger.info("Starting template generation (e.g., final review checklist)...")

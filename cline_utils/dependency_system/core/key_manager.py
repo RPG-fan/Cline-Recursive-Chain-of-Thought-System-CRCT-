@@ -287,9 +287,9 @@ def generate_keys(
 
             # 1. Skip excluded directories
             if any(norm_dir_path.startswith(ex_path) for ex_path in exclusion_set):
-                logger.debug(
-                    f"Exclusion Check 1: Skipping excluded dir path: '{norm_dir_path}'"
-                )
+                # logger.debug(
+                #     f"Exclusion Check 1: Skipping excluded dir path: '{norm_dir_path}'"
+                # )
                 return
             # else: # No need for else, debug log below covers processing
             #     logger.debug(f"Exclusion Check 1: Processing dir path: '{norm_dir_path}'")
@@ -309,9 +309,9 @@ def generate_keys(
                 if norm_dir_path not in path_to_key_info:
                     path_to_key_info[norm_dir_path] = current_dir_key_info
                     newly_generated_keys.append(current_dir_key_info)
-                    logger.debug(
-                        f"Assigned key '{current_dir_key_info.key_string}' to directory '{norm_dir_path}'"
-                    )
+                    # logger.debug(
+                    #     f"Assigned key '{current_dir_key_info.key_string}' to directory '{norm_dir_path}'"
+                    # )
                 else:  # Should not happen for top-level if processed correctly
                     logger.warning(
                         f"Top-level directory '{norm_dir_path}' seems to be processed more than once."
@@ -358,9 +358,9 @@ def generate_keys(
                 and re.match(r"^[1-9]\d*[A-Z][a-z]$", parent_key_string)
             )
 
-            logger.debug(
-                f"Processing items in: '{norm_dir_path}' (Key: {parent_key_string}, Is Subdir Key: {is_parent_key_a_subdir})"
-            )
+            # logger.debug(
+            #     f"Processing items in: '{norm_dir_path}' (Key: {parent_key_string}, Is Subdir Key: {is_parent_key_a_subdir})"
+            # )
 
             for item_name in items:
                 try:
@@ -373,35 +373,35 @@ def generate_keys(
                     if any(
                         norm_item_path.startswith(ex_path) for ex_path in exclusion_set
                     ):  # Check again for items potentially matching deeper patterns
-                        logger.debug(
-                            f"Exclusion Check 1b: Skipping excluded item path: '{norm_item_path}'"
-                        )
+                        # logger.debug(
+                        #     f"Exclusion Check 1b: Skipping excluded item path: '{norm_item_path}'"
+                        # )
                         continue
                     if (item_name in excluded_dirs_names) or (item_name == ".gitkeep"):
-                        logger.debug(
-                            f"Exclusion Check 3: Skipping item name '{item_name}' in '{norm_dir_path}'"
-                        )
+                        # logger.debug(
+                        #     f"Exclusion Check 3: Skipping item name '{item_name}' in '{norm_dir_path}'"
+                        # )
                         continue
                     if item_name.endswith("_module.md"):
-                        logger.debug(
-                            f"Exclusion Check 4: Skipping mini-tracker '{item_name}' in '{norm_dir_path}'"
-                        )
+                        # logger.debug(
+                        #     f"Exclusion Check 4: Skipping mini-tracker '{item_name}' in '{norm_dir_path}'"
+                        # )
                         continue
 
                     # Skip items that are neither file nor directory
                     if not (is_dir or is_file):
-                        logger.debug(
-                            f"Skipping item '{item_name}' (not a file or directory) in '{norm_dir_path}'"
-                        )
+                        # logger.debug(
+                        #     f"Skipping item '{item_name}' (not a file or directory) in '{norm_dir_path}'"
+                        # )
                         continue
 
                     # Check extension exclusion only for files
                     if is_file:
                         _, ext = os.path.splitext(item_name)
                         if ext in excluded_extensions:
-                            logger.debug(
-                                f"Exclusion Check 5: Skipping file '{item_name}' with extension '{ext}' in '{norm_dir_path}'"
-                            )
+                            # logger.debug(
+                            #     f"Exclusion Check 5: Skipping file '{item_name}' with extension '{ext}' in '{norm_dir_path}'"
+                            # )
                             continue
 
                     # --- Key Generation Logic ---
@@ -471,9 +471,9 @@ def generate_keys(
                         # <<< CORRECTED: Key for the promoted directory itself (e.g., 2A) >>>
                         key_str = f"{new_tier}{new_dir_letter}"
 
-                        logger.debug(
-                            f"Promoting DIR '{item_name}': parent '{parent_key_string}' -> new key '{key_str}'"
-                        )
+                        # logger.debug(
+                        #     f"Promoting DIR '{item_name}': parent '{parent_key_string}' -> new key '{key_str}'"
+                        # )
 
                         # is_dir is always True in this block now
                         item_key_info = KeyInfo(
@@ -518,15 +518,15 @@ def generate_keys(
                             subdir_letter = chr(subdir_letter_ord)
                             key_str = f"{base_key_part}{subdir_letter}"
                             subdir_letter_ord += 1
-                            logger.debug(
-                                f"Assigning standard subdir key '{key_str}' for DIR item '{item_name}' under parent '{base_key_part}'"
-                            )
+                            # logger.debug(
+                            #     f"Assigning standard subdir key '{key_str}' for DIR item '{item_name}' under parent '{base_key_part}'"
+                            # )
                         else:  # is_file: Assign standard file key (e.g., 1B1, 1Ba1, 1Ba2)
                             key_str = f"{base_key_part}{file_counter}"
                             file_counter += 1
-                            logger.debug(
-                                f"Assigning standard file key '{key_str}' for FILE item '{item_name}' under parent '{base_key_part}'"
-                            )
+                            # logger.debug(
+                            #     f"Assigning standard file key '{key_str}' for FILE item '{item_name}' under parent '{base_key_part}'"
+                            # )
 
                         # is_dir correctly reflects the item type here
                         item_key_info = KeyInfo(
@@ -814,7 +814,7 @@ def load_global_key_map() -> Optional[Dict[str, KeyInfo]]:
                 # Skip this entry or return None entirely? For now, skip.
                 continue  # Skip this entry
 
-        logger.info(
+        logger.debug(
             f"Successfully loaded global key map ({len(path_to_key_info)} entries) from: {map_path}"
         )
         return path_to_key_info
@@ -964,7 +964,9 @@ def get_sortable_parts_for_key(key_str: str) -> List[Union[str, int]]:
         return []
     parts = re.findall(KEY_PATTERN, key_str)
     try:
-        converted_parts: List[Union[str, int]] = [(int(p) if p.isdigit() else p) for p in parts]
+        converted_parts: List[Union[str, int]] = [
+            (int(p) if p.isdigit() else p) for p in parts
+        ]
     except (ValueError, TypeError):
         logger.warning(
             f"Could not convert parts for sorting key string '{key_str}', using original string parts."
@@ -993,7 +995,9 @@ def sort_key_strings_hierarchically(keys: List[str]) -> List[str]:
         try:
             # Ensure tier (first part if numeric) is handled correctly
             # The pattern splits correctly, just need conversion
-            converted_parts: List[Union[str, int]] = [(int(p) if p.isdigit() else p) for p in parts]
+            converted_parts: List[Union[str, int]] = [
+                (int(p) if p.isdigit() else p) for p in parts
+            ]
         except (ValueError, TypeError):
             logger.warning(
                 f"Could not convert parts for sorting key string '{key_str}', using basic string sort."

@@ -15,7 +15,8 @@ from cline_utils.dependency_system.core.dependency_grid import (
 )
 from cline_utils.dependency_system.core.key_manager import KeyInfo, validate_key
 
-from .cache_manager import cached, normalize_path_cached as normalize_path
+from .cache_manager import cached
+from .cache_manager import normalize_path_cached as normalize_path
 from .config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
@@ -273,10 +274,10 @@ def read_tracker_file_structured(tracker_path: str) -> Dict[str, Any]:
             )
             grid_headers = [d[0] for d in definitions]
 
-        logger.debug(
-            f"Read structured tracker '{os.path.basename(tracker_path)}': "
-            f"{len(definitions)} defs, {len(grid_headers)} grid headers, {len(grid_rows)} grid rows."
-        )
+        # logger.debug(
+        #     f"Read structured tracker '{os.path.basename(tracker_path)}': "
+        #     f"{len(definitions)} defs, {len(grid_headers)} grid headers, {len(grid_rows)} grid rows."
+        # )
 
         return {
             "definitions_ordered": definitions,
@@ -308,9 +309,9 @@ def find_all_tracker_paths(config: ConfigManager, project_root: str) -> Set[str]
             "main_tracker_filename",
             os.path.join(memory_dir_abs, "module_relationship_tracker.md"),
         )
-        logger.debug(
-            f"Using main_tracker_abs from config (or default): '{main_tracker_abs}'"
-        )
+        # logger.debug(
+        #     f"Using main_tracker_abs from config (or default): '{main_tracker_abs}'"
+        # )
         if os.path.exists(main_tracker_abs):
             all_tracker_paths.add(main_tracker_abs)
         else:
@@ -320,9 +321,9 @@ def find_all_tracker_paths(config: ConfigManager, project_root: str) -> Set[str]
         doc_tracker_abs = config.get_path(
             "doc_tracker_filename", os.path.join(memory_dir_abs, "doc_tracker.md")
         )
-        logger.debug(
-            f"Using doc_tracker_abs from config (or default): '{doc_tracker_abs}'"
-        )
+        # logger.debug(
+        #     f"Using doc_tracker_abs from config (or default): '{doc_tracker_abs}'"
+        # )
         if os.path.exists(doc_tracker_abs):
             all_tracker_paths.add(doc_tracker_abs)
         else:
@@ -351,7 +352,7 @@ def find_all_tracker_paths(config: ConfigManager, project_root: str) -> Set[str]
                 logger.error(
                     f"Error during glob search for mini trackers under '{code_root_abs}': {e}"
                 )
-    logger.debug(f"Found {len(all_tracker_paths)} total tracker files.")
+    # logger.debug(f"Found {len(all_tracker_paths)} total tracker files.")
     return all_tracker_paths
 
 
@@ -369,7 +370,7 @@ def get_global_map_cache_key_part(global_map: Dict[str, Any]) -> str:
     "aggregation_v2_gi",
     # MODIFIED key_func - show_progress doesn't affect cache, so it's accepted but not included in key
     key_func=lambda paths, pmi, cgptki, show_progress=True: f"agg_v2_gi:{':'.join(sorted(list(paths)))}:{hash(tuple(sorted(pmi.items())))}:{get_global_map_cache_key_part(cgptki)}",
-    ttl=300,
+    ttl=600,
 )
 def aggregate_all_dependencies(
     tracker_paths: Set[str],
