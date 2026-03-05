@@ -2233,8 +2233,8 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
             with open(tgt_path, "r", encoding="utf-8", errors="ignore") as f:
                 tgt_content = f.read()
 
-            src_base = os.path.basename(src_path)
-            tgt_base = os.path.basename(tgt_path)
+            src_base = src_norm
+            tgt_base = tgt_norm
 
             print(
                 f"[{total_processed+1}/{len(tasks)}] analyzing {src_key} -> {tgt_key}..."
