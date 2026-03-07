@@ -99,6 +99,18 @@ KEY_DEFINITIONS_END_MARKER = "---KEY_DEFINITIONS_END---"
 
 
 # --- Helper Functions ---
+def _configure_stdio_for_unicode() -> None:
+    """Avoid UnicodeEncodeError on Windows terminals using legacy code pages."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
+
+
 def _load_global_map_or_exit() -> Dict[str, KeyInfo]:
     """Loads the global key map, exiting if it fails."""
     logger.info("Loading global key map...")
@@ -2343,6 +2355,18 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
             print(f"\nDependency Result: {char}")
             print(f"\n--- LLM Reasoning ---\n{reasoning}\n---------------------")
 
+            try:
+                add_code_doc_dependency_to_checklist(
+                    source_key_str=src_key,
+                    target_key_str=tgt_key,
+                    dep_type_char=char,
+                    justification=reasoning.strip(),
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to add dependency {src_key} -> {tgt_key} to checklist: {e}"
+                )
+
             # Add to batch (KEY#GI format is handled by src_key being from tracker which usually has correct format)
             batch_suggestions[src_key].append((tgt_key, char))
             processed_count += 1
@@ -2466,6 +2490,7 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
 def main():
     """Parse arguments and dispatch to handlers."""
+    _configure_stdio_for_unicode()
     parser = argparse.ArgumentParser(description="Dependency tracking system CLI")
     subparsers = parser.add_subparsers(
         dest="command", help="Available commands", required=True
@@ -2736,7 +2761,9 @@ def main():
     log_file_path: Optional[str] = None
     try:
         log_file_path = normalize_path(os.path.join(get_project_root(), "debug.txt"))
-        file_handler = logging.FileHandler(log_file_path, mode="w")
+        file_handler = logging.FileHandler(
+            log_file_path, mode="w", encoding="utf-8", errors="backslashreplace"
+        )
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(log_formatter)
         root_logger.addHandler(file_handler)
@@ -2757,7 +2784,12 @@ def main():
         suggestions_log_path = normalize_path(
             os.path.join(get_project_root(), "suggestions.log")
         )
-        suggestion_handler = logging.FileHandler(suggestions_log_path, mode="w")
+        suggestion_handler = logging.FileHandler(
+            suggestions_log_path,
+            mode="w",
+            encoding="utf-8",
+            errors="backslashreplace",
+        )
         suggestion_handler.setLevel(logging.DEBUG)
         suggestion_handler.setFormatter(log_formatter)
 

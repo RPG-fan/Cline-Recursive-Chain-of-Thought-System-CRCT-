@@ -620,7 +620,10 @@ def generate_final_review_checklist(
 
 # add dependency to checklist table
 def add_code_doc_dependency_to_checklist(
-    source_key_str: str, target_key_str: str, dep_type_char: str
+    source_key_str: str,
+    target_key_str: str,
+    dep_type_char: str,
+    justification: str = "",
 ) -> bool:
     """
     Adds a new row to the 'Added Dependencies' table in the final_review_checklist.md.
@@ -643,7 +646,7 @@ def add_code_doc_dependency_to_checklist(
     # Construct the core part of the new row for duplicate checking (excluding justification)
     # Normalize spacing for consistent duplicate checks
     new_row_check_str = f"| {source_key_str} | {target_key_str} | {dep_type_char} |"
-    new_row_to_insert = f"| {source_key_str.ljust(10)} | {target_key_str.ljust(10)} | {dep_type_char.center(15)} | [JUSTIFICATION] |"
+    new_row_to_insert = f"| {source_key_str.ljust(10)} | {target_key_str.ljust(10)} | {dep_type_char.center(15)} | {justification} |"
 
     try:
         with open(checklist_path_abs, "r+", encoding="utf-8") as f:
@@ -718,7 +721,7 @@ def add_code_doc_dependency_to_checklist(
             f.write(final_content)
             f.truncate()
 
-        logger.info(
+        logger.debug(
             f"Successfully added dependency ({source_key_str} -> {target_key_str}): {new_row_to_insert}"
         )
         return True
