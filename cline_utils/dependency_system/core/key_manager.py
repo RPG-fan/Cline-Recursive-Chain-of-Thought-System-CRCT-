@@ -43,6 +43,7 @@ KEY_VALIDATION_PATTERN = re.compile(
 KEY_PATTERN = r"\d+|\D+"
 GLOBAL_KEY_MAP_FILENAME = "global_key_map.json"
 OLD_GLOBAL_KEY_MAP_FILENAME = "global_key_map_old.json"  # <<< NEW
+TRACKER_MAP_FILENAME = "tracker_map.json"
 
 
 class KeyGenerationError(ValueError):
@@ -869,6 +870,47 @@ def load_old_global_key_map() -> Optional[Dict[str, KeyInfo]]:
             f"Unexpected error loading previous global key map: {e} (path: {map_path})"
         )
         return None
+
+
+def load_tracker_map() -> List[str]:
+    """
+    Loads the persisted tracker map from the JSON file
+    located alongside key_manager.py.
+
+    Returns:
+        List of absolute tracker paths, or empty list if not found/failed.
+    """
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        path = normalize_path(os.path.join(script_dir, TRACKER_MAP_FILENAME))
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+                logger.warning(
+                    f"Tracker map data in {path} is not a list. Returning empty."
+                )
+    except Exception as e:
+        logger.warning(f"Could not load tracker map: {e}")
+    return []
+
+
+def save_tracker_map(tracker_paths: List[str]):
+    """
+    Saves the provided list of tracker paths to the JSON file
+    located alongside key_manager.py.
+    """
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        path = normalize_path(os.path.join(script_dir, TRACKER_MAP_FILENAME))
+        # Ensure directory exists (though it should as key_manager is there)
+        os.makedirs(script_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(sorted(list(set(tracker_paths))), f, indent=2)
+        logger.info(f"Successfully saved tracker map to: {path}")
+    except Exception as e:
+        logger.error(f"Could not save tracker map: {e}")
 
 
 def validate_key(key: str) -> bool:

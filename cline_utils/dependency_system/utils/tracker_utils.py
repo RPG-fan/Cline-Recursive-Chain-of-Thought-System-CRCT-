@@ -13,7 +13,11 @@ from cline_utils.dependency_system.core.dependency_grid import (
     EMPTY_CHAR,
     decompress,
 )
-from cline_utils.dependency_system.core.key_manager import KeyInfo, validate_key
+from cline_utils.dependency_system.core.key_manager import (
+    KeyInfo,
+    load_tracker_map,
+    validate_key,
+)
 
 from .cache_manager import cached
 from .cache_manager import normalize_path_cached as normalize_path
@@ -291,8 +295,19 @@ def read_tracker_file_structured(tracker_path: str) -> Dict[str, Any]:
         return empty_result
 
 
-def find_all_tracker_paths(config: ConfigManager, project_root: str) -> Set[str]:
+def find_all_tracker_paths(
+    config: ConfigManager, project_root: str, force_scan: bool = False
+) -> Set[str]:
     """Finds all main, doc, and mini tracker files in the project."""
+    if not force_scan:
+        cached_paths = load_tracker_map()
+        if cached_paths:
+            # Return only those that still exist on disk
+            existing_cached = {p for p in cached_paths if os.path.exists(p)}
+            if existing_cached:
+                # logger.debug(f"Using {len(existing_cached)} tracker paths from persistent map.")
+                return existing_cached
+
     all_tracker_paths = set()
     memory_dir_rel = config.get_path("memory_dir")
     if not memory_dir_rel:

@@ -1185,6 +1185,19 @@ def analyze_project(
     else:
         logger.info("No tracker updates to commit")
 
+    # --- Update Persistent Tracker Map ---
+    # Now that trackers have been committed to disk, we refresh the persistent map
+    # to ensure it contains all current trackers (main, doc, and all mini-trackers).
+    try:
+        logger.info("Updating persistent tracker map...")
+        current_tracker_paths = tracker_io.find_all_tracker_paths(
+            config, project_root, force_scan=True
+        )
+        key_manager.save_tracker_map(list(current_tracker_paths))
+    except Exception as e:
+        logger.error(f"Failed to update persistent tracker map: {e}")
+        # Not a fatal error for analysis, but good to log
+
     # --- Template Generation ---
     logger.info("Starting template generation (e.g., final review checklist)...")
     try:
