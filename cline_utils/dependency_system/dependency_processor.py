@@ -1914,17 +1914,94 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
     """
     import time
 
-    tracker_path = normalize_path(args.tracker)
-    if not os.path.isfile(tracker_path):
-        print(
-            f"Error: Tracker file not found or is a directory: {tracker_path}",
-            file=sys.stderr,
-        )
-        return 1
-
     limit = args.limit
     dep_char = args.dep_char
     focus_key = args.key
+
+    if args.tracker is None:
+        from cline_utils.dependency_system.core.key_manager import (
+            load_tracker_map,
+            save_tracker_map,
+        )
+
+        all_trackers = load_tracker_map()
+        if not all_trackers:
+            print(
+                "Tracker map not found or empty. Scanning project to generate it...",
+                file=sys.stderr,
+            )
+            all_trackers = list(
+                find_all_tracker_paths(
+                    ConfigManager(), get_project_root(), force_scan=True
+                )
+            )
+            if all_trackers:
+                save_tracker_map(all_trackers)
+                print(
+                    f"Generated tracker map with {len(all_trackers)} entries.",
+                    file=sys.stderr,
+                )
+            else:
+                print("Error: No trackers found in the project.", file=sys.stderr)
+                return 1
+
+        doc_trackers = []
+        mini_trackers = []
+        other_trackers = []
+        for t in all_trackers:
+            basename = os.path.basename(t)
+            if "doc_tracker.md" in basename:
+                doc_trackers.append(t)
+            elif basename.endswith("_module.md"):
+                mini_trackers.append(t)
+            else:
+                other_trackers.append(t)
+
+        ordered_trackers = doc_trackers + mini_trackers + other_trackers
+
+        dep_chars = ("p", "S", "s") if dep_char == "p" else (dep_char,)
+        selected_tracker = None
+
+        for t_path in ordered_trackers:
+            if not os.path.isfile(t_path):
+                continue
+            with open(t_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            try:
+                _, grid_rows_data = read_grid_from_lines(lines)
+                found = False
+                for _, compressed_row in grid_rows_data:
+                    decomp = list(decompress(compressed_row))
+                    if any(c in decomp for c in dep_chars):
+                        found = True
+                        break
+                if found:
+                    selected_tracker = t_path
+                    break
+            except Exception:
+                continue
+
+        if not selected_tracker:
+            print(
+                f"No unresolved dependencies ({', '.join(dep_chars)}) found in any known trackers."
+            )
+            return 0
+
+        tracker_path = selected_tracker
+        dep_chars_str = "', '".join(dep_chars)
+        print(
+            f"Automatically selected tracker: {tracker_path} (scanning for: '{dep_chars_str}')"
+        )
+    else:
+        tracker_path = normalize_path(args.tracker)
+        if not os.path.isfile(tracker_path):
+            print(
+                f"Error: Tracker file not found or is a directory: {tracker_path}",
+                file=sys.stderr,
+            )
+            return 1
+        dep_chars = (dep_char,)
+
     model_path = args.model if args.model else "models/Qwen3-4B-Instruct-2507-Q8_0.gguf"
 
     # Load Global Map
@@ -1972,7 +2049,7 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
         try:
             decomp = list(decompress(compressed_row))
             for col_idx, char in enumerate(decomp):
-                if char == dep_char:
+                if char in dep_chars:
                     if col_idx < len(key_def_pairs):
                         tgt_key_label, tgt_path = key_def_pairs[col_idx]
 
@@ -1981,7 +2058,8 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
         except Exception:
             continue
 
-    print(f"Found {len(tasks)} unresolved '{dep_char}' dependencies.")
+    dep_chars_str = "', '".join(dep_chars)
+    print(f"Found {len(tasks)} unresolved dependencies for ('{dep_chars_str}').")
     if not tasks:
         return 0
 
@@ -2610,7 +2688,9 @@ def main():
         help="Resolve unverified 'p' dependencies using Local LLM in batches",
     )
     resolve_placeholders_parser.add_argument(
-        "--tracker", required=True, help="Path to the tracker file"
+        "--tracker",
+        required=False,
+        help="Path to the tracker file (optional, uses tracker_map.json by default)",
     )
     resolve_placeholders_parser.add_argument(
         "--key", required=False, help="Restricts to dependencies of this source key"
