@@ -236,29 +236,9 @@ def analyze_project(
         f"Absolute code roots for mini-tracker consideration: {abs_code_roots}"
     )
 
-    # old_map_existed_before_gen logic block
-    old_map_existed_before_gen = False
-    try:
-        # Determine the expected path for the old map file RELATIVE to key_manager.py
-        # Use the imported key_manager module to find its location
-        key_manager_dir = os.path.dirname(os.path.abspath(key_manager.__file__))
-        old_map_path = normalize_path(
-            os.path.join(key_manager_dir, key_manager.OLD_GLOBAL_KEY_MAP_FILENAME)
-        )
-        old_map_existed_before_gen = os.path.exists(old_map_path)
-        if old_map_existed_before_gen:
-            logger.info(
-                f"Found existing '{key_manager.OLD_GLOBAL_KEY_MAP_FILENAME}' before key generation. Grid migration will prioritize it."
-            )
-        else:
-            logger.info(
-                f"'{key_manager.OLD_GLOBAL_KEY_MAP_FILENAME}' not found before key generation. Grid migration will use tracker definitions as fallback."
-            )
-    except Exception as path_err:
-        logger.error(
-            f"Error determining path or checking existence of old key map file: {path_err}. Assuming it didn't exist."
-        )
-        old_map_existed_before_gen = False
+    # We will determine if an old map is available AFTER key generation,
+    # because the current map is renamed to the old map during key generation.
+    has_old_map = False
 
     # --- Key Generation ---
     logger.info("Generating/Regenerating keys...")
@@ -297,6 +277,15 @@ def analyze_project(
     # --- Build Path Migration Map (Early, after new keys are generated) ---
     logger.debug("Building path migration map for analysis and updates...")
     old_global_map = key_manager.load_old_global_key_map()  # Load old map (can be None)
+    has_old_map = old_global_map is not None
+    if has_old_map:
+        logger.info(
+            f"Found existing '{key_manager.OLD_GLOBAL_KEY_MAP_FILENAME}'. Grid migration will prioritize it."
+        )
+    else:
+        logger.info(
+            f"'{key_manager.OLD_GLOBAL_KEY_MAP_FILENAME}' not found. Grid migration will use tracker definitions as fallback."
+        )
     path_migration_info: PathMigrationInfo
     try:
         path_migration_info = tracker_io.build_path_migration_map(
@@ -1010,7 +999,7 @@ def analyze_project(
                         file_to_module=file_to_module,
                         new_keys=newly_generated_keys,
                         force_apply_suggestions=False,
-                        use_old_map_for_migration=old_map_existed_before_gen,
+                        use_old_map_for_migration=has_old_map,
                     )
 
                     if prepared_data:
@@ -1072,7 +1061,7 @@ def analyze_project(
                 file_to_module=file_to_module,
                 new_keys=newly_generated_keys,
                 force_apply_suggestions=False,
-                use_old_map_for_migration=old_map_existed_before_gen,
+                use_old_map_for_migration=has_old_map,
             )
 
             if prepared_data:
@@ -1115,7 +1104,7 @@ def analyze_project(
             file_to_module=file_to_module,
             new_keys=newly_generated_keys,
             force_apply_suggestions=False,
-            use_old_map_for_migration=old_map_existed_before_gen,
+            use_old_map_for_migration=has_old_map,
         )
 
         if prepared_data:
