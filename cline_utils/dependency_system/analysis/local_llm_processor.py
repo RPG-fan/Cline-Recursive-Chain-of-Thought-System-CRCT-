@@ -162,13 +162,15 @@ class LocalLLMProcessor:
 
     def get_token_count(self, text: str) -> int:
         """Get exact token count using the model's tokenizer."""
-        model = self._load_model(2048)  # Ensure at least base context loaded
+        model = self._model
+        if model is None:
+            model = self._load_model(2048)  # Ensure at least base context loaded
         try:
             tokens = model.tokenize(text.encode("utf-8"))
             return len(tokens)
         except Exception as e:
             logger.warning(f"Tokenizer failed: {e}. Falling back to estimate.")
-            return len(text) // 4
+            return len(text) // 3
 
     def determine_dependency(
         self,
@@ -234,9 +236,13 @@ Clear summary of dependency determination in the format dictated in instruction 
         response_margin = 520
 
         # Initial estimate to decide n_ctx
-        # If tokens provided, use them, otherwise use char count / 4
-        s_est = source_tokens or (len(source_content) // 4)
-        t_est = target_tokens or (len(target_content) // 4)
+        # If tokens provided, use them with a 1.3x margin, otherwise use char count / 3
+        s_est = (
+            int(source_tokens * 1.3) if source_tokens else (len(source_content) // 3)
+        )
+        t_est = (
+            int(target_tokens * 1.3) if target_tokens else (len(target_content) // 3)
+        )
 
         initial_required = s_est + t_est + wrapper_tokens + response_margin
         model = self._load_model(initial_required)
@@ -257,11 +263,7 @@ Clear summary of dependency determination in the format dictated in instruction 
                 f"<|im_start|>assistant\n"
             )
 
-            # Optimization: If it's the first attempt and we have tokens, skip re-tokenization
-            if attempt == 0 and source_tokens is not None and target_tokens is not None:
-                prompt_tokens = wrapper_tokens + source_tokens + target_tokens
-            else:
-                prompt_tokens = self.get_token_count(current_prompt)
+            prompt_tokens = self.get_token_count(current_prompt)
 
             # Add margin for response
             effective_ctx = self.current_n_ctx - response_margin
@@ -269,6 +271,19 @@ Clear summary of dependency determination in the format dictated in instruction 
             if prompt_tokens <= effective_ctx:
                 final_prompt = current_prompt
                 break
+
+            # If attempt 0 fails because of underestimation, try reloading the model with exact requirements
+            if attempt == 0 and prompt_tokens > effective_ctx:
+                exact_required = prompt_tokens + response_margin
+                if self.current_n_ctx < self.max_n_ctx:
+                    logger.info(
+                        f"Context underestimated (prompt: {prompt_tokens}, ctx: {self.current_n_ctx}). Reloading model."
+                    )
+                    model = self._load_model(exact_required)
+                    effective_ctx = self.current_n_ctx - response_margin
+                    if prompt_tokens <= effective_ctx:
+                        final_prompt = current_prompt
+                        break
 
             if attempt == max_attempts - 1:
                 logger.error(
