@@ -11,7 +11,9 @@ import logging
 import os
 import subprocess
 import sys
-from collections import defaultdict
+from collections import defaultdict, deque
+from dataclasses import dataclass
+import itertools
 from logging import LogRecord
 from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
 
@@ -1924,6 +1926,122 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
         return 1
 
 
+@dataclass
+class PreparedPair:
+    srckey: str
+    srcpath: str
+    tgtkey: str
+    tgtpath: str
+    srccontent: str
+    tgtcontent: str
+    srcbase: str
+    tgtbase: str
+    stokens: int
+    ttokens: int
+    skip: bool = False
+    skip_reason: Optional[str] = None
+
+
+def _prepare_pair(
+    srckey: str,
+    srcpath: str,
+    tgtkey: str,
+    tgtpath: str,
+    symbol_map: Dict[str, Any],
+    token_map: Dict[str, Any],
+    max_model_tokens: int,
+    wrapper_overhead: int,
+) -> PreparedPair:
+    """
+    All CPU-side work for one pair: normalize, SES, file read, token count.
+    Runs in a prefetch thread while GPU handles the previous pair.
+    """
+    src_norm = normalize_path(srcpath)
+    tgt_norm = normalize_path(tgtpath)
+    src_is_ses = src_norm in symbol_map
+    tgt_is_ses = tgt_norm in symbol_map
+
+    def _get_tokens(path_norm: str, is_ses: bool) -> int:
+        data = token_map.get(path_norm, {})
+        if is_ses:
+            val = data.get("ses_tokens", data.get("tokens"))
+        else:
+            val = data.get("full_tokens", data.get("tokens"))
+        return val if val is not None else 0
+
+    stokens = _get_tokens(src_norm, src_is_ses)
+    ttokens = _get_tokens(tgt_norm, tgt_is_ses)
+
+    # Token limit pre-check
+    if stokens > 0 and ttokens > 0:
+        total_est = stokens + ttokens + wrapper_overhead
+        if total_est > max_model_tokens:
+            return PreparedPair(
+                srckey=srckey,
+                srcpath=srcpath,
+                tgtkey=tgtkey,
+                tgtpath=tgtpath,
+                srccontent="",
+                tgtcontent="",
+                srcbase="",
+                tgtbase="",
+                stokens=stokens,
+                ttokens=ttokens,
+                skip=True,
+                skip_reason=f"Combined tokens {total_est} exceed limit {max_model_tokens}",
+            )
+
+    # File reads
+    try:
+        with open(srcpath, "r", encoding="utf-8", errors="ignore") as f:
+            srccontent = f.read()
+        with open(tgtpath, "r", encoding="utf-8", errors="ignore") as f:
+            tgtcontent = f.read()
+    except Exception as e:
+        return PreparedPair(
+            srckey=srckey,
+            srcpath=srcpath,
+            tgtkey=tgtkey,
+            tgtpath=tgtpath,
+            srccontent="",
+            tgtcontent="",
+            srcbase="",
+            tgtbase="",
+            stokens=stokens,
+            ttokens=ttokens,
+            skip=True,
+            skip_reason=f"File read error: {e}",
+        )
+
+    srcbase = os.path.basename(srcpath)
+    tgtbase = os.path.basename(tgtpath)
+
+    # SES substitution
+    if src_is_ses:
+        srccontent = generate_symbol_essence_string(
+            src_norm, symbol_map[src_norm], symbol_map=symbol_map
+        )
+        srcbase = f"{srcbase} (SES)"
+    if tgt_is_ses:
+        tgtcontent = generate_symbol_essence_string(
+            tgt_norm, symbol_map[tgt_norm], symbol_map=symbol_map
+        )
+        tgtbase = f"{tgtbase} (SES)"
+
+    return PreparedPair(
+        srckey=srckey,
+        srcpath=srcpath,
+        tgtkey=tgtkey,
+        tgtpath=tgtpath,
+        srccontent=srccontent,
+        tgtcontent=tgtcontent,
+        srcbase=srcbase,
+        tgtbase=tgtbase,
+        stokens=stokens,
+        ttokens=ttokens,
+    )
+
+
 def handle_resolve_placeholders(args: argparse.Namespace) -> int:
     """
     Resolve placeholders using Local LLM in batches.
@@ -2481,103 +2599,136 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
     start_time = time.time()
 
-    for src_key, src_path, tgt_key, tgt_path in tasks:
-        try:
-            # Check token limits before reading files
-            src_norm = normalize_path(src_path)
-            tgt_norm = normalize_path(tgt_path)
+    # ─────────────────────────────────────────────────
+    # PIPELINED INFERENCE LOOP
+    # ─────────────────────────────────────────────────
 
-            src_is_ses = src_norm in symbol_map
-            tgt_is_ses = tgt_norm in symbol_map
+    PREFETCH_AHEAD = 5
+    processed_count = 0
+    total_processed = 0
 
-            s_tokens = get_tokens(src_norm, src_is_ses)
-            t_tokens = get_tokens(tgt_norm, tgt_is_ses)
+    def _process_single_prepared(prepared: PreparedPair) -> None:
+        """
+        Inner body for both main loop and drain loop.
+        Processes a prepared pair (LLM inference + checklist + batching).
+        """
+        nonlocal processed_count, total_processed
 
-            # If we have token counts, check limit
-            if s_tokens > 0 and t_tokens > 0:
-                total_est = s_tokens + t_tokens + WRAPPER_OVERHEAD
-                if total_est > MAX_MODEL_TOKENS:
-                    logger.warning(
-                        f"Skipping {src_key} -> {tgt_key}: Combined tokens ({total_est}) "
-                        f"exceed limit ({MAX_MODEL_TOKENS})."
-                    )
-                    print(
-                        f"Skipping {src_key} -> {tgt_key}: Tokens {total_est} > {MAX_MODEL_TOKENS}"
-                    )
-                    continue
-
-            with open(src_path, "r", encoding="utf-8", errors="ignore") as f:
-                src_content = f.read()
-            with open(tgt_path, "r", encoding="utf-8", errors="ignore") as f:
-                tgt_content = f.read()
-
-            src_base = os.path.basename(src_path)
-            tgt_base = os.path.basename(tgt_path)
-
+        total_processed += 1
+        if prepared.skip:
+            logger.warning(
+                f"[{total_processed}/{len(tasks)}] Skipping {prepared.srckey} -> {prepared.tgtkey}: {prepared.skip_reason}"
+            )
             print(
-                f"[{total_processed+1}/{len(tasks)}] analyzing {src_key} -> {tgt_key}..."
+                f"[{total_processed}/{len(tasks)}] Skipping {prepared.srckey} -> {prepared.tgtkey}: {prepared.skip_reason}"
+            )
+            return
+
+        print(
+            f"[{total_processed}/{len(tasks)}] analyzing {prepared.srckey} -> {prepared.tgtkey}..."
+        )
+
+        char, reasoning = processor.determine_dependency(
+            source_content=prepared.srccontent,
+            target_content=prepared.tgtcontent,
+            source_basename=prepared.srcbase,
+            target_basename=prepared.tgtbase,
+            source_tokens=prepared.stokens if prepared.stokens > 0 else None,
+            target_tokens=prepared.ttokens if prepared.ttokens > 0 else None,
+        )
+
+        print(f"  Result: {char}")
+        print(f"--- LLM Reasoning ---\n{reasoning}\n---------------------")
+
+        try:
+            add_code_doc_dependency_to_checklist(
+                source_key_str=prepared.srckey,
+                target_key_str=prepared.tgtkey,
+                dep_type_char=char,
+                justification=reasoning.strip(),
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to add dependency {prepared.srckey} -> {prepared.tgtkey} to checklist: {e}"
             )
 
-            # If using SES, update content and basename for the processor
-            if src_is_ses:
-                src_content = generate_symbol_essence_string(
-                    src_norm, symbol_map[src_norm], symbol_map=symbol_map
-                )
-                src_base += " (SES)"
+        batch_suggestions[prepared.srckey].append((prepared.tgtkey, char))
+        processed_count += 1
 
-            if tgt_is_ses:
-                tgt_content = generate_symbol_essence_string(
-                    tgt_norm, symbol_map[tgt_norm], symbol_map=symbol_map
-                )
-                tgt_base += " (SES)"
-
-            result = processor.determine_dependency(
-                source_content=src_content,
-                target_content=tgt_content,
-                source_basename=src_base,
-                target_basename=tgt_base,
-                source_tokens=s_tokens if s_tokens > 0 else None,
-                target_tokens=t_tokens if t_tokens > 0 else None,
+        if processed_count >= 10:
+            print(
+                f"Submitting batch of {processed_count} updates to background thread..."
             )
-            char, reasoning = result
-            print(f"\nDependency Result: {char}")
-            print(f"\n--- LLM Reasoning ---\n{reasoning}\n---------------------")
+            suggestions_copy = {k: v[:] for k, v in batch_suggestions.items()}
+            future = commit_executor.submit(
+                background_commit,
+                tracker_path,
+                global_map,
+                tracker_type,
+                suggestions_copy,
+            )
+            commit_futures.append(future)
+            batch_suggestions.clear()
+            processed_count = 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as prefetch_executor:
+        task_iter = iter(tasks)
+
+        def _submit_next(
+            pair: Tuple[str, str, str, str],
+        ) -> concurrent.futures.Future[PreparedPair]:
+            sk, sp, tk, tp = pair
+            return prefetch_executor.submit(
+                _prepare_pair,
+                sk,
+                sp,
+                tk,
+                tp,
+                symbol_map,
+                token_map,
+                MAX_MODEL_TOKENS,
+                WRAPPER_OVERHEAD,
+            )
+
+        # Seed the queue
+        prefetch_queue: deque[concurrent.futures.Future[PreparedPair]] = deque()
+        for pair in itertools.islice(task_iter, PREFETCH_AHEAD):
+            prefetch_queue.append(_submit_next(pair))
+
+        # Main Loop: Overlap CPU work for next_pair with GPU work for popped prepared pair
+        for next_pair in task_iter:
+            prefetch_queue.append(_submit_next(next_pair))
+            future = prefetch_queue.popleft()
+            try:
+                prepared = future.result()
+            except Exception as e:
+                logger.error(f"Error loading pair from prefetch: {e}")
+                total_processed += 1
+                continue
 
             try:
-                add_code_doc_dependency_to_checklist(
-                    source_key_str=src_key,
-                    target_key_str=tgt_key,
-                    dep_type_char=char,
-                    justification=reasoning.strip(),
-                )
+                _process_single_prepared(prepared)
             except Exception as e:
                 logger.error(
-                    f"Failed to add dependency {src_key} -> {tgt_key} to checklist: {e}"
+                    f"Error processing pair {prepared.srckey}->{prepared.tgtkey}: {e}"
                 )
 
-            # Add to batch (KEY#GI format is handled by src_key being from tracker which usually has correct format)
-            batch_suggestions[src_key].append((tgt_key, char))
-            processed_count += 1
-            total_processed += 1
+        # Drain Loop: Finish remaining items in the pipeline
+        while prefetch_queue:
+            future = prefetch_queue.popleft()
+            try:
+                prepared = future.result()
+            except Exception as e:
+                logger.error(f"Error loading pair from prefetch (drain): {e}")
+                total_processed += 1
+                continue
 
-            if processed_count >= 10:
-                print("Submitting batch of 10 updates to background thread...")
-                suggestions_copy = {k: v[:] for k, v in batch_suggestions.items()}
-                future = commit_executor.submit(
-                    background_commit,
-                    tracker_path,
-                    global_map,
-                    tracker_type,
-                    suggestions_copy,
+            try:
+                _process_single_prepared(prepared)
+            except Exception as e:
+                logger.error(
+                    f"Error processing pair {prepared.srckey}->{prepared.tgtkey} (drain): {e}"
                 )
-                commit_futures.append(future)
-
-                batch_suggestions.clear()
-                processed_count = 0
-
-        except Exception as e:
-            logger.error(f"Error processing pair {src_key}->{tgt_key}: {e}")
-            continue
 
     # Final Commit
     if processed_count > 0:
