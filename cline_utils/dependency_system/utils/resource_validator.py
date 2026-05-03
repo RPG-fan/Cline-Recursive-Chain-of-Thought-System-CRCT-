@@ -17,19 +17,22 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
 
 from ..core.exceptions_enhanced import DiskSpaceError, MemoryLimitError, log_and_reraise
 from ..utils.path_utils import normalize_path
 
 # Try to import torch for VRAM management
 try:
-    import torch
+    import torch as _torch
 
-    TORCH_AVAILABLE: bool = True
+    torch = _torch
+    _torch_available: bool = True
 except ImportError:
-    TORCH_AVAILABLE = False
+    _torch_available = False
     torch = None
+
+TORCH_AVAILABLE = _torch_available
 
 logger = logging.getLogger(__name__)
 
@@ -312,7 +315,10 @@ class ResourceValidator:
                 "recommendations": [],
             }
             self.validation_results = results_err
-            raise log_and_reraise(logger, e, "resource_validation")
+            exc = log_and_reraise(logger, e, "resource_validation", reraise=False)
+            if exc:
+                raise exc
+            raise e  # Fallback if exc is somehow None
 
     def _validate_memory(self) -> Dict[str, Any]:
         """Validate system memory availability."""
@@ -589,14 +595,15 @@ class ResourceValidator:
             check_result["gpu_count"] = gpu_count
 
             if gpu_count > 0:
-                props = torch.cuda.get_device_properties(0)
-                check_result["gpu_name"] = props.name
-                total_bytes = props.total_memory
+                props = cast(Any, torch.cuda).get_device_properties(0)
+                check_result["gpu_name"] = str(getattr(props, "name", "Unknown GPU"))
+                total_bytes = float(getattr(props, "total_memory", 0))
                 check_result["vram_total_mb"] = round(total_bytes / (1024 * 1024), 2)
 
                 try:
                     torch.cuda.synchronize()
-                    free_bytes, _ = torch.cuda.mem_get_info(0)
+                    free_bytes_raw, _ = torch.cuda.mem_get_info(0)
+                    free_bytes = float(free_bytes_raw)
                     check_result["vram_available_mb"] = round(
                         free_bytes / (1024 * 1024), 2
                     )
@@ -623,8 +630,85 @@ class ResourceValidator:
         except Exception as e:
             logger.warning(f"GPU validation failed: {e}")
             check_result["gpu_available"] = False
-
         return check_result
+
+    def wait_for_vram_release(
+        self,
+        target_free_mb: float,
+        poll_interval: float = 0.5,
+        stall_tolerance: int = 3,
+        hard_cap_seconds: float = 120.0,
+    ) -> bool:
+        """
+        Polls VRAM usage until at least `target_free_mb` is available or convergence occurs.
+
+        Args:
+            target_free_mb: Target available VRAM in MB.
+            poll_interval: Time between polls in seconds.
+            stall_tolerance: Number of consecutive polls without growth to consider converged.
+            hard_cap_seconds: Absolute maximum time to wait in seconds.
+
+        Returns:
+            True if target VRAM is available, False if timed out or stalled.
+        """
+        if not TORCH_AVAILABLE or torch is None or not torch.cuda.is_available():
+            return False
+
+        torch.cuda.empty_cache()  # Flush allocator cache to driver immediately
+
+        def _query_free_mb() -> Optional[float]:
+            if torch is None or not hasattr(torch, "cuda"):
+                return None
+            try:
+                torch.cuda.synchronize()
+                free_bytes, _ = torch.cuda.mem_get_info(0)
+                return float(free_bytes) / (1024 * 1024)
+            except Exception as e:
+                logger.debug(f"VRAM query failed: {e}")
+                return None
+
+        start_time = time.time()
+        prev_free_mb = _query_free_mb() or 0.0
+        stall_count = 0
+
+        while True:
+            elapsed = time.time() - start_time
+
+            if elapsed >= hard_cap_seconds:
+                logger.warning(
+                    f"VRAM wait hit hard cap ({hard_cap_seconds}s). "
+                    f"Last free: {prev_free_mb:.1f} MB, "
+                    f"target: {target_free_mb:.1f} MB."
+                )
+                return False
+
+            time.sleep(poll_interval)
+            free_mb = _query_free_mb()
+
+            if free_mb is None:
+                stall_count += 1
+            else:
+                # EXACT VERIFICATION — target is a known baseline, not an estimate
+                if free_mb >= target_free_mb:
+                    logger.debug(
+                        f"VRAM verified: {free_mb:.1f} MB free >= "
+                        f"target {target_free_mb:.1f} MB. "
+                        f"Elapsed: {elapsed:.2f}s."
+                    )
+                    return True
+
+                growth = free_mb - prev_free_mb
+                stall_count = 0 if growth > 0 else stall_count + 1
+                prev_free_mb = free_mb
+
+            if stall_count >= stall_tolerance:
+                logger.warning(
+                    f"VRAM converged at {prev_free_mb:.1f} MB "
+                    f"(target: {target_free_mb:.1f} MB, "
+                    f"delta: {target_free_mb - prev_free_mb:.1f} MB not reclaimed). "
+                    f"Elapsed: {elapsed:.2f}s."
+                )
+                return False
 
     def _validate_project_specific(
         self, project_path: str, estimated_files: int
@@ -711,7 +795,7 @@ class ResourceValidator:
         """Calculate maximum directory depth."""
         max_depth_found = 0
 
-        for root, dirs, files in os.walk(path):
+        for root, _, _ in os.walk(path):
             try:
                 relative_depth = len(Path(root).relative_to(path).parts)
                 max_depth_found = max(max_depth_found, relative_depth)
@@ -724,7 +808,7 @@ class ResourceValidator:
         self, validation_results: Dict[str, Any]
     ) -> list[str]:
         """Generate recommendations based on validation results."""
-        recommendations = []
+        recommendations: list[str] = []
 
         memory_check = validation_results["resource_check"].get("memory", {})
         disk_check = validation_results["resource_check"].get("disk_space", {})
@@ -766,7 +850,7 @@ class ResourceValidator:
                 "error": "No validation results available. Run validate_system_resources() first."
             }
 
-        suggestions = {
+        suggestions: Dict[str, List[str]] = {
             "memory_optimization": [],
             "performance_optimization": [],
             "storage_optimization": [],
@@ -878,7 +962,7 @@ class VRAMResourceManager:
         "mpnet_base": 0.5,
     }
 
-    def __new__(cls, *args, **kwargs) -> "VRAMResourceManager":
+    def __new__(cls, *args: Any, **kwargs: Any) -> "VRAMResourceManager":
         """Ensure singleton pattern."""
         if cls._instance is None:
             with cls._instance_lock:
@@ -1306,8 +1390,8 @@ class VRAMBatchScheduler:
 
     def submit_batch(
         self,
-        batch_func: Callable,
-        batch_args: tuple = (),
+        batch_func: Callable[..., Any],
+        batch_args: tuple[Any, ...] = (),
         batch_kwargs: Optional[Dict[str, Any]] = None,
         vram_required_gb: float = 1.0,
         priority: int = 1,
@@ -1335,7 +1419,7 @@ class VRAMBatchScheduler:
             self._batch_counter += 1
             batch_id = f"batch_{self._batch_counter}_{int(time.time() * 1000)}"
 
-            batch_info = {
+            batch_info: Dict[str, Any] = {
                 "batch_id": batch_id,
                 "func": batch_func,
                 "args": batch_args,
@@ -1390,8 +1474,10 @@ class VRAMBatchScheduler:
 
             # Get next batch
             batch_info = self._pending_batches.pop(0)
-            batch_id = batch_info["batch_id"]
-            vram_required = batch_info["vram_required_gb"]
+            batch_id = str(batch_info["batch_id"])
+            vram_required = float(batch_info["vram_required_gb"])
+
+            alloc_id: Optional[str] = None
 
             # Request VRAM allocation
             allocated, alloc_id = self._vram_manager.request_allocation(
@@ -1426,7 +1512,8 @@ class VRAMBatchScheduler:
             batch_info["failed_at"] = time.time()
         finally:
             # Release VRAM
-            self._vram_manager.release_allocation(alloc_id)
+            if alloc_id:
+                self._vram_manager.release_allocation(alloc_id)
 
             with self._lock:
                 self._running_batches.discard(batch_id)
