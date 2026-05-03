@@ -11,9 +11,7 @@ import logging
 import os
 import subprocess
 import sys
-from collections import defaultdict, deque
-from dataclasses import dataclass
-import itertools
+from collections import defaultdict
 from logging import LogRecord
 from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
 
@@ -541,155 +539,6 @@ def handle_get_char(args: argparse.Namespace) -> int:
     except Exception as e:
         logger.error(f"Error get_char: {e}")
         print(f"Error: {e}")
-        return 1
-
-
-def handle_set_char(args: argparse.Namespace) -> int:
-    # --- ADDED CRITICAL WARNING ---
-    critical_message = (
-        "CRITICAL WARNING: The 'set_char' command is DEPRECATED and EXTREMELY DANGEROUS "
-        "with the current tracker format. It operates on an outdated understanding of grid structure "
-        "and can EASILY CORRUPT tracker files. It assumes the key you provide uniquely identifies a row, "
-        "and the index refers to an Nth unique key. This is no longer true. "
-        "USE 'add-dependency --tracker <file> --source-key <KEY#GI> --target-key <KEY#GI> --dep-type <char>' INSTEAD "
-        "for targeted changes. PROCEEDING WITH 'set_char' IS AT YOUR OWN RISK AND LIKELY TO BREAK THINGS. "
-        "This command will attempt a best-effort conversion but is not guaranteed to be safe or accurate."
-    )
-    logger.critical(critical_message)
-    print(critical_message)
-    # --- END OF ADDED CRITICAL WARNING ---
-
-    try:
-        tracker_file_path = normalize_path(args.tracker_file)
-        if not os.path.exists(tracker_file_path):
-            print(f"Error: Tracker file not found: {tracker_file_path}")
-            return 1
-
-        with open(tracker_file_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-
-        # Use tracker_io's parsing functions
-        defs_pairs: List[Tuple[str, str]] = read_key_definitions_from_lines(lines)
-        _grid_hdrs, grid_rows_list = read_grid_from_lines(lines)
-
-        # Find the first definition matching args.key to get its path and original index
-        source_row_original_idx = -1
-        source_path_targetted: Optional[str] = None
-        # The key from args.key is a KEY_LABEL from the tracker file (could be KEY or KEY#GI)
-        for idx, (k_label_in_file, p_str) in enumerate(defs_pairs):
-            if k_label_in_file == args.key:
-                source_row_original_idx = idx
-                source_path_targetted = p_str
-                break
-
-        if source_row_original_idx == -1 or source_path_targetted is None:
-            print(
-                f"Error: Source key label '{args.key}' not found in tracker definitions."
-            )
-            return 1
-
-        if source_row_original_idx >= len(grid_rows_list):
-            print(
-                f"Error: Grid data for source key label '{args.key}' (def index {source_row_original_idx}) seems missing or tracker is corrupt."
-            )
-            return 1
-
-        target_col_logical_index = (
-            args.index
-        )  # This index refers to the Nth definition in the *original* file
-        if not (0 <= target_col_logical_index < len(defs_pairs)):
-            print(
-                f"Error: Target column index {target_col_logical_index} is out of range for {len(defs_pairs)} definitions."
-            )
-            return 1
-
-        _target_pair = cast(Tuple[str, str], defs_pairs[target_col_logical_index])
-        target_path_targetted: str = _target_pair[1]
-        target_key_label_targetted: str = _target_pair[0]
-
-        print(
-            f"\n--- Attempting to set relationship for paths (via low-level 'set_char' command) ---"
-        )
-        print(
-            f"  Source (from tracker def): '{args.key}' (Path: {source_path_targetted})"
-        )
-        print(
-            f"  Target (from tracker def): '{target_key_label_targetted}' (Path: {target_path_targetted}) at original column index {target_col_logical_index}"
-        )
-        print(f"  New Char to set: '{args.char}'")
-        print(
-            f"-------------------------------------------------------------------------------------\n"
-        )
-
-        global_map = _load_global_map_or_exit()
-
-        # Find the KeyInfo for source and target paths to get their current global keys
-        src_ki_global = global_map.get(source_path_targetted)
-        tgt_ki_global = global_map.get(target_path_targetted)
-
-        if not src_ki_global:
-            print(
-                f"Error: Source path '{source_path_targetted}' (from key '{args.key}') not found in current global map. Aborting 'set_char'."
-            )
-            return 1
-        if not tgt_ki_global:
-            print(
-                f"Error: Target path '{target_path_targetted}' (from target key label '{target_key_label_targetted}') not found in current global map. Aborting 'set_char'."
-            )
-            return 1
-
-        # Construct KEY#GI strings for the suggestion
-        source_key_for_sugg = get_key_global_instance_string(src_ki_global, global_map)
-        target_key_for_sugg = get_key_global_instance_string(tgt_ki_global, global_map)
-
-        if not source_key_for_sugg or not target_key_for_sugg:
-            print(
-                "Error: Could not determine KEY#GlobalInstance for source or target. Aborting 'set_char'."
-            )
-            return 1
-
-        suggestions_for_set_char = {
-            source_key_for_sugg: [(target_key_for_sugg, args.char)]
-        }
-
-        is_mini = tracker_file_path.endswith("_module.md")
-        tracker_type_val = (
-            "mini"
-            if is_mini
-            else (
-                "doc"
-                if "doc_tracker.md" in os.path.basename(tracker_file_path)
-                else "main"
-            )
-        )
-        f_to_m_map = {
-            _info.norm_path: _info.parent_path
-            for _info in global_map.values()
-            if not _info.is_directory and _info.parent_path
-        }
-
-        update_tracker(
-            output_file_suggestion=tracker_file_path,
-            path_to_key_info=global_map,
-            tracker_type=tracker_type_val,
-            suggestions_external=suggestions_for_set_char,
-            file_to_module=f_to_m_map,
-            force_apply_suggestions=True,  # Force this specific change
-            apply_ast_overrides=False,  # <<< MODIFIED/ADDED
-        )
-        print(
-            f"Applied 'set_char' for source '{args.key}' targeting original column index {args.index} with char '{args.char}' "
-            f"in {tracker_file_path} via forced update. VERIFY THE RESULT CAREFULLY in the tracker file."
-        )
-        return 0
-
-    except Exception as e:
-        logger.error(
-            f"Error during 'set_char' for {args.tracker_file}: {e}", exc_info=True
-        )
-        print(
-            f"Error during 'set_char': {e}. The tracker might be in an inconsistent state."
-        )
         return 1
 
 
@@ -1926,20 +1775,7 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
         return 1
 
 
-@dataclass
-class PreparedPair:
-    srckey: str
-    srcpath: str
-    tgtkey: str
-    tgtpath: str
-    srccontent: str
-    tgtcontent: str
-    srcbase: str
-    tgtbase: str
-    stokens: int
-    ttokens: int
-    skip: bool = False
-    skip_reason: Optional[str] = None
+from cline_utils.dependency_system.utils.placeholder_resolver import PreparedPair
 
 
 def _prepare_pair(
@@ -2046,7 +1882,6 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
     """
     Resolve placeholders using Local LLM in batches.
     """
-    import time
 
     if not hasattr(args, "_processed_pairs"):
         args._processed_pairs = set()
@@ -2491,270 +2326,23 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
     processor = LocalLLMProcessor(model_path=model_path)
 
-    import concurrent.futures
+    from cline_utils.dependency_system.utils.placeholder_resolver import (
+        PlaceholderResolver,
+    )
 
-    commit_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    commit_futures: List[concurrent.futures.Future[None]] = []
+    resolver = PlaceholderResolver(processor)
 
-    def background_commit(
-        b_tracker_path: str,
-        b_path_to_key_info: Dict[str, KeyInfo],
-        b_tracker_type: str,
-        b_suggestions: Dict[str, List[Tuple[str, str]]],
-    ) -> None:
-        try:
-            update_data = update_tracker(
-                output_file_suggestion=b_tracker_path,
-                path_to_key_info=b_path_to_key_info,
-                tracker_type=b_tracker_type,
-                suggestions_external=b_suggestions,
-                return_update=True,
-                force_apply_suggestions=True,
-                apply_ast_overrides=False,
-            )
-            if update_data:
-                t_update = None
-                out_path = update_data.get("output_file", b_tracker_path)
-                if b_tracker_type == "mini":
-                    t_update = create_mini_tracker_update(
-                        output_file=out_path,
-                        key_info_list=update_data["key_info_list"],
-                        grid_rows=update_data["grid_rows"],
-                        last_key_edit=update_data["last_key_edit"],
-                        last_grid_edit=update_data["last_grid_edit"],
-                        module_path=update_data.get("module_path", ""),
-                        path_to_key_info=update_data.get(
-                            "path_to_key_info", b_path_to_key_info
-                        ),
-                        existing_lines=update_data.get("existing_lines", []),
-                        tracker_exists=update_data.get("tracker_exists", False),
-                        ast_overrides_applied_count=update_data.get(
-                            "ast_overrides_applied_count", 0
-                        ),
-                        suggestion_applied_count=update_data.get(
-                            "suggestion_applied_count", 0
-                        ),
-                        structural_deps_applied_count=update_data.get(
-                            "structural_deps_applied_count", 0
-                        ),
-                    )
-                elif b_tracker_type == "doc":
-                    t_update = create_doc_tracker_update(
-                        output_file=out_path,
-                        key_info_list=update_data["key_info_list"],
-                        grid_rows=update_data["grid_rows"],
-                        last_key_edit=update_data["last_key_edit"],
-                        last_grid_edit=update_data["last_grid_edit"],
-                        path_to_key_info=update_data.get(
-                            "path_to_key_info", b_path_to_key_info
-                        ),
-                        ast_overrides_applied_count=update_data.get(
-                            "ast_overrides_applied_count", 0
-                        ),
-                        suggestion_applied_count=update_data.get(
-                            "suggestion_applied_count", 0
-                        ),
-                        structural_deps_applied_count=update_data.get(
-                            "structural_deps_applied_count", 0
-                        ),
-                    )
-                else:  # main
-                    t_update = create_main_tracker_update(
-                        output_file=out_path,
-                        key_info_list=update_data["key_info_list"],
-                        grid_rows=update_data["grid_rows"],
-                        last_key_edit=update_data["last_key_edit"],
-                        last_grid_edit=update_data["last_grid_edit"],
-                        path_to_key_info=update_data.get(
-                            "path_to_key_info", b_path_to_key_info
-                        ),
-                        ast_overrides_applied_count=update_data.get(
-                            "ast_overrides_applied_count", 0
-                        ),
-                        suggestion_applied_count=update_data.get(
-                            "suggestion_applied_count", 0
-                        ),
-                        structural_deps_applied_count=update_data.get(
-                            "structural_deps_applied_count", 0
-                        ),
-                    )
-
-                if t_update:
-                    thread_collector = TrackerBatchCollector()
-                    thread_collector.add(t_update)
-                    thread_collector.commit_all()
-                else:
-                    print(
-                        "Error: Failed to create tracker update object in background thread."
-                    )
-            else:
-                print("Error: Failed to generate update data")
-        except Exception as e:
-            logger.error(f"Error processing background commit: {e}", exc_info=True)
-            print(f"Error processing background commit: {e}")
-
-    batch_suggestions: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
-    processed_count = 0
-    total_processed = 0
-
-    start_time = time.time()
-
-    # ─────────────────────────────────────────────────
-    # PIPELINED INFERENCE LOOP
-    # ─────────────────────────────────────────────────
-
-    PREFETCH_AHEAD = 5
-    processed_count = 0
-    total_processed = 0
-
-    def _process_single_prepared(prepared: PreparedPair) -> None:
-        """
-        Inner body for both main loop and drain loop.
-        Processes a prepared pair (LLM inference + checklist + batching).
-        """
-        nonlocal processed_count, total_processed
-
-        total_processed += 1
-        if prepared.skip:
-            logger.warning(
-                f"[{total_processed}/{len(tasks)}] Skipping {prepared.srckey} -> {prepared.tgtkey}: {prepared.skip_reason}"
-            )
-            print(
-                f"[{total_processed}/{len(tasks)}] Skipping {prepared.srckey} -> {prepared.tgtkey}: {prepared.skip_reason}"
-            )
-            return
-
-        print(
-            f"[{total_processed}/{len(tasks)}] analyzing {prepared.srckey} -> {prepared.tgtkey}..."
+    def _prepare_wrapper(sk: str, sp: str, tk: str, tp: str) -> PreparedPair:
+        return _prepare_pair(
+            sk, sp, tk, tp, symbol_map, token_map, MAX_MODEL_TOKENS, WRAPPER_OVERHEAD
         )
 
-        char, reasoning = processor.determine_dependency(
-            source_content=prepared.srccontent,
-            target_content=prepared.tgtcontent,
-            source_basename=prepared.srcbase,
-            target_basename=prepared.tgtbase,
-            source_tokens=prepared.stokens if prepared.stokens > 0 else None,
-            target_tokens=prepared.ttokens if prepared.ttokens > 0 else None,
-        )
-
-        print(f"  Result: {char}")
-        print(f"--- LLM Reasoning ---\n{reasoning}\n---------------------")
-
-        try:
-            add_code_doc_dependency_to_checklist(
-                source_key_str=prepared.srckey,
-                target_key_str=prepared.tgtkey,
-                dep_type_char=char,
-                justification=reasoning.strip(),
-            )
-        except Exception as e:
-            logger.error(
-                f"Failed to add dependency {prepared.srckey} -> {prepared.tgtkey} to checklist: {e}"
-            )
-
-        batch_suggestions[prepared.srckey].append((prepared.tgtkey, char))
-        processed_count += 1
-
-        if processed_count >= 10:
-            print(
-                f"Submitting batch of {processed_count} updates to background thread..."
-            )
-            suggestions_copy = {k: v[:] for k, v in batch_suggestions.items()}
-            future = commit_executor.submit(
-                background_commit,
-                tracker_path,
-                global_map,
-                tracker_type,
-                suggestions_copy,
-            )
-            commit_futures.append(future)
-            batch_suggestions.clear()
-            processed_count = 0
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as prefetch_executor:
-        task_iter = iter(tasks)
-
-        def _submit_next(
-            pair: Tuple[str, str, str, str],
-        ) -> concurrent.futures.Future[PreparedPair]:
-            sk, sp, tk, tp = pair
-            return prefetch_executor.submit(
-                _prepare_pair,
-                sk,
-                sp,
-                tk,
-                tp,
-                symbol_map,
-                token_map,
-                MAX_MODEL_TOKENS,
-                WRAPPER_OVERHEAD,
-            )
-
-        # Seed the queue
-        prefetch_queue: deque[concurrent.futures.Future[PreparedPair]] = deque()
-        for pair in itertools.islice(task_iter, PREFETCH_AHEAD):
-            prefetch_queue.append(_submit_next(pair))
-
-        # Main Loop: Overlap CPU work for next_pair with GPU work for popped prepared pair
-        for next_pair in task_iter:
-            prefetch_queue.append(_submit_next(next_pair))
-            future = prefetch_queue.popleft()
-            try:
-                prepared = future.result()
-            except Exception as e:
-                logger.error(f"Error loading pair from prefetch: {e}")
-                total_processed += 1
-                continue
-
-            try:
-                _process_single_prepared(prepared)
-            except Exception as e:
-                logger.error(
-                    f"Error processing pair {prepared.srckey}->{prepared.tgtkey}: {e}"
-                )
-
-        # Drain Loop: Finish remaining items in the pipeline
-        while prefetch_queue:
-            future = prefetch_queue.popleft()
-            try:
-                prepared = future.result()
-            except Exception as e:
-                logger.error(f"Error loading pair from prefetch (drain): {e}")
-                total_processed += 1
-                continue
-
-            try:
-                _process_single_prepared(prepared)
-            except Exception as e:
-                logger.error(
-                    f"Error processing pair {prepared.srckey}->{prepared.tgtkey} (drain): {e}"
-                )
-
-    # Final Commit
-    if processed_count > 0:
-        print(
-            f"Submitting final batch of {processed_count} updates to background thread..."
-        )
-        suggestions_copy = {k: v[:] for k, v in batch_suggestions.items()}
-        future = commit_executor.submit(
-            background_commit, tracker_path, global_map, tracker_type, suggestions_copy
-        )
-        commit_futures.append(future)
-
-    if commit_futures:
-        print(f"Waiting for {len(commit_futures)} background commits to complete...")
-        for future in concurrent.futures.as_completed(commit_futures):
-            try:
-                future.result()
-            except Exception as e:
-                print(f"Error in background commit: {e}")
-                logger.error(f"Error in background commit: {e}", exc_info=True)
-
-    commit_executor.shutdown()
-
-    elapsed = time.time() - start_time
-    print(
-        f"Batch processing for {os.path.basename(tracker_path)} complete. Resolved {total_processed} items in {elapsed:.2f}s."
+    total_processed = resolver.resolve_batch(
+        tasks=tasks,
+        tracker_path=tracker_path,
+        global_map=global_map,
+        tracker_type=tracker_type,
+        prepare_func=_prepare_wrapper,
     )
 
     actual_processed = total_processed + (len(algo_tasks) if algo_tasks else 0)
@@ -2831,24 +2419,6 @@ def main():
     get_char_parser.add_argument("string", help="Compressed string")
     get_char_parser.add_argument("index", type=int, help="Logical index")
     get_char_parser.set_defaults(func=handle_get_char)
-
-    set_char_parser = subparsers.add_parser(
-        "set_char",
-        help="DEPRECATED & UNSAFE: Set char in a tracker file. Use 'add-dependency' instead.",
-    )
-    set_char_parser.add_argument("tracker_file", help="Path to tracker file")
-    set_char_parser.add_argument(
-        "key",
-        type=str,
-        help="Row key label from tracker definitions (e.g., '1A1' or '1A1#2')",
-    )
-    set_char_parser.add_argument(
-        "index",
-        type=int,
-        help="Logical index in row (0-based, refers to Nth definition in tracker's original order)",
-    )
-    set_char_parser.add_argument("char", type=str, help="New character")
-    set_char_parser.set_defaults(func=handle_set_char)
 
     add_dep_parser = subparsers.add_parser(
         "add-dependency",
