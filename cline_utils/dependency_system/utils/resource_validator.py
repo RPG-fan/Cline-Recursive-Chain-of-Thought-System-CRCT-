@@ -973,7 +973,7 @@ class VRAMResourceManager:
 
     # Model footprint estimates (GB)
     MODEL_FOOTPRINTS = {
-        "qwen3_reranker_0.6b": 0.07,
+        "qwen3_reranker_0.6b": 0.7,
         "qwen3_embedding_4b": 3.5,
         "mpnet_base": 0.5,
     }
@@ -1069,7 +1069,7 @@ class VRAMResourceManager:
             return 0.0
         return max(
             physical * self._reservation_percent,
-            self.MODEL_FOOTPRINTS.get("qwen3_reranker_0.6b", 0.07)
+            self.MODEL_FOOTPRINTS.get("qwen3_reranker_0.6b", 0.7)
             + self._safety_buffer_gb,
         )
 
