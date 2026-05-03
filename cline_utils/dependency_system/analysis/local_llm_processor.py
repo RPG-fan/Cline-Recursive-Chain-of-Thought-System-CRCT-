@@ -4,7 +4,7 @@ import gc
 import logging
 import os
 import re
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 
@@ -23,6 +23,10 @@ class LocalLLMProcessor:
     Handles local LLM interactions to determine dependencies between files.
     """
 
+    # Empirical constant for VRAM estimation: ~125MB of VRAM consumed per offloaded GPU layer
+    # for the Qwen3-4B-Instruct-2507-Q8_0.gguf model. Scales linearly with layer count.
+    MB_PER_LAYER = 125
+
     def __init__(self, model_path: str, n_ctx: int = 2048):
         super().__init__()
         self.model_path = model_path
@@ -31,6 +35,9 @@ class LocalLLMProcessor:
         self._current_n_gpu_layers: int = 0
         self._model: Optional[Any] = None
         self._pinned_state: Optional[Any] = None
+        self._repair_log_file: Optional[str] = None
+        self._repair_logger: Optional[logging.Logger] = None
+        self._vram_baseline_mb: Optional[float] = None
 
         # Setup repair logging
         self._setup_repair_logging()
@@ -47,7 +54,10 @@ class LocalLLMProcessor:
             self._model.load_state(self._pinned_state)
             logger.info("Pinned KV cache state restored.")
 
-    def _load_model(self, required_ctx: int):
+    def _load_model(self, required_ctx: int, n_gpu_layers: Optional[int] = None) -> Any:
+        """
+        Dynamically loads or reloads the local LLM based on context requirements.
+        """
         # Context sizing strategy: dynamic "orbiting" allocation
         # The context window orbits the actual needed size at a fixed radius,
         # both increasing AND decreasing as requirements change.
@@ -94,55 +104,65 @@ class LocalLLMProcessor:
             raise ImportError("llama-cpp-python is not installed.")
 
         # --- Dynamic GPU/CPU Splitting ---
-        n_gpu_layers = -1
-        try:
-            validator = ResourceValidator()
-            gpu_stats = validator.validate_gpu()
-            if gpu_stats.get("gpu_available"):
-                vram_available_mb = gpu_stats.get("vram_available_mb", 0.0)
-                if vram_available_mb > 0:
-                    MB_PER_LAYER = 125
+        if n_gpu_layers is None:
+            n_gpu_layers = -1
+            try:
+                validator = ResourceValidator()
+                gpu_stats = validator.validate_gpu()
+                if gpu_stats.get("gpu_available"):
+                    vram_available_mb = gpu_stats.get("vram_available_mb", 0.0)
+                    if vram_available_mb > 0:
+                        MB_PER_LAYER = self.MB_PER_LAYER
 
-                    # Empirical estimation parameters
-                    base_overhead_mb = 30
-                    mb_per_1k_tokens = 120
+                        # Empirical estimation parameters
+                        # 16-bit KV cache estimate: tokens * 2 (K) * 2 (V) * 32 (hidden_dim/layers approx)
+                        # For 4B/7B models, it's roughly 120MB per 1k tokens.
+                        context_memory_mb = (n_ctx / 1024) * 120
+                        # Add a safety buffer (10% of total VRAM or min 500MB)
+                        safety_buffer_mb = max(500, vram_available_mb * 0.10)
 
-                    safety_buffer_mb = max(
-                        500, vram_available_mb * 0.1
-                    )  # Minimum 500MB safety buffer
-
-                    # Calculate estimated memory for context
-                    context_memory_mb = (
-                        base_overhead_mb + (n_ctx / 1000.0) * mb_per_1k_tokens
-                    )
-
-                    ideal_vram_mb = (
-                        context_memory_mb + (36 * MB_PER_LAYER) + safety_buffer_mb
-                    )
-
-                    if vram_available_mb >= ideal_vram_mb:
-                        n_gpu_layers = 36
-                        vram_ratio = 1.0
-                    else:
-                        # Gradient allocation ensures any free VRAM contributes to GPU layers
-                        # rather than strictly zeroing out if buffer thresholds aren't met
-                        vram_ratio = (
-                            vram_available_mb / ideal_vram_mb
-                            if ideal_vram_mb > 0
-                            else 1.0
+                        available_for_layers = (
+                            vram_available_mb - context_memory_mb - safety_buffer_mb
                         )
-                        n_gpu_layers = max(0, min(36, int(36 * vram_ratio)))
 
-                    logger.info(
-                        f"Dynamic VRAM check: {vram_available_mb}MB free. "
-                        f"Est. Context: {context_memory_mb:.1f}MB, Reserve: {safety_buffer_mb:.1f}MB. "
-                        f"Ratio: {vram_ratio:.2f}. "
-                        f"Assigning {n_gpu_layers} layers to GPU."
-                    )
-        except Exception as e:
-            logger.warning(
-                f"Failed to dynamically calculate VRAM layer split: {e}. Defaulting to full GPU offload."
-            )
+                        if available_for_layers > 0:
+                            n_gpu_layers = int(available_for_layers // MB_PER_LAYER)
+                            # Cap at 36 layers (typical for 4B/7B models)
+                            n_gpu_layers = min(n_gpu_layers, 36)
+
+                            # Safety check: if ratio is too low, don't offload to avoid thrashing
+                            vram_ratio = available_for_layers / vram_available_mb
+                            if vram_ratio < 0.05:
+                                n_gpu_layers = 0
+
+                            logger.info(
+                                f"Dynamic VRAM check: {vram_available_mb:.1f}MB free. "
+                                f"Est. Context: {context_memory_mb:.1f}MB, Reserve: {safety_buffer_mb:.1f}MB. "
+                                f"Ratio: {vram_ratio:.2f}. "
+                                f"Assigning {n_gpu_layers} layers to GPU."
+                            )
+                        else:
+                            n_gpu_layers = 0
+                            logger.info(
+                                "Insufficient VRAM for GPU offloading. Using CPU."
+                            )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to dynamically calculate VRAM layer split: {e}. Defaulting to full GPU offload."
+                )
+                n_gpu_layers = -1
+
+        # Record VRAM baseline before loading to allow for exact verification during close()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+                free_bytes, _ = torch.cuda.mem_get_info(0)
+                self._vram_baseline_mb = free_bytes / (1024 * 1024)
+                logger.debug(
+                    f"VRAM baseline recorded: {self._vram_baseline_mb:.1f} MB free before load."
+                )
+            except Exception as e:
+                logger.debug(f"Failed to record VRAM baseline: {e}")
 
         logger.info(
             f"Loading local LLM from {self.model_path} with n_ctx={n_ctx} and n_gpu_layers={n_gpu_layers}..."
@@ -164,13 +184,40 @@ class LocalLLMProcessor:
         """Get exact token count using the model's tokenizer."""
         model = self._model
         if model is None:
-            model = self._load_model(2048)  # Ensure at least base context loaded
+            # Load a minimal tokenizer-only instance (no GPU layers, tiny context)
+            # This is extremely fast and avoids double-loading a large model just for counting.
+            model = self._load_model(required_ctx=16, n_gpu_layers=0)
         try:
             tokens = model.tokenize(text.encode("utf-8"))
             return len(tokens)
         except Exception as e:
             logger.warning(f"Tokenizer failed: {e}. Falling back to estimate.")
             return len(text) // 3
+
+    # Default response margin for reasoning + result
+    RESPONSE_MARGIN = 520
+
+    def _construct_prompt(
+        self,
+        instructional_prompt: str,
+        source_basename: str,
+        target_basename: str,
+        source_content: str,
+        target_content: str,
+    ) -> str:
+        """
+        Constructs the final prompt string from the provided components.
+        """
+        return (
+            f"<|im_start|>system\n{instructional_prompt}<|im_end|>\n"
+            f"<|im_start|>user\n"
+            f"Source File: {source_basename}\n"
+            f"```\n{source_content}\n```\n\n"
+            f"Target File: {target_basename}\n"
+            f"```\n{target_content}\n```\n"
+            f"<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
 
     def determine_dependency(
         self,
@@ -230,60 +277,47 @@ Expected Output:
 Clear summary of dependency determination in the format dictated in instruction 4.
             """
 
-        # Base overhead for prompt structure
-        # Hardcoded based on measurement of the static template (810) + response margin
-        wrapper_tokens = 810
-        response_margin = 520
-
-        # Initial estimate to decide n_ctx
-        # If tokens provided, use them with a 1.3x margin, otherwise use char count / 3
-        s_est = (
-            int(source_tokens * 1.3) if source_tokens else (len(source_content) // 3)
-        )
-        t_est = (
-            int(target_tokens * 1.3) if target_tokens else (len(target_content) // 3)
-        )
-
-        initial_required = s_est + t_est + wrapper_tokens + response_margin
-        model = self._load_model(initial_required)
+        response_margin = self.RESPONSE_MARGIN
 
         # Now get EXACT counts and truncate if needed to fit in current model's window
         # We use a loop to ensure we fit, as truncation is character-based
         max_attempts = 3
         final_prompt = ""
+        current_source = source_content
+        current_target = target_content
+
+        # Calculate wrapper size once (instruction + formatting overhead)
+        wrapper_prompt = self._construct_prompt(
+            instructional_prompt,
+            source_basename,
+            target_basename,
+            "",
+            "",
+        )
+        wrapper_tokens = self.get_token_count(wrapper_prompt)
+
         for attempt in range(max_attempts):
-            current_prompt = (
-                f"<|im_start|>system\n{instructional_prompt}<|im_end|>\n"
-                f"<|im_start|>user\n"
-                f"Source File: {source_basename}\n"
-                f"```\n{source_content}\n```\n\n"
-                f"Target File: {target_basename}\n"
-                f"```\n{target_content}\n```\n"
-                f"<|im_end|>\n"
-                f"<|im_start|>assistant\n"
+            current_prompt = self._construct_prompt(
+                instructional_prompt,
+                source_basename,
+                target_basename,
+                current_source,
+                current_target,
             )
 
             prompt_tokens = self.get_token_count(current_prompt)
+            required_ctx = prompt_tokens + response_margin
 
-            # Add margin for response
+            # Load/Reload the model only if the current context is insufficient.
+            # On the first call, this reloads the minimal tokenizer into a full inference model.
+            self._load_model(required_ctx)
+
+            # Check if we fit in the (possibly capped) model context
             effective_ctx = self.current_n_ctx - response_margin
 
             if prompt_tokens <= effective_ctx:
                 final_prompt = current_prompt
                 break
-
-            # If attempt 0 fails because of underestimation, try reloading the model with exact requirements
-            if attempt == 0 and prompt_tokens > effective_ctx:
-                exact_required = prompt_tokens + response_margin
-                if self.current_n_ctx < self.max_n_ctx:
-                    logger.info(
-                        f"Context underestimated (prompt: {prompt_tokens}, ctx: {self.current_n_ctx}). Reloading model."
-                    )
-                    model = self._load_model(exact_required)
-                    effective_ctx = self.current_n_ctx - response_margin
-                    if prompt_tokens <= effective_ctx:
-                        final_prompt = current_prompt
-                        break
 
             if attempt == max_attempts - 1:
                 logger.error(
@@ -298,19 +332,29 @@ Clear summary of dependency determination in the format dictated in instruction 
                 f"Prompt tokens ({prompt_tokens}) exceed context window ({self.current_n_ctx}). Truncating attempt {attempt+1}."
             )
 
-            # Allocation proportionality
+            # Allocation proportionality (exact calculation using measured wrapper)
             available_for_files = int((effective_ctx - wrapper_tokens) * 0.95)
-            s_len = len(source_content)
-            t_len = len(target_content)
+            s_len = len(current_source)
+            t_len = len(current_target)
             total_len = s_len + t_len
 
             s_max_chars = int(available_for_files * 4 * (s_len / total_len))
             t_max_chars = int(available_for_files * 4 * (t_len / total_len))
 
-            source_content = source_content[:s_max_chars] + "... [TRUNCATED]"
-            target_content = target_content[:t_max_chars] + "... [TRUNCATED]"
+            current_source = current_source[:s_max_chars] + "... [TRUNCATED]"
+            current_target = current_target[:t_max_chars] + "... [TRUNCATED]"
 
-        output = model(final_prompt, max_tokens=500, stop=["<|im_end|>"], echo=False)
+        if not final_prompt:
+            raise ValueError(
+                "Failed to construct a valid prompt within context limits."
+            )
+
+        if self._model is None:
+            raise RuntimeError("Model was not loaded correctly.")
+
+        output = self._model(
+            final_prompt, max_tokens=500, stop=["<|im_end|>"], echo=False
+        )
 
         result_text = output["choices"][0]["text"].strip()
 
@@ -357,10 +401,19 @@ Clear summary of dependency determination in the format dictated in instruction 
 
         return "p", result_text
 
+    def _get_repair_logger(self) -> logging.Logger:
+        """Ensures repair logger is initialized and returns it."""
+        if self._repair_logger is None:
+            self._setup_repair_logging()
+        # After _setup_repair_logging, self._repair_logger must be set
+        assert self._repair_logger is not None
+        return self._repair_logger
+
     def _setup_repair_logging(self):
         """Setup logging for repair attempts."""
         self._repair_log_file = "debug_llm_repair.log"
-        self._repair_logger = logging.getLogger("debug_llm_repair")
+        logger_name = "debug_llm_repair"
+        self._repair_logger = logging.getLogger(logger_name)
         self._repair_logger.setLevel(logging.INFO)
 
         # Clear existing handlers to avoid duplicates
@@ -383,17 +436,20 @@ Clear summary of dependency determination in the format dictated in instruction 
 
     def _cleanup_repair_log_entry(self, source_basename: str, target_basename: str):
         """Removes all repair log entries for this file pair from the log file."""
-        if not os.path.exists(self._repair_log_file):
+        log_file = self._repair_log_file
+        repair_logger = self._repair_logger
+
+        if not log_file or not repair_logger or not os.path.exists(log_file):
             return
 
         try:
             # Shutdown the logger temporarily to release the file
-            for handler in self._repair_logger.handlers[:]:
+            for handler in repair_logger.handlers[:]:
                 handler.close()
-                self._repair_logger.removeHandler(handler)
+                repair_logger.removeHandler(handler)
 
             # Read and filter the file
-            with open(self._repair_log_file, "r", encoding="utf-8") as f:
+            with open(log_file, "r", encoding="utf-8") as f:
                 lines = f.readlines()
 
             # Pattern that identifies entries for this pair
@@ -403,7 +459,7 @@ Clear summary of dependency determination in the format dictated in instruction 
 
             # We want to remove the block starting with pattern_start
             # until either the end of the file or another "Repairing output for" starts
-            new_lines = []
+            new_lines: List[str] = []
             skip_until_next = False
 
             for line in lines:
@@ -421,7 +477,7 @@ Clear summary of dependency determination in the format dictated in instruction 
                 new_lines.append(line)
 
             # Write back the filtered content
-            with open(self._repair_log_file, "w", encoding="utf-8") as f:
+            with open(log_file, "w", encoding="utf-8") as f:
                 f.writelines(new_lines)
 
             # Restart the logger
@@ -475,10 +531,11 @@ Return ONLY the reformatted output.
 """
 
         # Log the problematic output
-        self._repair_logger.info(
+        repair_logger = self._get_repair_logger()
+        repair_logger.info(
             f"Repairing output for {source_basename} -> {target_basename}"
         )
-        self._repair_logger.info(f"Original output: {original_output}")
+        repair_logger.info(f"Original output: {original_output}")
 
         try:
             # Get exact tokens for repair prompt (instruction + original output)
@@ -496,7 +553,7 @@ Return ONLY the reformatted output.
                 temperature=0.7,
             )
             repaired_text = output["choices"][0]["text"].strip()
-            self._repair_logger.info(f"Repaired output: {repaired_text}")
+            self._get_repair_logger().info(f"Repaired output: {repaired_text}")
             # Parse repaired output
             lines = repaired_text.split("\n")
             reasoning_idx = -1
@@ -511,7 +568,7 @@ Return ONLY the reformatted output.
                     if prev_line:
                         match = re.search(r"->\s*[`'\"*]*([<>xdn])", prev_line)
                         if match:
-                            self._repair_logger.info(
+                            self._get_repair_logger().info(
                                 f"Repair successful: {match.group(1)}"
                             )
                             # Cleanup/mark success in log
@@ -521,15 +578,16 @@ Return ONLY the reformatted output.
                             return match.group(1), repaired_text
                         break
 
-            self._repair_logger.warning("Repair failed to produce expected format.")
+            self._get_repair_logger().warning(
+                "Repair failed to produce expected format."
+            )
             return "p", repaired_text
 
         except Exception as e:
-            self._repair_logger.error(f"Error occurred while repairing output: {e}")
+            self._get_repair_logger().error(
+                f"Error occurred while repairing output: {e}"
+            )
             return "p", original_output
-        finally:
-            if self._model is not None:
-                self.close()
 
     def close(self, pause_for_vram: bool = False):
         """
@@ -564,12 +622,22 @@ Return ONLY the reformatted output.
                 gc.collect()
 
             if pause_for_vram:
-                # Brief pause to allow GPU driver to settle and ResourceValidator
-                # to get an accurate reading on the next call.
-                import time
+                validator = ResourceValidator()
 
-                time.sleep(0.5)
-                time.sleep(0.5)
-                time.sleep(0.5)
-                time.sleep(0.5)
-                time.sleep(0.5)
+                if self._vram_baseline_mb is not None:
+                    # EXACT verification: wait for VRAM to return to pre-load state
+                    logger.debug(
+                        f"Waiting for VRAM to return to baseline: {self._vram_baseline_mb:.1f} MB"
+                    )
+                    validator.wait_for_vram_release(
+                        target_free_mb=self._vram_baseline_mb
+                    )
+                else:
+                    # Fallback: layer-count estimate (existing behavior)
+                    expected_freed_mb = self._current_n_gpu_layers * self.MB_PER_LAYER
+                    logger.debug(
+                        f"Waiting for estimated VRAM release: {expected_freed_mb:.1f} MB"
+                    )
+                    validator.wait_for_vram_release(target_free_mb=expected_freed_mb)
+
+                self._vram_baseline_mb = None  # Reset for next load

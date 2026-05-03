@@ -638,6 +638,7 @@ class ResourceValidator:
         poll_interval: float = 0.5,
         stall_tolerance: int = 3,
         hard_cap_seconds: float = 120.0,
+        tolerance_mb: float = 50.0,
     ) -> bool:
         """
         Polls VRAM usage until at least `target_free_mb` is available or convergence occurs.
@@ -649,7 +650,7 @@ class ResourceValidator:
             hard_cap_seconds: Absolute maximum time to wait in seconds.
 
         Returns:
-            True if target VRAM is available, False if timed out or stalled.
+            True if target VRAM (within tolerance) is available, False if timed out or stalled.
         """
         if not TORCH_AVAILABLE or torch is None or not torch.cuda.is_available():
             return False
@@ -689,12 +690,18 @@ class ResourceValidator:
                 stall_count += 1
             else:
                 # EXACT VERIFICATION — target is a known baseline, not an estimate
-                if free_mb >= target_free_mb:
-                    logger.debug(
-                        f"VRAM verified: {free_mb:.1f} MB free >= "
-                        f"target {target_free_mb:.1f} MB. "
-                        f"Elapsed: {elapsed:.2f}s."
-                    )
+                if free_mb >= (target_free_mb - tolerance_mb):
+                    if free_mb < target_free_mb:
+                        logger.debug(
+                            f"VRAM within tolerance: {free_mb:.1f} MB free (target {target_free_mb:.1f} MB, "
+                            f"delta {target_free_mb - free_mb:.1f} MB). Proceeding."
+                        )
+                    else:
+                        logger.debug(
+                            f"VRAM verified: {free_mb:.1f} MB free >= "
+                            f"target {target_free_mb:.1f} MB. "
+                            f"Elapsed: {elapsed:.2f}s."
+                        )
                     return True
 
                 growth = free_mb - prev_free_mb
@@ -702,10 +709,19 @@ class ResourceValidator:
                 prev_free_mb = free_mb
 
             if stall_count >= stall_tolerance:
+                delta = target_free_mb - prev_free_mb
+                if delta <= tolerance_mb:
+                    logger.info(
+                        f"VRAM converged near baseline at {prev_free_mb:.1f} MB "
+                        f"(target: {target_free_mb:.1f} MB, delta: {delta:.1f} MB). "
+                        f"Close enough to proceed."
+                    )
+                    return True
+
                 logger.warning(
                     f"VRAM converged at {prev_free_mb:.1f} MB "
                     f"(target: {target_free_mb:.1f} MB, "
-                    f"delta: {target_free_mb - prev_free_mb:.1f} MB not reclaimed). "
+                    f"delta: {delta:.1f} MB not reclaimed). "
                     f"Elapsed: {elapsed:.2f}s."
                 )
                 return False
