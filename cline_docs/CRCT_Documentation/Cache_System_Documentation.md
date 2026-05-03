@@ -1,25 +1,22 @@
-# Cache System Documentation (v7.5)
+# Cache System Documentation (v8.3)
 
 ## Overview
 
-The CRCT cache system is designed to boost performance by storing the results of potentially costly function calls (like file analysis or embedding lookups) and reusing them when the same inputs occur again. It's a dynamic system based on Time-To-Live (TTL) expiration and automatic cleanup.
+The CRCT cache system is a production-grade infrastructure designed to boost performance by storing the results of potentially costly operations (e.g., embeddings, re-ranking, AST analysis). Version 8.3 introduces cross-session persistence, hardware-adaptive resource management, and stable hashing for reliable hits across environments.
 
 #### Core Components:
 
-1.  **`Cache` Class**: A single cache instance holding data (`key -> value`), access times, and optional dependency information. It manages TTL expiration and LRU (Least Recently Used) eviction when size limits are reached.
-2.  **`CacheManager` Class**: Oversees all active `Cache` instances. It creates caches on-demand when they are first requested (e.g., via the `@cached` decorator) and handles the cleanup of expired caches to free up memory.
-3.  **`@cached` Decorator**: The primary way to enable caching for a function.
+1.  **`Cache` Class**: A high-performance instance holding data (`key -> value`), access metrics, and dependency information. It manages eviction policies (LRU, LFU) and handles automated compression for large entries.
+2.  **`CacheManager` Class**: The central orchestrator that oversees all active `Cache` instances. It enforces the **Global Memory Budget**, manages persistent storage using **Pickle**, and handles automatic migration from legacy JSON caches.
+3.  **`@cached` Decorator**: The primary interface for developers. It handles automated key generation, stable SHA256 hashing of file modification times, and dependency-aware invalidation.
 
-#### Key Features:
+#### Key Features (v8.3):
 
--   **Dynamic Cache Creation**: Caches are created automatically the first time a specific `cache_name` is used with the `@cached` decorator. There's no need to predefine caches.
--   **Automatic Expiration (TTL)**: Each cache instance has a default TTL. If a cache is not accessed within its TTL, it becomes eligible for removal by the `CacheManager`. Individual cached items within a cache also respect TTL settings.
--   **LRU Eviction**: When an individual cache instance reaches its maximum size limit, it removes the least recently used item to make space.
--   **Targeted Invalidation**: Functions are provided to clear specific cache entries based on key patterns (supports regex) or automatically when dependent files are modified.
--   **Optional Persistence**: The system includes code to save/load caches to disk, although this feature is **disabled by default** in the current version.
--   **Isolation**: Each cache (identified by its unique `cache_name`) operates independently. Clearing one cache does not affect others.
-
-For most interactions with the CRCT system via the LLM, the cache operates transparently in the background. This guide provides details for users interested in understanding the mechanism or potentially leveraging it in custom scripts.
+-   **Stable Hashing**: Uses SHA256 hashes of file modification times (mtimes) to ensure cache hits persist even when the process is restarted or moved.
+-   **Persistent Storage (Pickle)**: Caches are saved as `.pkl` files in `cline_utils/dependency_system/utils/cache/`, allowing results to be reused across different CLI executions.
+-   **Global Resource Management**: Automatically throttles total cache memory usage based on available system RAM (e.g., 512MB for 16GB systems).
+-   **Intelligent Invalidation**: Caches automatically invalidate when dependent files (tracked via `file_deps`) are modified on disk.
+-   **Compression**: Uses Gzip to compress large cache entries (>10MB), typically saving 30-50% disk space in large projects.
 
 ---
 
@@ -27,92 +24,77 @@ For most interactions with the CRCT system via the LLM, the cache operates trans
 
 The primary interface for enabling caching is the `@cached` decorator.
 
-#### Basic Usage
+### 1. Basic Usage
 
-To cache a function's results, decorate it with `@cached`, providing a unique `cache_name` and typically a `key_func` to generate a unique string key based on the function's arguments.
+To cache a function's results, decorate it with `@cached`, providing a unique `cache_name` and a `key_func` to generate a unique string key based on the function's arguments.
 
 ```python
-# Example within cline_utils/dependency_system/utils/cache_manager.py
 from cline_utils.dependency_system.utils.cache_manager import cached
 
 # Define a function to generate a key based on input 'x'
 def create_cache_key(x):
-    return f"my_function_key:{x}"
+    return f"computation_key:{x}"
 
-@cached(cache_name="my_function_cache", key_func=create_cache_key)
-def potentially_slow_function(x):
-    # Simulate an expensive computation
-    print(f"Executing potentially_slow_function({x})...")
-    time.sleep(1)
+@cached(cache_name="math_cache", key_func=create_cache_key)
+def expensive_computation(x):
+    print(f"Executing expensive_computation({x})...")
+    # Simulate work
     return x * x
 
-# First call: executes the function, result stored in "my_function_cache" with key "my_function_key:5"
-result1 = potentially_slow_function(5)
-print(f"Result 1: {result1}")
+# First call: executes the function, result stored in "math_cache"
+result1 = expensive_computation(5)
 
-# Second call with same input: returns cached result instantly
-result2 = potentially_slow_function(5)
-print(f"Result 2: {result2}")
-
-# Call with different input: executes function, new result cached
-result3 = potentially_slow_function(10)
-print(f"Result 3: {result3}")
+# Second call: returns cached result instantly
+result2 = expensive_computation(5)
 ```
 
--   `"my_function_cache"`: This name identifies the specific cache instance used for this function. A new `Cache` object is created dynamically by the `CacheManager` the first time this name is encountered.
--   `key_func=create_cache_key`: This function takes the arguments passed to `potentially_slow_function` and generates a unique string identifier for the cache entry.
+-   `"math_cache"`: This name identifies the specific cache file (`math_cache.pkl`) on disk.
+-   `key_func`: Ensures that different inputs get different cache entries.
 
-#### Advanced Usage: TTL and Dependencies
+### 2. Advanced Usage: TTL and Dependencies
 
-You can customize the Time-To-Live for a specific cache or define dependencies.
+You can customize the Time-To-Live (TTL) or link cache entries to physical files.
 
 **Custom TTL:**
-
 ```python
-# Set a 5-minute TTL for this specific cache instance
-@cached(cache_name="short_lived_cache", key_func=lambda arg: f"slc:{arg}", ttl=300)
-def function_with_short_ttl(arg):
-    # ... function logic ...
-    return arg
+# Set a 1-hour (3600s) TTL for this specific cache
+@cached(cache_name="hourly_cache", key_func=lambda arg: f"hc:{arg}", ttl=3600)
+def fetch_api_data(arg):
+    ...
 ```
 
-**Dynamic Dependencies:**
-
-If a cached result depends on other data (e.g., a file), you can return the dependencies along with the result. The cache system implicitly creates dependencies based on file paths used in certain cached functions (like `analyze_file`).
+**File-Based Invalidation (check_mtime):**
+If a result depends on a file's state, use `check_mtime=True`. The system will hash the file's modification time into the cache key.
 
 ```python
-@cached(cache_name="dependent_cache", key_func=lambda file_id: f"dep_cache:{file_id}")
-def process_file_data(file_id):
-    file_path = f"/path/to/data/{file_id}.json"
-    # ... process file_path ...
-    result = {"data": "processed_data"}
-    # Implicit dependency on file_path might be handled by internal functions,
-    # but you could return explicit dependencies if needed:
-    # dependencies = [f"file:{normalize_path(file_path)}"]
-    # return result, dependencies
-    return result # Example without explicit dependency return
+@cached(
+    cache_name="file_analysis",
+    key_func=lambda path: f"analyze:{path}",
+    check_mtime=True,
+    file_deps=lambda path: [path] # Track this file for invalidation
+)
+def analyze_source_code(path):
+    # This will automatically invalidate if the file at 'path' changes
+    ...
 ```
 
-If the underlying file changes, functions like `check_file_modified` can trigger invalidation for caches linked to that file path.
+### 3. Manual Invalidation
 
-#### Manual Invalidation
+While the system handles most invalidation automatically, you can manually clear entries using `invalidate_dependent_entries` or clear entire caches via the CLI.
 
-While the system often handles invalidation automatically (e.g., based on file modification), you can manually clear entries using `invalidate_dependent_entries` or clear entire caches using the CLI command.
-
+**In Code:**
 ```python
 from cline_utils.dependency_system.utils.cache_manager import invalidate_dependent_entries
 
-# Invalidate specific entry in "my_function_cache"
-invalidate_dependent_entries(cache_name="my_function_cache", key_pattern="my_function_key:5")
+# Invalidate specific entry using a regex pattern
+invalidate_dependent_entries(cache_name="file_analysis", key_pattern="analyze:src/main.py")
 
-# Invalidate all entries in "my_function_cache"
-invalidate_dependent_entries(cache_name="my_function_cache", key_pattern="my_function_key:.*")
+# Invalidate ALL entries in a specific cache
+invalidate_dependent_entries(cache_name="file_analysis", key_pattern=".*")
 ```
 
-**Clearing All Caches:**
-
-The most straightforward way for a user to clear all caches is via the `dependency_processor.py` command:
-
+**Via CLI:**
+The most straightforward way to reset the system is the `clear-caches` command:
 ```bash
 python -m cline_utils.dependency_system.dependency_processor clear-caches
 ```
@@ -123,38 +105,57 @@ The LLM can execute this command if you suspect caching issues are causing probl
 
 ## Cache Management Details
 
--   **On-Demand Creation & Cleanup**: Caches are created by the `CacheManager` when first requested via `@cached(cache_name=...)`. The manager periodically cleans up `Cache` instances that haven't been accessed within their TTL, conserving memory.
--   **LRU Eviction**: Individual `Cache` instances have size limits. When full, the least recently used entry is removed.
--   **Dependency Tracking**: The system can link cache entries to dependencies (like file paths). Modifying a file triggers `check_file_modified`, which uses `invalidate_dependent_entries` to clear relevant cached data (e.g., analysis results for that file).
+### On-Demand Creation & Persistence
+Caches are created by the `CacheManager` when first requested. If persistence is enabled (default in v8.3), the manager loads existing data from `cline_utils/dependency_system/utils/cache/*.pkl`. 
+
+### Global Memory Budget & Eviction
+The `CacheManager` monitors total memory usage across all active caches. If the **Global Budget** is exceeded:
+1.  It identifies the least recently used (LRU) items across all caches.
+2.  It evicts items until memory usage drops to 80% of the budget.
+3.  This ensures the system remains responsive even with massive dependency graphs.
+
+### Legacy Migration
+If you have caches from v7.x or v8.0-8.2 in `.json` format, the `CacheManager` will:
+-   Detect the `.json` files on startup.
+-   Load and convert them to the new `.pkl` format.
+-   Delete the old `.json` files to keep the directory clean.
 
 ---
 
-## Configuration
+## Configuration & Tuning
 
-Cache behavior can be tuned by modifying constants directly within `cline_utils/dependency_system/utils/cache_manager.py`:
+Cache behavior can be tuned by modifying constants in `cline_utils/dependency_system/utils/cache_manager.py` or via the project config.
 
--   `DEFAULT_TTL` (seconds): Default expiration time for cache instances and entries (currently 600 seconds / 10 minutes).
--   `DEFAULT_MAX_SIZE`: Default maximum number of items per cache instance (currently 1000).
--   `CACHE_SIZES` (dictionary): Allows setting different `max_size` values for specific `cache_name`s (e.g., `{"embeddings_generation": 100, "key_generation": 5000}`).
+| Constant | Default | Description |
+| :--- | :--- | :--- |
+| `DEFAULT_TTL` | `604800` | 7 days (in seconds). |
+| `DEFAULT_MAX_SIZE` | `10000` | Maximum items per individual cache instance. |
+| `ENABLE_COMPRESSION` | `True` | Whether to gzip large items. |
+| `CACHE_DIR` | `./cache/` | Location of `.pkl` storage files. |
 
-*Note: Modifying these requires directly editing the Python file.*
-
----
-
-## Persistence
-
-The `CacheManager` can be initialized with `persist=True` to save/load cache contents to/from JSON files within the `CACHE_DIR` (a `cache` subdirectory within `cline_utils/dependency_system/utils/`).
-
-**This feature is currently DISABLED (`persist=False`) by default.** Enabling it would preserve caches between runs but might lead to loading stale data if not managed carefully.
+For detailed hardware-specific tuning (e.g., overriding the memory budget), see **[CACHE_TUNING.md](CACHE_TUNING.md)**.
 
 ---
 
-## Cache Statistics
+## Monitoring & Statistics
 
-For debugging or performance analysis, you can retrieve statistics for a specific cache:
+You can retrieve real-time statistics for any cache to analyze hit rates and performance.
 
 ```python
 from cline_utils.dependency_system.utils.cache_manager import get_cache_stats
 
-stats = get_cache_stats("my_function_cache") # Use the actual cache_name
-print(f"Cache 'my_function_cache' Stats - Hits: {stats['hits']}, Misses: {stats['misses']}, Current Size: {stats['size']}")
+stats = get_cache_stats("file_analysis")
+print(f"Hits: {stats['hits']}")
+print(f"Misses: {stats['misses']}")
+print(f"Hit Rate: {stats['hit_rate']:.2%}")
+print(f"Memory Usage: {stats['size_bytes'] / 1024:.2f} KB")
+```
+
+---
+
+## Troubleshooting
+
+-   **Cold Starts**: High analysis times after a major project change mean the system is rebuilding caches. This is normal.
+-   **Unexpected Stale Data**: If analysis results seem wrong, run `clear-caches` via the CLI to force a full rebuild.
+-   **Pickle Errors**: If you see "UnpicklingError", it likely means a cache file was corrupted during a crash. Simply delete the `cache/` directory contents.
+-   **High Disk Usage**: Large projects can generate gigabytes of cache data. Check the `cache/` directory size and use `clear-caches` if necessary.

@@ -1,6 +1,6 @@
 # Local LLM Dependency Resolution Guide
 
-This guide provides detailed instructions on using the local LLM-assisted commands introduced in **v8.2** of the Cline Recursive Chain-of-Thought System (CRCT). These tools are designed to make dependency verification more efficient and less costly by offloading semantic analysis to local models (GGUF).
+This guide provides detailed instructions on using the local LLM-assisted commands introduced in **v8.x** of the Cline Recursive Chain-of-Thought System (CRCT). These tools are designed to make dependency verification more efficient and less costly by offloading semantic analysis to local models (GGUF).
 
 ---
 
@@ -74,7 +74,7 @@ Effective February 2026, the `resolve-placeholders` command is an **Optional Aut
 ## Optimization & Tips
 
 ### Dual-Token Sensing
-The local LLM processor uses the Dual-Token schema introduced in v8.2. It intelligently checks:
+The local LLM processor uses the Dual-Token schema introduced in v8.2 and enhanced in v8.3. It intelligently checks:
 - **`ses_tokens`**: The size of the Symbol Essence String (optimized context).
 - **`full_tokens`**: The size of the raw file.
 

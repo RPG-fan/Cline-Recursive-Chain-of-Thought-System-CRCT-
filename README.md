@@ -1,7 +1,12 @@
-# Cline Recursive Chain-of-Thought System (CRCT) - v8.2
+# Cline Recursive Chain-of-Thought System (CRCT) - v8.3
 
 Welcome to the **Cline Recursive Chain-of-Thought System (CRCT)**, a framework designed to manage context, dependencies, and tasks in large-scale Cline projects within VS Code. Built for the Cline extension, CRCT leverages a recursive, file-based approach with a modular dependency tracking system to maintain project state and efficiency as complexity increases.
 
+- Version **v8.3**: 🎨 **MODULAR ARCHITECTURE & STABLE CACHING** - Architectural Refinement & Reliability
+    - **Modular Visualization Refactor**: The dependency visualization system has been decomposed into a dedicated `viz` sub-package, separating Mermaid DSL construction, image rendering, and layout configuration.
+    - **Report Generator Decomposition**: Refactored the monolithic `report_generator.py` into specialized `scanner` and `reporting` packages for better maintainability and code quality analysis.
+    - **Stable Persistent Caching**: Implemented SHA256-based stable hashing for cache keys, ensuring cache hits persist across different process runs.
+    - **Pickle-based Storage**: Migrated from JSON to Pickle for more robust Python object serialization in persistent caches, with automatic legacy migration.
 - Version **v8.2**: 🤖 **LOCAL LLM & DUAL-TOKEN EMBEDDINGS** - Automated Resolution & Precise Context
     - **Automated Placeholder Resolution**: New `resolve-placeholders` command uses local LLMs (via `llama-cpp-python`) to verify 'p' dependencies in batches, significantly reducing manual verification time and API costs.
     - **Dual-Token Schema**: Refactored metadata to track both `ses_tokens` (for embeddings) and `full_tokens` (for total file size), enabling smarter context window management.
@@ -152,6 +157,7 @@ Cline-Recursive-Chain-of-Thought-System-CRCT-/
 │   LICENSE
 │   README.md
 │   requirements.txt
+│   package.json                  # Node dependencies for visualization
 │
 ├───cline_docs/                   # Operational memory
 │   │  activeContext.md           # Current state and priorities
@@ -160,53 +166,87 @@ Cline-Recursive-Chain-of-Thought-System-CRCT-/
 │   │  progress.md                # High-level project checklist
 │   │
 │   ├──backups/                   # Tracker backups
-│   ├──CRCT_Documentation/        # Detailed v8.x Tech Guides <NEW>
+│   ├──CRCT_Documentation/        # Detailed v8.x Tech Guides
 │   │    CHANGELOG.md             # Detailed version history
 │   │    SES_ARCHITECTURE.md      # Embedding system deep-dive
 │   │    Cache_System_Documentation.md
+│   │    CACHE_TUNING.md          # Advanced cache config
+│   │    DEPENDENCY_RESOLUTION.md # LLM-assisted resolution & prefetching
 │   │    MIGRATION_v7.x_to_v8.0.md
+│   │    VIZ_PACKAGE.md           # Modular visualization guide
+│   │    REPORTING_SYSTEM.md      # Modular reporting guide
 │   │    ...
 │   ├──dependency_diagrams/       # Auto-generated diagrams
 │   ├──prompts/                   # System prompts and plugins
-│   │    core_prompt.md           # Core system instructions
-|   |    cleanup_consolidation_plugin.md <NEWer>
+│   │    core_prompt(put this in Custom Instructions).md
+│   │    cleanup_consolidation_plugin.md
 │   │    execution_plugin.md
 │   │    setup_maintenance_plugin.md
-│   │    strategy_plugin.md         <REVISED>
+│   │    setup_worker.md
+│   │    strategy_dispatcher_plugin.md
+│   │    strategy_worker_plugin.md
 │   ├──templates/                 # Templates for HDTA documents
-│   │    hdta_review_progress_template.md <NEWer>
-│   │    hierarchical_task_checklist_template.md <NEWer>
-│   │    implementation_plan_template.md <REVISED>
-│   │    module_template.md         <Minor Update>
-│   │    roadmap_summary_template.md  <NEW>
+│   │    dispatcher_area_log_template.md
+│   │    hdta_review_progress_template.md
+│   │    hierarchical_task_checklist_template.md
+│   │    implementation_plan_template.md
+│   │    module_template.md
+│   │    project_roadmap_template.md
+│   │    roadmap_summary_template.md
+│   │    structured_doc_template.md
 │   │    system_manifest_template.md
-│   │    task_template.md           <Minor Update>
+│   │    task_template.md
+│   │    worker_sub_task_output_template.md
 │
 ├───cline_utils/                  # Utility scripts
 │   └─dependency_system/
-│     │ dependency_processor.py   # Dependency management script <REVISED>
-│     ├──analysis/                # Analysis modules <MAJOR UPDATES in v8.0>
-│     │    dependency_analyzer.py   <2x growth>
-│     │    dependency_suggester.py  <1.9x growth>
-│     │    embedding_manager.py     <3.4x growth>
-│     │    project_analyzer.py      <1.7x growth>
-│     │    reranker_history_tracker.py <NEW>
-│     │    runtime_inspector.py     <NEW>
-│     ├──core/                    # Core modules <REVISED key_manager.py>
-│     │    exceptions_enhanced.py  <NEW - replaces exceptions.py>
-│     ├──io/                      # IO modules
+│     │ dependency_processor.py   # Dependency management orchestrator
+│     ├──analysis/                # Analysis modules
+│     │    dependency_analyzer.py
+│     │    dependency_suggester.py
+│     │    embedding_manager.py
+│     │    local_llm_processor.py
+│     │    project_analyzer.py
+│     │    reranker_history_tracker.py
+│     │    runtime_inspector.py
+│     │    symbol_map_merger.py   # Merges runtime + AST symbol maps
+│     ├──core/                    # Core logic and exceptions
+│     │    dependency_grid.py     # Grid compression/decompression
+│     │    exceptions_enhanced.py
+│     │    key_manager.py         # Key generation & resolution
+│     ├──io/                      # IO and tracker management
+│     │    tracker_io.py          # Read/write tracker files
+│     │    update_doc_tracker.py
+│     │    update_main_tracker.py
+│     │    update_mini_tracker.py
 │     └──utils/                   # Utility modules
-│          batch_processor.py      <Enhanced with PhaseTracker>
-│          cache_manager.py        <2x growth - compression, policies>
-│          config_manager.py       <2x growth - extensive new config>
-│          phase_tracker.py        <NEW - progress bars>
-│          resource_validator.py   <NEW - system checks>
-│          symbol_map_merger.py    <NEW - runtime+AST merge>
-│          tracker_batch_collector.py <NEW in v8.1 - batch I/O>
-│          visualize_dependencies.py <NEW>
+│          batch_processor.py      # Enhanced with PhaseTracker
+│          cache_manager.py        # Persistent Pickle caching & stable hashing
+│          config_manager.py
+│          path_utils.py           # Path normalization utilities
+│          phase_tracker.py
+│          placeholder_resolver.py # LLM-assisted resolution
+│          resource_validator.py
+│          tracker_batch_collector.py
+│          tracker_utils.py        # Tracker read/aggregate helpers
+│          visualize_dependencies.py # Orchestrator for viz
+│          viz/                    # Modular visualization package
+│               mermaid_builder.py # DSL construction
+│               renderer.py        # Image rendering (mmdc)
+│               layout_config.py   # Mermaid styling
+│
+├───code_analysis/                # Code quality analysis
+│   │ report_generator.py         # Orchestrator for reporting
+│   ├──scanner/                   # Static & Runtime engines
+│   │    static_engine.py
+│   │    runtime_bridge.py
+│   │    heuristics.py
+│   └──reporting/                 # Export and formatting
+│        json_exporter.py
+│        markdown_formatter.py
 │
 ├───docs/                         # Project documentation
-├───models/                       # AI models (auto-downloaded) <NEW>
+├───models/                       # AI models (auto-downloaded)
 └───src/                          # Source code root
 
 ```
@@ -216,6 +256,7 @@ Cline-Recursive-Chain-of-Thought-System-CRCT-/
 
 ## Current Status & Future Plans
 
+- **v8.3**: 🎨 **Modular Viz & Stable Caching** - Refactored visualization architecture into a dedicated `viz` package and implemented stable SHA256 hashing for reliable persistent caching.
 - **v8.2**: 🤖 **Local LLM & Dual-Tokens** - Automated resolution of dependency placeholders and precise token-based context management.
 - **v8.1**: ⚡ **Performance Optimization** - Introduced batch tracker updates and advanced caching mechanisms to handle larger projects with lower I/O overhead.
 - **v8.0**: 🚀 **Major architecture evolution** - Symbol Essence Strings, Qwen3 reranker, hardware-adaptive models, runtime symbol inspection, enhanced UX with PhaseTracker. See [CHANGELOG.md](CHANGELOG.md) for complete details.
@@ -242,7 +283,5 @@ The system will analyze your codebase, initialize trackers, and guide you forwar
 ---
 
 ## Thanks!
-
-A big Thanks to https://github.com/biaomingzhong for providing detailed instructions that were integrated into the core prompt and plugins! (PR #25)
 
 This is a labor of love to make Cline projects more manageable. I'd love to hear your thoughts—try it out and let me know what works (or doesn't)!

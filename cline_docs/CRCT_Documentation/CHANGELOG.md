@@ -5,6 +5,26 @@ All notable changes to the Cline Recursive Chain-of-Thought System (CRCT) will b
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.3.0] - 2026-05-03
+
+### Added
+- **Modular Visualization Package**: Extracted dependency visualization logic into a dedicated `cline_utils.dependency_system.utils.viz` sub-package.
+- **Report Generator Modularization**: Refactored monolithic `report_generator.py` into specialized `code_analysis.scanner` and `code_analysis.reporting` packages.
+- **Stable Hashing**: SHA256-based stable hashing for cache keys to ensure persistence across sessions and environments.
+- **Automatic Cache Migration**: Automatic migration of legacy `.json` caches to the new `.pkl` format.
+- **LLM-assisted Placeholder Resolution**: New `PlaceholderResolver` leveraging local LLMs for intelligent dependency verification.
+
+### Changed
+- **Persistent Caching Overhaul**: Switched from JSON to Pickle for more robust Python object serialization in `CacheManager`.
+- **Refactored Visualization**: Decomposed monolithic `visualize_dependencies.py` into specialized modules for DSL building, rendering, and configuration.
+- **Improved Cache Key Generation**: Integrated stable mtime hashing and file dependency tracking in the `@cached` decorator.
+- **Multi-threaded Prefetching**: Optimized dependency resolution loop to overlap CPU tasks with GPU inference.
+- **VRAM Footprint Correction**: Adjusted reranker model memory usage estimates to 0.7GB for better OOM prevention.
+- **Global Cache Budget**: Implemented system-aware memory limits for caches to optimize resource usage.
+
+### Fixed
+- **Documentation Audit & Reconciliation**: Conducted a comprehensive audit of all project documentation (`README.md`, `DEPENDENCY_RESOLUTION.md`, `VIZ_PACKAGE.md`, `REPORTING_SYSTEM.md`) to eliminate hallucinations and align with the v8.3 modular architecture.
+
 ---
 
 ## [8.2.0] - 2026-02-14
