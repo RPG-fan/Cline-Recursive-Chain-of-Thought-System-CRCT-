@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 import weakref
+import atexit
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, cast
@@ -436,7 +437,74 @@ class CacheManager:
         self._last_cleanup_time = 0.0  # Throttling for cleanup()
         if persist:
             os.makedirs(CACHE_DIR, exist_ok=True)
+            self._migrate_json_caches()
             self._load_persistent_caches()
+
+    def _json_revive(self, obj: Any) -> Any:
+        """Recursively revive objects from their JSON-safe representation (Legacy)."""
+        if isinstance(obj, dict):
+            if obj.get("__type__") == "bytes" and obj.get("encoding") == "hex":
+                try:
+                    return bytes.fromhex(obj.get("data", ""))
+                except (ValueError, TypeError):
+                    return obj
+            return {k: self._json_revive(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._json_revive(v) for v in obj]
+        return obj
+
+    def _migrate_json_caches(self) -> None:
+        """Migrate legacy .json caches to the new .pkl format."""
+        if not os.path.exists(CACHE_DIR):
+            return
+        
+        json_files = [f for f in os.listdir(CACHE_DIR) if f.endswith(".json")]
+        if not json_files:
+            return
+
+        logger.info(f"Found {len(json_files)} legacy JSON caches. Migrating to Pickle format...")
+        
+        for json_file in json_files:
+            json_path = os.path.join(CACHE_DIR, json_file)
+            cache_name = json_file[:-5]
+            pkl_path = os.path.join(CACHE_DIR, f"{cache_name}.pkl")
+            
+            # Skip if pickle version already exists (migration already done or new cache created)
+            if os.path.exists(pkl_path):
+                try:
+                    os.remove(json_path)
+                except OSError:
+                    pass
+                continue
+
+            try:
+                if os.path.getsize(json_path) == 0:
+                    os.remove(json_path)
+                    continue
+
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                # Revive data
+                revived_data = {
+                    "data": {
+                        k: self._json_revive(v)
+                        for k, v in data.get("data", {}).items()
+                    },
+                    "dependencies": data.get("dependencies", {}),
+                }
+                
+                # Save as pickle
+                with open(pkl_path, "wb") as f:
+                    pickle.dump(revived_data, f)
+                
+                # Remove old JSON
+                os.remove(json_path)
+                logger.debug(f"Migrated cache '{cache_name}' to Pickle format.")
+                
+            except Exception as e:
+                logger.error(f"Failed to migrate legacy cache {json_file}: {e}")
+                # Don't delete if it failed, let user handle it
 
     def get_cache(self, cache_name: str, ttl: int = DEFAULT_TTL) -> Cache:
         """Retrieve or create a cache by name."""
@@ -575,11 +643,11 @@ class CacheManager:
 
     def _save_cache(self, cache_name: str) -> None:
         if cache_name in self.caches:
-            cache_file = os.path.join(CACHE_DIR, f"{cache_name}.json")
+            cache_file = os.path.join(CACHE_DIR, f"{cache_name}.pkl")
             # Use UUID to ensure uniqueness across threads/processes
             temp_file = f"{cache_file}.{uuid.uuid4()}.tmp"
             try:
-                with open(temp_file, "w", encoding="utf-8") as f:
+                with open(temp_file, "wb") as f:
                     # Ensure there's data to write
                     if not self.caches[cache_name].data:
                         # If cache is empty, don't write an empty file, just ensure old one is gone
@@ -594,39 +662,15 @@ class CacheManager:
                         self.caches[cache_name].data.items()
                     )
 
-                    def _json_safe(obj: Any) -> Any:
-                        """
-                        Convert cache values into JSON-serializable form.
-                        - Pass through primitives and plain containers.
-                        - For bytes and other non-serializable objects, store a safe representation.
-                        """
-                        # Fast path: already JSON-native
-                        if isinstance(obj, (str, int, float, bool)) or obj is None:
-                            return obj
-                        if isinstance(obj, dict):
-                            return {str(k): _json_safe(v) for k, v in obj.items()}
-                        if isinstance(obj, (list, tuple, set)):
-                            return [_json_safe(v) for v in obj]
-                        if isinstance(obj, (bytes, bytearray)):
-                            # Avoid breaking on compressed/serialized cache entries
-                            # Represent as tagged hex string instead of raw bytes
-                            return {
-                                "__type__": "bytes",
-                                "encoding": "hex",
-                                "data": obj.hex(),
-                            }
-                        # Fallback: string representation
-                        return repr(obj)
-
                     data = {
                         "data": {
-                            k: _json_safe(v[0])
+                            k: v[0]
                             for k, v in current_cache_data_items
                             if v[2] is None or v[2] > time.time()
                         },
                         "dependencies": dict(self.caches[cache_name].dependencies),
                     }
-                    json.dump(data, f)
+                    pickle.dump(data, f)
 
                 # Atomic rename with retries for Windows file locking
                 max_retries = 3
@@ -652,28 +696,14 @@ class CacheManager:
                     except OSError:
                         pass
 
-    def _json_revive(self, obj: Any) -> Any:
-        """Recursively revive objects from their JSON-safe representation."""
-        if isinstance(obj, dict):
-            if obj.get("__type__") == "bytes" and obj.get("encoding") == "hex":
-                try:
-                    return bytes.fromhex(obj.get("data", ""))
-                except (ValueError, TypeError):
-                    return obj  # Return as-is if hex is invalid
-            return {k: self._json_revive(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [self._json_revive(v) for v in obj]
-        return obj
-
     def _load_persistent_caches(self) -> None:
         if not os.path.exists(CACHE_DIR):
             return
         for cache_file in os.listdir(CACHE_DIR):
-            if cache_file.endswith(".json"):
-                cache_name = cache_file[:-5]
+            if cache_file.endswith(".pkl"):
+                cache_name = cache_file[:-4]
                 cache_path = os.path.join(CACHE_DIR, cache_file)
                 try:
-                    # Check if file is empty to prevent JSONDecodeError
                     if os.path.getsize(cache_path) == 0:
                         logger.warning(
                             f"Cache file {cache_file} is empty. Deleting it."
@@ -681,32 +711,22 @@ class CacheManager:
                         os.remove(cache_path)
                         continue
 
-                    with open(cache_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
+                    with open(cache_path, "rb") as f:
+                        data = pickle.load(f)
                         cache = Cache(cache_name)
                         for key, value in data.get("data", {}).items():
-                            revived_value = self._json_revive(value)
-                            cache.set(key, revived_value, ttl=0)
+                            cache.set(key, value, ttl=0)
                         cache.dependencies = data.get("dependencies", {})
                         self.caches[cache_name] = cache
                     logger.debug(f"Loaded persistent cache: {cache_name}")
-                except json.JSONDecodeError as e:
-                    logger.error(
-                        f"Failed to decode JSON from {cache_file}: {e}. Deleting corrupt cache file."
-                    )
-                    try:
-                        os.remove(cache_path)
-                    except OSError as oe:
-                        logger.error(
-                            f"Error removing corrupt cache file {cache_path}: {oe}"
-                        )
                 except Exception as e:
                     logger.error(
                         f"Failed to load cache {cache_name} from {cache_file}: {e}"
                     )
-
-
-cache_manager = CacheManager(persist=False)
+                    try:
+                        os.remove(cache_path)
+                    except OSError as oe:
+                        pass
 
 
 def get_tracker_cache_key(tracker_path: str, tracker_type: str) -> str:
@@ -900,7 +920,11 @@ def cached(
 
                 # Sort the mtime list to ensure order invariance
                 mtime_list.sort()
-                key = f"{base_key}|mtime:{hash('|'.join(mtime_list))}"
+                mtime_str = "|".join(mtime_list)
+                import hashlib
+
+                stable_mtime_hash = hashlib.sha256(mtime_str.encode()).hexdigest()
+                key = f"{base_key}|mtime:{stable_mtime_hash}"
 
             cache_ttl_to_use = ttl if ttl is not None else DEFAULT_TTL
             cache = cache_manager.get_cache(cache_name, cache_ttl_to_use)
@@ -1022,3 +1046,7 @@ def get_cache_stats(cache_name: str) -> Dict[str, int]:
     """Get hit/miss stats for a cache."""
     cache = cache_manager.get_cache(cache_name)
     return cache.stats()
+
+
+cache_manager = CacheManager(persist=True)
+atexit.register(cache_manager.clear_all)

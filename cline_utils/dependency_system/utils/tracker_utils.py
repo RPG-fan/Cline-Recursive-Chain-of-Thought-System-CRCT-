@@ -22,10 +22,9 @@ from cline_utils.dependency_system.core.key_manager import (
 from .cache_manager import cached
 from .cache_manager import normalize_path_cached as normalize_path
 from .config_manager import ConfigManager
+from .path_utils import PathMigrationInfo
 
 logger = logging.getLogger(__name__)
-
-PathMigrationInfo = Dict[str, Tuple[Optional[str], Optional[str]]]
 
 
 # --- GLOBAL INSTANCE RESOLUTION HELPERS (Centralized Here) ---
@@ -414,15 +413,33 @@ def _get_aggregation_v2_cache_key(
     show_progress: bool = True,
 ) -> str:
     paths_part = ":".join(sorted(list(paths)))
-    pmi_part = hash(tuple(sorted(pmi.items())))
+
+    # Stable hash for PathMigrationInfo instead of builtin hash()
+    if pmi:
+        pmi_str = "".join(f"{k}{v[0]}{v[1]}" for k, v in sorted(pmi.items()))
+        pmi_part = hashlib.sha256(pmi_str.encode()).hexdigest()
+    else:
+        pmi_part = "empty"
+
     cgptki_part = get_global_map_cache_key_part(cgptki)
     return f"agg_v2_gi:{paths_part}:{pmi_part}:{cgptki_part}"
+
+
+def _get_agg_file_deps(
+    tracker_paths: Set[str],
+    path_migration_info: PathMigrationInfo,
+    current_global_path_to_key_info: Dict[str, KeyInfo],
+    show_progress: bool = True,
+) -> List[str]:
+    return list(tracker_paths)
 
 
 @cached(
     "aggregation_v2_gi",
     key_func=_get_aggregation_v2_cache_key,
-    ttl=600,
+    ttl=0,  # No expiry, rely on mtime invalidation
+    file_deps=_get_agg_file_deps,
+    check_mtime=True,
 )
 def aggregate_all_dependencies(
     tracker_paths: Set[str],

@@ -9,7 +9,9 @@ import fnmatch
 import logging
 import os
 import re
-from typing import List
+from typing import Dict, List, Optional, Tuple
+
+PathMigrationInfo = Dict[str, Tuple[Optional[str], Optional[str]]]
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,7 @@ def normalize_path(path: str) -> str:
     Returns:
         Normalized path
     """
+
     def _normalize_path(p: str) -> str:
         if not p:
             return ""
@@ -141,6 +144,7 @@ def get_project_root() -> str:
     Returns:
         Path to the project root directory
     """
+
     def _get_project_root() -> str:
         current_dir = os.path.abspath(os.getcwd())
         root_indicators = ["project_root.cfg"]  # Added config file
@@ -247,6 +251,7 @@ def is_valid_project_path(path: str) -> bool:
     Returns:
         True if the path is within the project root, False otherwise
     """
+
     def _is_valid_project_path(p: str) -> bool:
         project_root = get_project_root()
         norm_p = normalize_path(p)
