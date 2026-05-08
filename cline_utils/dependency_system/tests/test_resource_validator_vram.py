@@ -19,7 +19,7 @@ class TestResourceValidatorVRAM(unittest.TestCase):
             (200 * 1024 * 1024, 0)  # second poll (target reached)
         ]
         
-        result = self.validator.wait_for_vram_release(target_free_mb=200, poll_interval=0.01)
+        result = self.validator.wait_for_vram_release(target_free_mb=200, poll_interval=0.01, tolerance_mb=0)
         self.assertTrue(result)
         self.assertEqual(mock_torch.cuda.mem_get_info.call_count, 3)
 
