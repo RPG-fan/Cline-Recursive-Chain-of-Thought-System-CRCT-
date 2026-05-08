@@ -1,4 +1,4 @@
-# Modular Reporting System (v8.3)
+# Modular Reporting System (v8.4)
 
 The CRCT reporting system has been decomposed into a decoupled architecture of **Scanners** (data collection) and **Formatters** (data presentation). This ensures that code quality analysis can be extended with new engines without modifying the output logic.
 
@@ -8,6 +8,7 @@ The CRCT reporting system has been decomposed into a decoupled architecture of *
 - **`static_engine.py`**: Performs deep analysis using Regex and tree-sitter. It detects TODOs, FIXMEs, anti-patterns (`placeholder`, `for now`, `simplified`, etc.), empty/stub functions and classes, and `NotImplementedError` raises. Also parses Pyright output for unused item diagnostics.
 - **`runtime_bridge.py`**: Integrates live metadata from the `runtime_inspector` via the `RuntimeIndex` class. Provides `enrich_issue()` to attach runtime context (owning symbol, type annotations, inheritance, callers) to static findings. Also independently emits runtime-only findings (e.g., annotated stubs, exported placeholders, orphan exports) that the static pipeline cannot detect. Contains `score_severity()` for per-issue severity scoring.
 - **`heuristics.py`**: Provides low-level symbol classification helpers (`has_trivial_body`, `is_abstract_class`, `is_protocol_class`, `is_data_container_class`, etc.) used by `runtime_bridge.py` to apply suppression logic and avoid false positives.
+- **`comment_index.py` (New in v8.4)**: Scans for Station Headers and Connection Maps project-wide. It validates machine-generated `[AUTO]` metadata against the current trackers and surfaces synchronization issues.
 
 ### `reporting/` (Presentation Layer)
 - **`markdown_formatter.py`**: The default generator for human-readable quality reports (`issues_report.md`).
@@ -23,6 +24,9 @@ The `report_generator.py` script acts as the main orchestrator. It automatically
 ```bash
 # Run the full reporting suite
 python -m code_analysis.report_generator
+
+# Run specifically with comment indexing (v8.4)
+python -m code_analysis.report_generator --comment-index
 ```
 
 *Note: The script generates both Markdown and JSON reports to `code_analysis/issues_report.md` and `code_analysis/issues_report.json` respectively.*

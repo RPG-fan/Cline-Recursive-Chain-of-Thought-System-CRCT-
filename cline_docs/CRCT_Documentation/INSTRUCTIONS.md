@@ -1,8 +1,8 @@
 # INSTRUCTIONS.md
 
-## Cline Recursive Chain-of-Thought System (CRCT) - v7.5 Instructions
+## Cline Recursive Chain-of-Thought System (CRCT) - v8.4 Instructions
 
-These instructions provide a guide to setting up and using the Cline Recursive Chain-of-Thought System (CRCT) v7.5. This system is designed to enhance the Cline extension in VS Code by providing robust context and dependency management for complex projects.
+These instructions provide a guide to setting up and using the Cline Recursive Chain-of-Thought System (CRCT) v8.4. This system is designed to enhance the Cline extension in VS Code by providing robust context and dependency management for complex projects through advanced algorithmic analysis and LLM-assisted verification.
 
 ---
 
@@ -37,7 +37,7 @@ These instructions provide a guide to setting up and using the Cline Recursive C
 
 ---
 
-## Step 2: Initialize the System (v7.5+)
+## Step 2: Initialize the System (v8.4+)
 
 1. **Start the System**:
    - In the Cline input, type `Start.` and run it.
@@ -46,9 +46,13 @@ These instructions provide a guide to setting up and using the Cline Recursive C
      - Load the corresponding phase plugin (e.g., `Set-up/Maintenance`).
      - Initialize core files in `cline_docs/`, including tracker files and context documents.
 
-2. **Follow Prompts**:
-   - The LLM may ask for input (e.g., project goals for `projectbrief.md`).
-   - Provide concise answers to help it populate files.
+2. **Automated Analysis**:
+   - Run: `analyze-project`
+   - This command now handles the entire "Grounding" process:
+     - Scans `[CODE_ROOT_DIRECTORIES]` and `[DOC_DIRECTORIES]`.
+     - Generates/Updates the `KeyMap` (Contextual Keys).
+     - Populates all trackers (`module_relationship_tracker.md`, `doc_tracker.md`, and mini-trackers).
+     - Generates Symbol Essence Strings (SES) and embeddings.
 
 3. **Verify Setup**:
    - Check `cline_docs/` for new files (e.g., `dependency_tracker.md`).
@@ -66,9 +70,14 @@ These instructions provide a guide to setting up and using the Cline Recursive C
      - Generate `module_relationship_tracker.md`, `doc_tracker.md`, and all mini-trackers using `dependency_processor.py`.
      - Suggest and validate module dependencies.
 
-2. **Validate Dependencies (if prompted)**:
-   - The LLM will use the `show-dependencies` command to inspect and validate suggested dependencies, confirming or adjusting characters (`<`, `>`, `x`, etc.) as needed.
-   - It is recommended to watch the LLM to ensure the logic it is using makes sense for any dependencies it adds or changes.
+2. **Resolve Placeholders (Bolt Pass)**:
+   - Run: `resolve-placeholders --limit <N>`
+   - The system utilizes the **Bolt Optimization** ($O(M)$ complexity) to algorithmically resolve directory-level and structural dependencies.
+   - For remaining ambiguous dependencies, the LLM processes tasks in **Deterministic Order** (sorted by context size from high to low) to optimize VRAM and prevent redundant model reloads.
+
+3. **Comment-Skill Integration**:
+   - After resolution, the system automatically triggers `populate_comments`.
+   - This utility injects **Station Headers** and **Connection Maps** directly into source files, providing agent-navigable infrastructure that stays in sync with the trackers.
 
 ---
 
@@ -93,7 +102,7 @@ These instructions provide a guide to setting up and using the Cline Recursive C
 
 ---
 
-## Using CRCT v7.5
+## Using CRCT v8.4
 
 1. **Understanding Phases**:
    - CRCT operates in three distinct phases, controlled by the `.clinerules` file:
@@ -108,8 +117,9 @@ These instructions provide a guide to setting up and using the Cline Recursive C
   Before transitioning between phases, ensure the following checklists are complete:
 
   - **Set-up/Maintenance → Strategy**:
-    - Confirm `doc_tracker.md` and `module_relationship_tracker.md` in `cline_docs/` have no 'p' placeholders (all dependencies verified).
-    - Verify that `[CODE_ROOT_DIRECTORIES]` and `[DOC_DIRECTORIES]` sections in `.clinerules` are correctly populated and list all relevant directories.
+    - Confirm `doc_tracker.md` and `module_relationship_tracker.md` in `cline_docs/` have no 'p' placeholders (all dependencies verified via Bolt Pass or LLM resolution).
+    - Ensure `activeContext.md` and `project_roadmap.md` are synchronized with the latest tracker state.
+    - Verify that `[CODE_ROOT_DIRECTORIES]` and `[DOC_DIRECTORIES]` sections in `.clinerules` are correctly populated.
 
   - **Strategy → Execution**:
     - Ensure all instruction files created in the Strategy phase (e.g., in `strategy_tasks/` or `src/`) contain complete "Steps" and "Dependencies" sections, providing clear guidance for the Execution phase.
@@ -153,7 +163,7 @@ These instructions provide a guide to setting up and using the Cline Recursive C
 
   **Understanding Contextual Keys:**
 
-  CRCT v7.5 uses a hierarchical key system (`KeyInfo`) to represent files and directories. Keys follow a pattern like `Tier` + `DirLetter` + `[SubdirLetter]` + `[FileNumber]` (e.g., `1A`, `1Aa`, `1Aa1`).
+  CRCT v8.4 uses a hierarchical key system (`KeyInfo`) to represent files and directories. Keys follow a pattern like `Tier` + `DirLetter` + `[SubdirLetter]` + `[FileNumber]` (e.g., `1A`, `1Aa`, `1Aa1`).
 
   - **Tier:** The initial number indicates the nesting level. Top-level roots are Tier 1.
   - **DirLetter:** An uppercase letter ('A', 'B', ...) identifies top-level directories within defined roots.
@@ -233,7 +243,7 @@ HDTA helps maintain a clear and organized project documentation structure, facil
 
 ## Notes
 
-- CRCT v7.5 represents a significant restructuring and stabilization of the system. While ongoing refinements and optimizations are planned, v7.5 is considered a stable and feature-rich release.
+- CRCT v8.4 introduces high-performance optimizations (Bolt) and automated source-code annotation (Comment-Skill) to bridge the gap between documentation and code.
 - The LLM automates most dependency management and system commands (e.g., `analyze-project`, `show-dependencies`, etc.).
 - For custom projects, ensure `src/` and `docs/` directories are populated before initializing the system.
   - `src/` and `docs/` are the default directories used for quick-start.
@@ -246,4 +256,4 @@ For further assistance, questions, or bug reports, please refer to the project's
 
 ---
 
-Thank you for using CRCT v7.5! I hope it enhances your Cline project workflows.
+Thank you for using CRCT v8.4! I hope it enhances your Cline project workflows.

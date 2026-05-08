@@ -1,4 +1,4 @@
-# Dependency Resolution & Prefetching (v8.3)
+# Dependency Resolution & Prefetching (v8.4)
 
 The CRCT dependency system handles complex placeholder patterns and large-scale project graphs through LLM-assisted resolution and parallel prefetching.
 
@@ -30,7 +30,17 @@ To eliminate I/O wait times and LLM bottlenecks, a robust background processing 
 
 ---
 
-## 3. How to Use
+## 3. Bolt Optimization (v8.4)
+ 
+ Version 8.4 introduces the **Bolt Optimization**, which fundamentally changes how dependency propagation is handled across directories.
+ 
+ - **O(M) Complexity**: Transitioned from an $O(N \cdot M)$ directory resolution loop to an $O(M)$ model using global set sharing.
+ - **Global Set Sharing**: Instead of each tracker reconstructing its dependency path from scratch, the system now uses a shared global set of resolved paths, significantly reducing redundant I/O and CPU cycles.
+ - **Batched Directory Resolution**: Directory placeholders are now resolved in a single algorithmic pass before LLM-based verification, ensuring that the LLM only handles truly ambiguous relationships.
+ 
+ ---
+ 
+ ## 4. How to Use
 
 ### Triggering Resolution (CLI)
 You can force the system to resolve placeholders in existing trackers using the `resolve-placeholders` command:

@@ -19,6 +19,15 @@ The `cline_utils.dependency_system.utils.viz` package is a modularized overhaul 
 - **Responsibility**: Contains Mermaid themes, layout configuration, and CSS styling for nodes.
 - **Key Elements**: `MERMAID_CONFIG`, `PUPPETEER_CONFIG`, `CLASS_DEFS`, `DEP_CHAR_TO_STYLE`, `SUBGRAPH_FILL`, `SUBGRAPH_STROKE`, `LINK_STYLE`.
 
+### `native_renderer.py` (Experimental)
+- **Role**: A Python-native SVG generator.
+- **Responsibility**: Directly constructs SVG files from a `LayoutModel` without requiring external Node.js dependencies.
+- **Experimental Status**: Currently allows edge lines to pass through nodes; optimized for performance over routing perfection.
+
+### `native_layout.py` (Experimental)
+- **Role**: Coordinates and routing logic for the native renderer.
+- **Responsibility**: Implements grid-based node placement and "pipe-bundling" for complex dependency webs.
+
 ---
 
 ## 2. How to Use
@@ -38,6 +47,13 @@ python -m cline_utils.dependency_system.dependency_processor visualize-dependenc
 ```
 
 Diagrams are saved as `.svg` files by default to `cline_docs/dependency_diagrams/`.
+
+### Using the Native Renderer (Experimental)
+To bypass the Mermaid-cli and use the experimental native renderer:
+
+```bash
+python -m cline_utils.dependency_system.dependency_processor visualize-dependencies --format svg --backend native
+```
 
 ### In Code
 You can leverage the modular package directly in your scripts via the `generate_mermaid_diagram` orchestrator function in `visualize_dependencies.py`, or by calling the sub-package modules directly:

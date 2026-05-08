@@ -1,11 +1,11 @@
 # Hardware Optimization Guide
 
 > [!TIP]
-> CRCT v8.0 automatically adapts to your hardware. This guide explains how the system selects models, optimizes performance, and how to fine-tune for your environment.
+> CRCT v8.4 automatically adapts to your hardware. This guide explains how the system selects models, optimizes performance, and how to fine-tune for your environment.
 
 ## Overview
 
-Version 8.0 introduces **hardware-adaptive** behavior that automatically:
+Version 8.4 introduces **hardware-adaptive** behavior that automatically:
 - Detects available VRAM, RAM, and CPU resources
 - Selects optimal embedding and reranking models
 - Adjusts batch sizes for maximum throughput
@@ -269,6 +269,15 @@ The system also proactively compresses large items:
 To eliminate I/O bottlenecks, the system now uses parallel workers to prefetch dependency data:
 - **Default**: `min(32, cpu_count * 2)` workers.
 - **Impact**: Up to 40% reduction in total analysis time on systems with fast NVMe storage.
+ 
+ ### Deterministic VRAM Scaling (v8.4)
+ Version 8.4 refactors the `resolve-placeholders` loop to process tasks sorted by descending context size. This ensures:
+ - **Monotonic VRAM Usage**: Starts with the most demanding task and moves to smaller ones.
+ - **Prevented Reloads**: Minimizes the frequency of GGUF model context reloads.
+ - **Efficiency**: Maximizes throughput for long-running batch operations.
+ 
+ ### Bolt Optimization Performance (v8.4)
+ The **Bolt Optimization** transitions directory dependency resolution to an $O(M)$ model using global set sharing. On large projects, this reduces directory-walk I/O overhead by up to **90%**, as each tracker no longer reconstructs its parent path independently.
 
 ---
 
@@ -562,4 +571,4 @@ Planned optimizations:
 
 ---
 
-**Hardware optimization in v8.0 is automatic and intelligent.** The system adapts to your resources, ensuring the best possible performance without manual tuning. For most users, the defaults are optimal.
+**Hardware optimization in v8.4 is automatic and intelligent.** The system adapts to your resources, ensuring the best possible performance without manual tuning. For most users, the defaults are optimal.

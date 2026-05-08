@@ -1,6 +1,6 @@
 # Local LLM Dependency Resolution Guide
 
-This guide provides detailed instructions on using the local LLM-assisted commands introduced in **v8.x** of the Cline Recursive Chain-of-Thought System (CRCT). These tools are designed to make dependency verification more efficient and less costly by offloading semantic analysis to local models (GGUF).
+This guide provides detailed instructions on using the local LLM-assisted commands introduced in **v8.x** (latest: v8.4) of the Cline Recursive Chain-of-Thought System (CRCT). These tools are designed to make dependency verification more efficient and less costly by offloading semantic analysis to local models (GGUF).
 
 ---
 
@@ -43,7 +43,9 @@ python -m cline_utils.dependency_system.dependency_processor resolve-placeholder
 - `--model`: (Optional) Specify a custom path to a GGUF model.
 
 **Batching Behavior:**
-The command processes updates in batches of 10 for performance and reliability. If an error occurs during one pair analysis, the system logs the error and continues to the next.
+The command processes updates in batches of 10 for performance and reliability.
+- **Deterministic Tasking (v8.4)**: Tasks are sorted by descending exact token count. This ensures that the model context window is used monotonically, starting with the largest tasks and decreasing, which prevents redundant model reloads and maximizes VRAM efficiency.
+- **Dynamic Context Scaling**: The system automatically adjusts `n_ctx` based on the largest task in the current batch.
 
 ### 2. `determine-dependency`
 This command is for deep-diving into a specific relationship between two files. It provides the full reasoning output from the LLM.
@@ -66,7 +68,8 @@ Effective February 2026, the `resolve-placeholders` command is an **Optional Aut
 
 1.  **Scan**: Run `show-keys` to see where 'p' placeholders exist.
 2.  **Automate**: Run `resolve-placeholders` on the tracker.
-3.  **Verify**: Review the updated tracker. The LLM will have converted 'p' into definitive relationships based on the file contents.
+    - **Bolt Pass (v8.4)**: Before the LLM phase, the system runs an algorithmic pass to resolve directory-based placeholders using global set sharing ($O(M)$ complexity).
+3.  **Verify**: Review the updated tracker.
 4.  **Manual Polish**: Use `show-placeholders` to address any 'n' results or 'p' items that exceeded token limits.
 
 ---

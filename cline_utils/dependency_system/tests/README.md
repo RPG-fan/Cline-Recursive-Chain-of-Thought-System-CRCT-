@@ -18,7 +18,7 @@ This directory contains the comprehensive test suite for the CRCT Dependency Sys
 ### Prerequisites
 Ensure you have the development dependencies installed:
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements.txt
 ```
 
 ### Basic Usage

@@ -1,8 +1,8 @@
-# Cache System Documentation (v8.3)
+# Cache System Documentation (v8.4)
 
 ## Overview
 
-The CRCT cache system is a production-grade infrastructure designed to boost performance by storing the results of potentially costly operations (e.g., embeddings, re-ranking, AST analysis). Version 8.3 introduces cross-session persistence, hardware-adaptive resource management, and stable hashing for reliable hits across environments.
+The CRCT cache system is a production-grade infrastructure designed to boost performance by storing the results of potentially costly operations (e.g., embeddings, re-ranking, AST analysis). Version 8.4 continues to refine this with stable hashing, hardware-adaptive resource management, and integration with the Bolt Optimization for faster dependency resolution.
 
 #### Core Components:
 
@@ -10,7 +10,7 @@ The CRCT cache system is a production-grade infrastructure designed to boost per
 2.  **`CacheManager` Class**: The central orchestrator that oversees all active `Cache` instances. It enforces the **Global Memory Budget**, manages persistent storage using **Pickle**, and handles automatic migration from legacy JSON caches.
 3.  **`@cached` Decorator**: The primary interface for developers. It handles automated key generation, stable SHA256 hashing of file modification times, and dependency-aware invalidation.
 
-#### Key Features (v8.3):
+#### Key Features (v8.4):
 
 -   **Stable Hashing**: Uses SHA256 hashes of file modification times (mtimes) to ensure cache hits persist even when the process is restarted or moved.
 -   **Persistent Storage (Pickle)**: Caches are saved as `.pkl` files in `cline_utils/dependency_system/utils/cache/`, allowing results to be reused across different CLI executions.

@@ -1,5 +1,5 @@
 {
-  "version": "8.3.0",
+  "version": "8.4.0",
   "dependencies": {
     "@mermaid-js/mermaid-cli": "^11.9.0",
     "@mermaid-js/layout-elk": "*"

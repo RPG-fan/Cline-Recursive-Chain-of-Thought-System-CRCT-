@@ -1,6 +1,6 @@
-# Advanced Cache Tuning (v8.3)
+# Advanced Cache Tuning (v8.4)
 
-Version 8.3 introduces a production-grade caching infrastructure designed for cross-session persistence and hardware-adaptive resource management.
+Version 8.4 continues to refine the production-grade caching infrastructure introduced in v8.3, focusing on integration with the Bolt Optimization and improved VRAM efficiency for local LLM tasks.
 
 ## 1. Stable Hashing (SHA256)
 The system now uses SHA256 stable hashing for cache keys involving file modification times (mtimes). This ensures that cache hits are reliable across different process runs and environments, provided the underlying file content hasn't changed.

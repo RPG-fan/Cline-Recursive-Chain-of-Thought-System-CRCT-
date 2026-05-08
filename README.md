@@ -1,7 +1,14 @@
-# Cline Recursive Chain-of-Thought System (CRCT) - v8.3
+# Cline Recursive Chain-of-Thought System (CRCT) - v8.4
 
 Welcome to the **Cline Recursive Chain-of-Thought System (CRCT)**, a framework designed to manage context, dependencies, and tasks in large-scale Cline projects within VS Code. Built for the Cline extension, CRCT leverages a recursive, file-based approach with a modular dependency tracking system to maintain project state and efficiency as complexity increases.
 
+- Version **v8.4**: **OPTIMIZATION & NATIVE VIZ** - High-Performance Scaling & Dependency Annotation
+    - **Optimization**: Refactored dependency resolution to $O(M)$ complexity using global set sharing, eliminating redundant path reconstruction.
+    - **Deterministic LLM Tasking**: Implemented monotonically decreasing context-size sorting for LLM resolution tasks to maximize VRAM efficiency and minimize model reloads.
+    - **Native SVG Renderer (EXPERIMENTAL)**: Introduced a native Python-based SVG renderer for high-density dependency diagrams with intelligent routing avoidance. *Note: Currently experimental; edges may occasionally overlap nodes.*
+    - **Automated Dependency Annotation**: New `populate_comments.py` utility for injecting "Station Headers" and "Connection Maps" directly into source code to enhance agent navigability.
+    - **Agent Comment-Skill Suite**: Deployed a comprehensive suite of plugins and documentation for dependency-driven code comments across multiple languages.
+    - **Comment-Aware Reporting**: Integrated a new `comment_index` scanner into the reporting pipeline to surface architectural metadata alongside code quality issues.
 - Version **v8.3**: 🎨 **MODULAR ARCHITECTURE & STABLE CACHING** - Architectural Refinement & Reliability
     - **Modular Visualization Refactor**: The dependency visualization system has been decomposed into a dedicated `viz` sub-package, separating Mermaid DSL construction, image rendering, and layout configuration.
     - **Report Generator Decomposition**: Refactored the monolithic `report_generator.py` into specialized `scanner` and `reporting` packages for better maintainability and code quality analysis.
@@ -101,6 +108,16 @@ Welcome to the **Cline Recursive Chain-of-Thought System (CRCT)**, a framework d
     - New template for Roadmap Summaries.
 - **Configurable Embedding Device**: Allows users to configure the embedding device (`cpu`, `cuda`, `mps`) via `.clinerules.config.json` for optimized performance on different hardware. (Note: *the system does not yet install the requirements for cuda or mps automatically, please install the requirements manually or with the help of the LLM.*)
 - **File Exclusion Patterns**: Users can now define file exclusion patterns in `.clinerules.config.json` to customize project analysis.
+- **Automated Dependency Annotation**: **(NEW in v8.4)**
+    - Automatically injects **Station Headers** (ROLE, LAYER, CRCT_KEY) at the top of source files.
+    - Adds **Connection Maps** (dependency rails) before function and class definitions.
+    - Preserves agent-authored prose in `[FILL: ...]` tags while refreshing architectural metadata.
+- **Experimental Native SVG Visualization**: **(NEW in v8.4)**
+    - A Python-native renderer for high-density dependency graphs.
+    - Bypasses `mermaid-cli` overhead for local visualizations.
+    - Supports grouped layouts and "pipe-bundling" for complex modules.
+    - > [!CAUTION]
+    - > **Experimental Status**: The native renderer is currently in an experimental state. Edge routing may occasionally overlap nodes or pass through unrelated labels. For mission-critical diagrams, the default Mermaid backend is recommended.
 - **Code Quality Analysis**: **(NEW in v8.0, Improved in v8.1)**
     - **Report Generator**: A tool (`report_generator.py`) that performs AST-based code quality analysis.
     - **Incomplete Code Detection**: Identifies `TODO`, `FIXME`, empty functions/classes, and `pass` statements using robust Tree-sitter parsing.
@@ -256,6 +273,7 @@ Cline-Recursive-Chain-of-Thought-System-CRCT-/
 
 ## Current Status & Future Plans
 
+- **v8.4**: ⚡ **Optimization & Native Viz** - Refactored dependency resolution to $O(M)$, introduced experimental native SVG rendering, and deployed the automated comment-skill annotation system.
 - **v8.3**: 🎨 **Modular Viz & Stable Caching** - Refactored visualization architecture into a dedicated `viz` package and implemented stable SHA256 hashing for reliable persistent caching.
 - **v8.2**: 🤖 **Local LLM & Dual-Tokens** - Automated resolution of dependency placeholders and precise token-based context management.
 - **v8.1**: ⚡ **Performance Optimization** - Introduced batch tracker updates and advanced caching mechanisms to handle larger projects with lower I/O overhead.

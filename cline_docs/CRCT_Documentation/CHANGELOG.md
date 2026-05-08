@@ -5,6 +5,24 @@ All notable changes to the Cline Recursive Chain-of-Thought System (CRCT) will b
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.4.0] - 2026-05-08
+
+### Added
+- **Automated Dependency Annotation**: New `populate_comments.py` utility for injecting Station Headers and Connection Maps into source files.
+- **Experimental Native SVG Renderer**: Python-native dependency visualization with intelligent routing and pipe-bundling.
+- **Comment-Aware Reporting**: Integrated `comment_index` scanner into the report generation pipeline.
+- **Agent Comment-Skill Suite**: Comprehensive documentation and plugins for dependency-driven code comments.
+
+### Changed
+- **Deterministic LLM Tasking**: Optimized placeholder resolution by sorting tasks by descending context size to maximize VRAM efficiency.
+- **Improved Reporting**: Enhanced `report_generator` to surface architectural metadata from the new comment system.
+
+### Performance
+- **Optimization**: Refactored dependency resolution to $O(M)$ complexity using global set sharing and batched directory resolution.
+- **Global Path Sharing**: Eliminated redundant path set reconstruction across the dependency resolution loop.
+
+---
+
 ## [8.3.0] - 2026-05-03
 
 ### Added
