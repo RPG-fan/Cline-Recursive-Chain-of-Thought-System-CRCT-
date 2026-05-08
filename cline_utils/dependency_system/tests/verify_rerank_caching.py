@@ -50,8 +50,8 @@ class TestRerankCaching(unittest.TestCase):
         mock_load_model.return_value = (mock_tokenizer, mock_model)
         
         # Inject pre-computed token IDs since we are mocking the load function which usually sets them
-        embedding_manager.RERANKER_FALSE_ID = 1
-        embedding_manager.RERANKER_TRUE_ID = 2
+        embedding_manager.reranker_false_id = 1
+        embedding_manager.reranker_true_id = 2
         
         query = "test query"
         candidates = ["doc1", "doc2"]
