@@ -44,6 +44,7 @@ from code_analysis.scanner.runtime_bridge import (
 )
 from code_analysis.reporting.markdown_formatter import format_markdown
 from code_analysis.reporting.json_exporter import export_json
+from code_analysis.scanner.comment_index import scan_project_comments
 
 config = ConfigManager()
 
@@ -88,6 +89,7 @@ def main():
     idx = RuntimeIndex(runtime_data)
 
     # ---- static walk ----
+    scanned_file_paths: List[str] = []
     print(f"Scanning code roots: {code_roots}")
     for root_dir_name in code_roots:
         # Code roots from config are often relative to project root
@@ -114,6 +116,7 @@ def main():
                     continue
                 if Path(file).suffix not in EXTENSIONS:
                     continue
+                scanned_file_paths.append(filepath)
                 all_issues.extend(scan_file(filepath))
 
     # ---- runtime-only findings ----
@@ -150,9 +153,17 @@ def main():
 
     unused_items = get_unused_items()
 
+    # ---- comment index ----
+    print("Building comment index...")
+    comment_index = scan_project_comments(scanned_file_paths)
+    print(
+        f"Comment index: {sum(len(v) for v in comment_index.values())} entries "
+        f"across {len(comment_index)} files."
+    )
+
     # ---- Generate Reports ----
-    export_json(all_issues, unused_items, OUTPUT_JSON_FILE)
-    format_markdown(all_issues, unused_items, OUTPUT_FILE)
+    export_json(all_issues, unused_items, OUTPUT_JSON_FILE, comment_index=comment_index)
+    format_markdown(all_issues, unused_items, OUTPUT_FILE, comment_index=comment_index)
 
     print(f"Report generated at {OUTPUT_FILE}")
     print(f"JSON report at {OUTPUT_JSON_FILE}")

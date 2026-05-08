@@ -3,13 +3,17 @@ Markdown report formatter for CRCT.
 Generates human-readable Markdown from enriched issue data.
 """
 
+import os
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
 def format_markdown(
-    issues: List[Dict[str, Any]], unused: List[Dict[str, Any]], output_path: str
+    issues: List[Dict[str, Any]],
+    unused: List[Dict[str, Any]],
+    output_path: str,
+    comment_index: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> None:
     """Generate the human-readable Markdown report."""
     with open(output_path, "w", encoding="utf-8") as f:
@@ -106,3 +110,37 @@ def format_markdown(
                 f.write(f"  > {item['content']}\n")
         else:
             f.write("No unused items found (or pyright output missing).\n")
+
+        # ---- Comment Index ----
+        if comment_index:
+            project_root = os.path.abspath(
+                os.path.join(os.path.dirname(output_path), "..")
+            )
+            f.write("\n---\n## Comment Index\n")
+            f.write(
+                "_Infrastructure comments (STATION_HEADER, CONNECTION_MAP) are silenced. "
+                "Subtypes: `incomplete` = unfinished work marker, `audit` = lint suppression / structural note._\n"
+            )
+            for norm_path, entries in sorted(comment_index.items()):
+                if not entries:
+                    continue
+                # Use short relative path for readability
+                try:
+                    display = os.path.relpath(norm_path, project_root).replace(
+                        "\\", "/"
+                    )
+                except ValueError:
+                    # Fallback if paths are on different drives (Windows)
+                    display = norm_path.replace("\\", "/")
+
+                f.write(
+                    f"\n<details><summary><code>{display}</code> ({len(entries)} comments)</summary>\n"
+                )
+                f.write("\n| Line | Preview | Subtype | Tier |")
+                f.write("\n|------|---------|---------|------|")
+                for entry in entries:
+                    subtype = entry.get("subtype") or ""
+                    tier = entry.get("tier") or ""
+                    preview = entry.get("preview", "").replace("|", "\\|")
+                    f.write(f"\n| {entry['line']} | `{preview}` | {subtype} | {tier} |")
+                f.write("\n</details>\n")

@@ -34,28 +34,20 @@ HTML_LANGUAGE = Language(tshtml.language())
 TS_LANGUAGE = Language(tstypescript.language_typescript())
 TSX_LANGUAGE = Language(tstypescript.language_tsx())
 PY_LANGUAGE = Language(tspython.language())
+RUST_LANGUAGE = tslp.get_language("rust")
 
 # Extended languages via language pack
 JSON_LANGUAGE = tslp.get_language("json")
+JAVA_LANGUAGE = tslp.get_language("java")
 MARKDOWN_LANGUAGE = tslp.get_language("markdown")
 MARKDOWN_INLINE_LANGUAGE = tslp.get_language("markdown_inline")
 SVELTE_LANGUAGE = tslp.get_language("svelte")
 SQL_LANGUAGE = tslp.get_language("sql")
 
-# --- FIX (MAJOR): Remove global Parser instances. They are NOT thread-safe. ---
-# Parsers will now be created locally within each analysis function.
-# CSS_PARSER = Parser(CSS_LANGUAGE) # REMOVED
-# HTML_PARSER = Parser(HTML_LANGUAGE) # REMOVED
-# JS_PARSER = Parser(JS_LANGUAGE) # REMOVED
-# TS_PARSER = Parser(TS_LANGUAGE) # REMOVED
-# TSX_PARSER = Parser(TSX_LANGUAGE) # REMOVED
 
 from cline_utils.dependency_system.utils.cache_manager import cache_manager, cached
 from cline_utils.dependency_system.utils.cache_manager import (
     get_project_root_cached as get_project_root,
-)
-from cline_utils.dependency_system.utils.cache_manager import (
-    invalidate_dependent_entries,
 )
 from cline_utils.dependency_system.utils.cache_manager import (
     normalize_path_cached as normalize_path,
@@ -172,7 +164,11 @@ GENERIC_CALL_NAMES = {
 MANUAL_IGNORED_SOURCES = {"logger", "console"}
 
 
-@cached("is_internal_module", key_func=lambda module_name: f"is_internal:{module_name}")
+def _is_internal_module_key(module_name: str) -> str:
+    return f"is_internal:{module_name}"
+
+
+@cached("is_internal_module", key_func=_is_internal_module_key)
 def _is_internal_module(module_name: str) -> bool:
     """
     Checks if a module name corresponds to an internal project file.
@@ -375,9 +371,14 @@ def _normalize_imports(result: Dict[str, Any]) -> None:
 
 
 # --- Main Analysis Function ---
+def _analyze_file_key(file_path: str, force: bool = False) -> str:
+    mtime = os.path.getmtime(str(file_path)) if os.path.exists(str(file_path)) else 0
+    return f"analyze_file:{normalize_path(str(file_path))}:{mtime}:{force}"
+
+
 @cached(
     "file_analysis",
-    key_func=lambda file_path, force=False: f"analyze_file:{normalize_path(str(file_path))}:{(os.path.getmtime(str(file_path)) if os.path.exists(str(file_path)) else 0)}:{force}",
+    key_func=_analyze_file_key,
     track_path_args=[0],
 )
 def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
@@ -471,6 +472,7 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
             "decorators_used": [],
             "exceptions_handled": [],
             "with_contexts_used": [],
+            "literal_assignments": [],  # Initialize explicitly for type safety
         }
         try:
             with open(norm_file_path, "r", encoding="utf-8") as f:
@@ -499,7 +501,6 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
 
         if file_type == "py":
             _analyze_python_file(norm_file_path, content, analysis_result)
-            # --- FIX (MAJOR): Do not pop the AST. Keep it in the result for explicit passing. ---
             # The AST is still cached for other potential uses, but it's no longer removed
             # from the main analysis result.
             ast_object = analysis_result.get("_ast_tree")
@@ -530,10 +531,16 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
                 ts_ast_cache.set(norm_file_path, ts_tree_object)
             # ----------------------------------------------
 
+        elif file_type == "java":
+            _analyze_java_file_ts(norm_file_path, content, analysis_result)
+            ts_tree_object = analysis_result.get("_ts_tree")
+            if ts_tree_object:
+                ts_ast_cache = cache_manager.get_cache("ts_ast_cache")
+                ts_ast_cache.set(norm_file_path, ts_tree_object)
+
         elif file_type == "js":
             # Strict separation of concerns: use JavaScript-specific analyzer only for .js
             _analyze_javascript_file_ts(norm_file_path, content, analysis_result)
-            # --- FIX (MAJOR): Do not pop the tree-sitter tree. ---
             ts_tree_object = analysis_result.get("_ts_tree")
             if ts_tree_object:
                 ts_ast_cache = cache_manager.get_cache("ts_ast_cache")
@@ -593,6 +600,13 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
 
         elif file_type == "sql":
             _analyze_sql_file_ts(norm_file_path, content, analysis_result)
+            ts_tree_object = analysis_result.get("_ts_tree")
+            if ts_tree_object:
+                ts_ast_cache = cache_manager.get_cache("ts_ast_cache")
+                ts_ast_cache.set(norm_file_path, ts_tree_object)
+
+        elif file_type == "rs":
+            _analyze_rust_file_ts(norm_file_path, content, analysis_result)
             ts_tree_object = analysis_result.get("_ts_tree")
             if ts_tree_object:
                 ts_ast_cache = cache_manager.get_cache("ts_ast_cache")
@@ -771,9 +785,9 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                 # Avoid duplicates
                 if not any(
                     a["name"] == target_name and a["value"] == extracted_val
-                    for a in result["literal_assignments"]
+                    for a in cast(List[Dict[str, Any]], result["literal_assignments"])
                 ):
-                    result["literal_assignments"].append(
+                    cast(List[Dict[str, Any]], result["literal_assignments"]).append(
                         {
                             "name": target_name,
                             "value": extracted_val,
@@ -881,12 +895,10 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
         return names
 
     result.setdefault("_ast_tree", None)  # Initialize key in result
-    tree_obj_for_debug: Optional[ast.AST] = None
 
     try:
         tree = ast.parse(content, filename=file_path)
         result["_ast_tree"] = tree
-        tree_obj_for_debug = tree
 
         # logger.debug(
         #     f"DEBUG DA: Parsed {file_path}. AST tree assigned to result['_ast_tree']. Type: {type(result['_ast_tree'])}"
@@ -1342,10 +1354,105 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
         )
         result["error"] = f"Unexpected AST analysis error: {e}"
 
-    is_tree_none_at_end = result.get("_ast_tree") is None
-    # logger.debug(
-    #     f"DEBUG DA: End of _analyze_python_file for {file_path}. result['_ast_tree'] is None: {is_tree_none_at_end}. tree_obj_for_debug type: {type(tree_obj_for_debug)}. Keys: {list(result.keys())}"
-    # )
+
+def _analyze_java_file_ts(file_path: str, content: str, result: Dict[str, Any]) -> None:
+    """
+    Tree-sitter based analysis for Java (.java) files.
+    Extracts imports, class declarations, and method declarations.
+    """
+    # --- FIX (MAJOR): Create a local, thread-safe parser instance. ---
+    from tree_sitter import Parser
+
+    result.setdefault("imports", [])
+    result.setdefault("functions", [])
+    result.setdefault("classes", [])
+    result.setdefault("calls", [])
+    result.setdefault("_ts_tree", None)
+
+    try:
+        content_bytes = content.encode("utf-8", errors="ignore")
+        parser = Parser(JAVA_LANGUAGE)
+        tree = parser.parse(content_bytes)
+        result["_ts_tree"] = tree
+
+        # Define Java tree-sitter queries
+        imports_query = "(import_declaration [(identifier) (scoped_identifier)] @path)"
+        classes_query = """
+        [
+          (class_declaration name: (identifier) @class.name)
+          (interface_declaration name: (identifier) @class.name)
+          (enum_declaration name: (identifier) @class.name)
+          (record_declaration name: (identifier) @class.name)
+        ]
+        """
+        methods_query = """
+        [
+          (method_declaration name: (identifier) @method.name)
+          (constructor_declaration name: (identifier) @method.name)
+        ]
+        """
+        calls_query = "(method_invocation name: (identifier) @call.name)"
+
+        def run_query_java(query_str: str) -> List[Tuple[Any, str]]:
+            q = Query(JAVA_LANGUAGE, query_str)
+            captures: List[Tuple[Any, str]] = []
+            cursor = QueryCursor(q)
+            matches = cursor.matches(tree.root_node)
+            for _pattern_index, captures_dict in matches:
+                for cap_name, nodes in captures_dict.items():
+                    for node in nodes:
+                        captures.append((node, cap_name))
+            return captures
+
+        # Imports
+        for node, cap in run_query_java(imports_query):
+            if cap == "path":
+                result["imports"].append(
+                    {
+                        "path": _get_ts_node_text(node, content_bytes),
+                        "line": node.start_point[0] + 1,
+                    }
+                )
+
+        # Classes
+        for node, cap in run_query_java(classes_query):
+            if cap == "class.name":
+                result["classes"].append(
+                    {
+                        "name": _get_ts_node_text(node, content_bytes),
+                        "line": node.start_point[0] + 1,
+                    }
+                )
+
+        # Methods (mapped to 'functions' for cross-language consistency)
+        for node, cap in run_query_java(methods_query):
+            if cap == "method.name":
+                result["functions"].append(
+                    {
+                        "name": _get_ts_node_text(node, content_bytes),
+                        "line": node.start_point[0] + 1,
+                    }
+                )
+
+        # Calls
+        for node, cap in run_query_java(calls_query):
+            if cap == "call.name":
+                result["calls"].append(
+                    {
+                        "target_name": _get_ts_node_text(node, content_bytes),
+                        "line": node.start_point[0] + 1,
+                    }
+                )
+
+    except Exception as e:
+        logger.exception(f"Java analysis error for {file_path}: {e}")
+        result["error"] = f"Java analysis error: {e}"
+    finally:
+        result.setdefault("imports", [])
+        result.setdefault("functions", [])
+        result.setdefault("classes", [])
+        _normalize_imports(result)
+        result["analysis_kind"] = "java"
 
 
 def _analyze_javascript_file_ts(
@@ -1367,7 +1474,6 @@ def _analyze_javascript_file_ts(
 
     try:
         content_bytes = content.encode("utf-8", errors="ignore")
-        # --- FIX (MAJOR): Create a local, thread-safe parser instance. ---
         parser = Parser(JS_LANGUAGE)
         tree = parser.parse(content_bytes)
         result["_ts_tree"] = tree
@@ -1595,7 +1701,6 @@ def _analyze_typescript_file_ts(
 
     try:
         content_bytes = content.encode("utf-8", errors="ignore")
-        # --- FIX (MAJOR): Create a local, thread-safe parser instance. ---
         parser = Parser(TS_LANGUAGE)
         tree = parser.parse(content_bytes)
         result["_ts_tree"] = tree
@@ -1792,7 +1897,6 @@ def _analyze_tsx_file_ts(file_path: str, content: str, result: Dict[str, Any]) -
 
     try:
         content_bytes = content.encode("utf-8", errors="ignore")
-        # --- FIX (MAJOR): Create a local, thread-safe parser instance. ---
         parser = Parser(TSX_LANGUAGE)
         tree = parser.parse(content_bytes)
         result["_ts_tree"] = tree
@@ -2867,6 +2971,134 @@ def _analyze_svelte_file_ts(
         result["error"] = f"Tree-sitter Svelte parsing error: {e}"
 
 
+def _extract_rust_classes_functions(
+    root_node: Node, content_bytes: bytes, file_path: str
+) -> List[Dict[str, Any]]:
+    """Extract struct/impl and function symbols from Rust code using tree-sitter."""
+    symbols: List[Dict[str, Any]] = []
+
+    # Query for functions
+    func_query = Query(
+        RUST_LANGUAGE,
+        """
+        (function_item
+            name: (identifier) @func.name
+        ) @func
+    """,
+    )
+
+    # Query for structs/impls (often mapped as classes in generalized ASTs)
+    struct_query = Query(
+        RUST_LANGUAGE,
+        """
+        (struct_item
+            name: (type_identifier) @struct.name
+        ) @struct
+        (impl_item
+            type: (type_identifier) @impl.name
+        ) @impl
+    """,
+    )
+
+    try:
+        func_cursor = QueryCursor(func_query)
+        for _match_id, captures in func_cursor.matches(root_node):
+            if "func.name" in captures and "func" in captures:
+                name_node = captures["func.name"][0]
+                func_node = captures["func"][0]
+
+                symbols.append(
+                    {
+                        "name": _get_ts_node_text(name_node, content_bytes),
+                        "type": "function",
+                        "line": func_node.start_point[0] + 1,
+                        "code": _get_ts_node_text(func_node, content_bytes),
+                    }
+                )
+    except Exception as e:
+        logger.error(f"Error querying rust functions in {file_path}: {e}")
+
+    try:
+        struct_cursor = QueryCursor(struct_query)
+        for _match_id, captures in struct_cursor.matches(root_node):
+            if "struct.name" in captures and "struct" in captures:
+                name_node = captures["struct.name"][0]
+                struct_node = captures["struct"][0]
+                symbols.append(
+                    {
+                        "name": _get_ts_node_text(name_node, content_bytes),
+                        "type": "class",
+                        "line": struct_node.start_point[0] + 1,
+                        "code": _get_ts_node_text(struct_node, content_bytes),
+                    }
+                )
+            elif "impl.name" in captures and "impl" in captures:
+                name_node = captures["impl.name"][0]
+                impl_node = captures["impl"][0]
+                symbols.append(
+                    {
+                        "name": _get_ts_node_text(name_node, content_bytes),
+                        "type": "class",  # We map impl to class
+                        "line": impl_node.start_point[0] + 1,
+                        "code": _get_ts_node_text(impl_node, content_bytes),
+                    }
+                )
+    except Exception as e:
+        logger.error(f"Error querying rust structs in {file_path}: {e}")
+
+    return symbols
+
+
+def _analyze_rust_file_ts(file_path: str, content: str, result: Dict[str, Any]) -> None:
+    """Analyzes Rust file content using tree-sitter."""
+    result.setdefault("functions", [])
+    result.setdefault("classes", [])
+    result.setdefault("imports", [])
+    result.setdefault("_ts_tree", None)
+
+    try:
+        content_bytes = content.encode("utf8", errors="ignore")
+        parser = Parser(RUST_LANGUAGE)
+        tree = parser.parse(content_bytes)
+        result["_ts_tree"] = tree
+        root_node = tree.root_node
+
+        # Query for imports (use declarations)
+        import_query = Query(
+            RUST_LANGUAGE,
+            """
+            (use_declaration) @import
+        """,
+        )
+
+        cursor = QueryCursor(import_query)
+        for _match_id, captures in cursor.matches(root_node):
+            if "import" in captures:
+                for node in captures["import"]:
+                    result["imports"].append(
+                        {
+                            "name": _get_ts_node_text(node, content_bytes),
+                            "line": node.start_point[0] + 1,
+                        }
+                    )
+
+        # Extract functions and classes
+        symbols = _extract_rust_classes_functions(root_node, content_bytes, file_path)
+        for sym in symbols:
+            if sym["type"] == "function":
+                result["functions"].append(sym)
+            elif sym["type"] == "class":
+                result["classes"].append(sym)
+
+        result["analysis_kind"] = "rust"
+
+    except Exception as e:
+        logger.error(
+            f"Error parsing Rust {file_path} with tree-sitter: {e}", exc_info=True
+        )
+        result["error"] = f"Tree-sitter Rust parsing error: {e}"
+
+
 def _analyze_sql_file_ts(file_path: str, content: str, result: Dict[str, Any]) -> None:
     """Analyzes SQL file content using tree-sitter."""
     result.setdefault("_ts_tree", None)
@@ -3222,7 +3454,7 @@ def _analyze_sql_file_ts(file_path: str, content: str, result: Dict[str, Any]) -
                 for insert_node in captures.get("ins", []):
                     _extract_strings_from_node(insert_node)
 
-        except Exception as e_data:
+        except Exception:
             pass
 
         result["analysis_kind"] = "sql"
@@ -3249,7 +3481,6 @@ def _analyze_html_file_ts(file_path: str, content: str, result: Dict[str, Any]) 
 
     try:
         content_bytes = content.encode("utf8")
-        # --- FIX (MAJOR): Create a local, thread-safe parser instance. ---
         parser = Parser(HTML_LANGUAGE)
         tree = parser.parse(content_bytes)
         result["_ts_tree"] = tree
@@ -3306,7 +3537,6 @@ def _analyze_css_file_ts(file_path: str, content: str, result: Dict[str, Any]) -
 
     try:
         content_bytes = content.encode("utf8")
-        # --- FIX (MAJOR): Create a local, thread-safe parser instance. ---
         parser = Parser(CSS_LANGUAGE)
         tree = parser.parse(content_bytes)
         result["_ts_tree"] = tree
