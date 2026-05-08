@@ -5,7 +5,7 @@ import os
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple, Optional, Any
 
 from cline_utils.dependency_system.analysis.local_llm_processor import LocalLLMProcessor
 from cline_utils.dependency_system.core.key_manager import KeyInfo
@@ -44,6 +44,7 @@ def background_commit(
     b_path_to_key_info: Dict[str, KeyInfo],
     b_tracker_type: str,
     b_suggestions: Dict[str, List[Tuple[str, str]]],
+    b_accumulated_updates: Optional[List[Any]] = None,
 ) -> None:
     try:
         update_data = update_tracker(
@@ -125,7 +126,9 @@ def background_commit(
             if t_update:
                 thread_collector = TrackerBatchCollector()
                 thread_collector.add(t_update)
-                thread_collector.commit_all()
+                thread_collector.commit_all(
+                    skip_populate_hook=True, accumulated_updates=b_accumulated_updates
+                )
             else:
                 print(
                     "Error: Failed to create tracker update object in background thread."
@@ -149,6 +152,7 @@ class PlaceholderResolver:
         global_map: Dict[str, KeyInfo],
         tracker_type: str,
         prepare_func: Callable[[str, str, str, str], PreparedPair],
+        accumulated_updates: Optional[List[Any]] = None,
     ) -> int:
         """
         Processes a list of dependency verification tasks through the local LLM.
@@ -222,6 +226,7 @@ class PlaceholderResolver:
                     global_map,
                     tracker_type,
                     suggestions_copy,
+                    accumulated_updates,
                 )
                 commit_futures.append(future)
                 batch_suggestions.clear()
@@ -285,6 +290,7 @@ class PlaceholderResolver:
                 global_map,
                 tracker_type,
                 suggestions_copy,
+                accumulated_updates,
             )
             commit_futures.append(future)
 

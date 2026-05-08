@@ -18,15 +18,15 @@ from cline_utils.dependency_system.core import key_manager
 
 # Import only from lower-level modules
 from cline_utils.dependency_system.core.key_manager import KeyInfo
-from cline_utils.dependency_system.utils.cache_manager import (
-    cached,
-    clear_all_caches,
-)
+from cline_utils.dependency_system.utils.cache_manager import cached, clear_all_caches
 from cline_utils.dependency_system.utils.cache_manager import (
     normalize_path_cached as normalize_path,
 )
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.path_utils import get_file_type
+from cline_utils.dependency_system.utils.tracker_utils import (
+    get_key_global_instance_string,
+)
 
 KEY_MANAGER_DIR = os.path.dirname(os.path.abspath(key_manager.__file__))
 
@@ -45,8 +45,8 @@ logger = logging.getLogger(__name__)
 # o: Self dependency (diagonal only).
 # n: Verified no dependency.
 # p: Placeholder (unverified).
-# s: Semantic dependency (weak .06-.07) - Adjusted based on .clinerules
-# S: Semantic dependency (strong .07+) - Added based on .clinerules
+# s: Semantic dependency (weak .06-.07)
+# S: Semantic dependency (strong .07+)
 
 GLOBAL_SCAN_LIMIT = 1500
 _PROJECT_SYMBOL_MAP_FILENAME_LOCAL = "project_symbol_map.json"
@@ -76,12 +76,28 @@ def _get_symbol_map_path() -> str:
 
 
 # _OLD_PROJECT_SYMBOL_MAP_FILENAME_LOCAL = "project_symbol_map_old.json" # Not used by load, only by save
+
+
+def _get_read_file_deps(file_path: str, *args: Any, **kwargs: Any) -> list[str]:
+    return [file_path]
+
+
+@cached("file_content_reads", ttl=3600, file_deps=_get_read_file_deps, check_mtime=True)
+def _read_file_content_safely(file_path: str) -> str | None:
+    """Reads a file safely, returning None if an error occurs."""
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return None
+
+
 def clear_caches():
     clear_all_caches()
     if hasattr(_find_and_parse_tsconfig, "_cache"):
-        _find_and_parse_tsconfig._cache.clear()
+        cast(Any, _find_and_parse_tsconfig)._cache.clear()
     if hasattr(load_project_symbol_map, "_cache"):
-        load_project_symbol_map._cache.clear()
+        cast(Any, load_project_symbol_map)._cache.clear()
 
 
 @cached("metadata", track_path_args=[0])
@@ -112,9 +128,13 @@ def load_metadata(metadata_path: str) -> Dict[str, Any]:
 
 
 # --- TS/JS Config Helper ---
+def _tsconfig_cache_key(start_dir: str, project_root_val: str) -> str:
+    return f"tsconfig:{normalize_path(start_dir)}:{normalize_path(project_root_val)}"
+
+
 @cached(
     "tsconfig_data",
-    key_func=lambda start_dir, project_root_val: f"tsconfig:{normalize_path(start_dir)}:{normalize_path(project_root_val)}",
+    key_func=_tsconfig_cache_key,
     track_path_args=[0],
 )
 def _find_and_parse_tsconfig(
@@ -205,6 +225,43 @@ def load_project_symbol_map() -> Dict[str, Dict[str, Any]]:
         return {}
 
 
+def should_skip_suggestion(
+    source_path: str,
+    target_path: str,
+    existing_state: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]],
+    path_to_key_info: Dict[str, KeyInfo],
+) -> bool:
+    """
+    Returns True if the dependency suggestion between source_path and target_path
+    should be skipped because it is already marked as 'x' (max strength) or 'n' (no dependency).
+    """
+    if not existing_state:
+        return False
+
+    source_path = normalize_path(source_path)
+    target_path = normalize_path(target_path)
+    src_ki = path_to_key_info.get(source_path)
+    tgt_ki = path_to_key_info.get(target_path)
+    if not src_ki or not tgt_ki:
+        return False
+
+    # Resolve to KEY#GI strings for state lookup
+    src_key_gi = get_key_global_instance_string(src_ki, path_to_key_info)
+    tgt_key_gi = get_key_global_instance_string(tgt_ki, path_to_key_info)
+
+    if not src_key_gi or not tgt_key_gi:
+        return False
+
+    for lookup_pair in ((src_key_gi, tgt_key_gi), (tgt_key_gi, src_key_gi)):
+        res = existing_state.get(lookup_pair)
+        if not res:
+            continue
+        char, _ = res
+        if char in ("x", "n"):
+            return True
+    return False
+
+
 # --- Main Dispatcher ---
 def suggest_dependencies(
     file_path: str,
@@ -213,6 +270,10 @@ def suggest_dependencies(
     file_analysis_results: Dict[str, Any],
     threshold: float = 0.65,
     shared_scan_counter: Any = None,
+    tracked_paths_globally: Optional[Set[str]] = None,
+    existing_state: Optional[
+        Dict[Tuple[str, str], Tuple[str, Set[str]]]
+    ] = None,  # Added existing_state
 ) -> Tuple[List[Tuple[str, str]], List[Dict[str, str]]]:  # MODIFIED return type
     """
     Suggest dependencies for a file, assigning appropriate characters, using contextual keys.
@@ -247,6 +308,9 @@ def suggest_dependencies(
 
     project_symbol_map = load_project_symbol_map()
 
+    # Use passed tracked_paths_globally if available, otherwise reconstruct (O(N))
+    if tracked_paths_globally is None:
+        tracked_paths_globally = tracked_paths_globally or set(path_to_key_info.keys())
     # Initialize collectors
     char_suggestions: List[Tuple[str, str]] = []
     raw_ast_links_collector: List[Dict[str, str]] = []  # NEW: For Python AST links
@@ -263,6 +327,8 @@ def suggest_dependencies(
                 project_symbol_map,
                 threshold,
                 shared_scan_counter,
+                tracked_paths_globally=tracked_paths_globally,
+                existing_state=existing_state,  # Added existing_state
             )
         )
         raw_ast_links_collector.extend(py_ast_links)  # NEW: Collect AST links
@@ -276,6 +342,8 @@ def suggest_dependencies(
             project_symbol_map,
             threshold,
             shared_scan_counter,
+            tracked_paths_globally=tracked_paths_globally,
+            existing_state=existing_state,  # Added existing_state
         )
         raw_ast_links_collector.extend(js_ast_links)
 
@@ -296,6 +364,8 @@ def suggest_dependencies(
             metadata_path,
             project_symbol_map,
             shared_scan_counter,
+            tracked_paths_globally=tracked_paths_globally,
+            existing_state=existing_state,  # Added existing_state
         )
         # No AST links from Markdown
 
@@ -305,6 +375,8 @@ def suggest_dependencies(
             path_to_key_info,
             project_root,
             file_analysis_results,  # Pass the BIG map
+            tracked_paths_globally=tracked_paths_globally,
+            existing_state=existing_state,  # Added existing_state
         )
         # No AST links from HTML
 
@@ -314,6 +386,8 @@ def suggest_dependencies(
             path_to_key_info,
             project_root,
             file_analysis_results,  # Pass the BIG map
+            tracked_paths_globally=tracked_paths_globally,
+            existing_state=existing_state,  # Added existing_state
         )
         # No AST links from CSS
 
@@ -326,6 +400,8 @@ def suggest_dependencies(
             threshold,
             project_symbol_map,
             shared_scan_counter,
+            tracked_paths_globally=tracked_paths_globally,
+            existing_state=existing_state,  # Added existing_state
         )
 
     elif file_ext == ".svelte":
@@ -337,6 +413,8 @@ def suggest_dependencies(
             threshold,
             project_symbol_map,
             shared_scan_counter,
+            tracked_paths_globally=tracked_paths_globally,
+            existing_state=existing_state,  # Added existing_state
         )
 
     elif file_ext == ".sql":
@@ -348,6 +426,8 @@ def suggest_dependencies(
             threshold,
             project_symbol_map,
             shared_scan_counter,
+            tracked_paths_globally=tracked_paths_globally,
+            existing_state=existing_state,  # Added existing_state
         )
 
     else:  # Generic
@@ -358,8 +438,27 @@ def suggest_dependencies(
             threshold,
             project_symbol_map,
             shared_scan_counter,
+            existing_state=existing_state,  # Added existing_state
         )
         # No AST links from generic
+
+    if existing_state and char_suggestions:
+        original_count = len(char_suggestions)
+        char_suggestions = [
+            (target_path, dep_char)
+            for target_path, dep_char in char_suggestions
+            if not should_skip_suggestion(
+                norm_path, target_path, existing_state, path_to_key_info
+            )
+        ]
+        skipped_count = original_count - len(char_suggestions)
+        if skipped_count:
+            logger.debug(
+                "Skipped %d suggestion(s) for %s because existing trackers already "
+                "assign 'x' or 'n' to those file pairs.",
+                skipped_count,
+                norm_path,
+            )
 
     return char_suggestions, raw_ast_links_collector  # MODIFIED return
 
@@ -418,13 +517,284 @@ def _verify_class_member(
     return False
 
 
+def _classify_role(path: str) -> str:
+    """
+    Classify a file as 'doc' or 'code' based on its extension.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext in [".md", ".rst", ".txt"]:
+        return "doc"
+    return "code"
+
+
+def _determine_dependency_direction(src_path: str, tgt_path: str) -> str:
+    """
+    Determine dependency direction based on file roles.
+    Returns: 'x' (bidirectional), '<' (source depends on target), '>' (target depends on source)
+    """
+    src_role = _classify_role(src_path)
+    tgt_role = _classify_role(tgt_path)
+
+    # Doc -> Code: Documentation describes code (='>')
+    if src_role == "doc" and tgt_role == "code":
+        return ">"
+    # Code -> Doc: Code is documented by doc (='<')
+    elif src_role == "code" and tgt_role == "doc":
+        return "<"
+    # Same role: default to bidirectional
+    return "x"
+
+
 # --- Type-Specific Suggestion Functions ---
+def _import_map_key(
+    current_source_path: str,
+    tree: Optional[ast.AST] = None,
+    project_root: str = "",
+    path_to_key_info: Optional[Dict[str, KeyInfo]] = None,
+    project_symbol_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    tracked_paths_globally: Optional[Set[str]] = None,
+) -> str:
+    return normalize_path(current_source_path)
+
+
+@cached(
+    "structural_import_map",
+    key_func=_import_map_key,
+)
+def _build_import_map(
+    current_source_path: str,
+    tree: Optional[ast.AST],
+    project_root: str,
+    path_to_key_info: Dict[str, KeyInfo],
+    project_symbol_map: Dict[str, Dict[str, Any]],
+    tracked_paths_globally: Optional[Set[str]] = None,
+) -> Dict[str, str]:
+    """
+    Builds a map of names available in the current scope to the absolute path
+    of the module file they were imported from or represent, using the AST.
+    """
+    norm_source_path = normalize_path(current_source_path)
+    local_import_map: Dict[str, str] = {}
+
+    if not tree:
+        logger.error(
+            f"ImportMap: AST tree not found for {norm_source_path}. Cannot build import map accurately."
+        )
+        return local_import_map
+
+    try:
+        current_source_dir = os.path.dirname(norm_source_path)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias_node in node.names:
+                    imported_module_string = alias_node.name
+                    name_in_scope = alias_node.asname or alias_node.name
+
+                    resolved_paths_info_list = _convert_python_import_to_paths(
+                        import_name=imported_module_string,
+                        source_file_dir=current_source_dir,
+                        project_root=project_root,
+                        path_to_key_info=path_to_key_info,
+                        project_symbol_map=project_symbol_map,
+                        specific_item_name=None,
+                        relative_level=0,
+                        tracked_paths_globally=tracked_paths_globally,
+                    )
+
+                    if resolved_paths_info_list:
+                        resolved_module_file_path = normalize_path(
+                            resolved_paths_info_list[0][0]
+                        )
+                        item_verified = resolved_paths_info_list[0][1]
+                        local_import_map[name_in_scope] = resolved_module_file_path
+                        logger.debug(
+                            f"ImportMap (ast.Import): Mapped '{name_in_scope}' to module path '{resolved_module_file_path}'. Item verified: {item_verified}"
+                        )
+                    else:
+                        logger.debug(
+                            f"ImportMap (ast.Import): Could not resolve module string '{imported_module_string}' (imported as '{name_in_scope}') from '{current_source_path}'."
+                        )
+
+            elif isinstance(node, ast.ImportFrom):
+                module_name_from_ast = node.module or ""
+                level = node.level
+
+                base_dir_for_relative_resolve = current_source_dir
+                if level > 0:
+                    temp_base = current_source_dir
+                    parent = None
+                    for _ in range(level):
+                        parent = os.path.dirname(temp_base)
+                        if (
+                            not parent
+                            or parent == temp_base
+                            or not parent.startswith(normalize_path(project_root))
+                        ):
+                            logger.warning(
+                                f"Relative import level {level} for '{module_name_from_ast}' in '{current_source_path}' went too high or out of project. Resolution base fallback to project root."
+                            )
+                            temp_base = normalize_path(project_root)
+                            break
+                        temp_base = parent
+                    base_dir_for_relative_resolve = temp_base
+
+                module_resolved_paths_info_list = _convert_python_import_to_paths(
+                    import_name=module_name_from_ast,
+                    source_file_dir=base_dir_for_relative_resolve,
+                    project_root=project_root,
+                    path_to_key_info=path_to_key_info,
+                    project_symbol_map=project_symbol_map,
+                    specific_item_name=None,
+                    relative_level=level,
+                    tracked_paths_globally=tracked_paths_globally,
+                )
+
+                if module_resolved_paths_info_list:
+                    resolved_module_file_path = normalize_path(
+                        module_resolved_paths_info_list[0][0]
+                    )
+                    module_symbols = project_symbol_map.get(
+                        resolved_module_file_path, {}
+                    )
+
+                    for alias in node.names:
+                        item_name_actually_imported = alias.name
+                        name_in_scope = alias.asname or alias.name
+
+                        is_defined_in_module_symbols = any(
+                            s_item.get("name") == item_name_actually_imported
+                            for s_list_key in [
+                                "functions",
+                                "classes",
+                                "globals_defined",
+                                "exports",
+                            ]
+                            for s_item in module_symbols.get(s_list_key, [])
+                        )
+
+                        is_submodule_or_package = False
+                        if not is_defined_in_module_symbols:
+                            if (
+                                os.path.basename(resolved_module_file_path)
+                                == "__init__.py"
+                            ):
+                                package_dir_for_submodule_check = os.path.dirname(
+                                    resolved_module_file_path
+                                )
+                                potential_submodule_path_py = normalize_path(
+                                    os.path.join(
+                                        package_dir_for_submodule_check,
+                                        item_name_actually_imported + ".py",
+                                    )
+                                )
+                                potential_subpackage_path_init = normalize_path(
+                                    os.path.join(
+                                        package_dir_for_submodule_check,
+                                        item_name_actually_imported,
+                                        "__init__.py",
+                                    )
+                                )
+
+                                if (
+                                    potential_submodule_path_py in path_to_key_info
+                                    or potential_subpackage_path_init
+                                    in path_to_key_info
+                                ):
+                                    is_submodule_or_package = True
+                                    logger.debug(
+                                        f"ImportMap: Item '{item_name_actually_imported}' (imported as '{name_in_scope}') from module '{module_name_from_ast}' appears to be a tracked submodule/package within '{package_dir_for_submodule_check}'."
+                                    )
+
+                        local_import_map[name_in_scope] = resolved_module_file_path
+
+                        if is_defined_in_module_symbols or is_submodule_or_package:
+                            logger.debug(
+                                f"ImportMap (ast.ImportFrom): Mapped '{name_in_scope}' (item '{item_name_actually_imported}') to module '{resolved_module_file_path}' (verified in symbols or as tracked submodule)."
+                            )
+                        else:
+                            logger.debug(
+                                f"ImportMap (ast.ImportFrom): Item '{item_name_actually_imported}' (imported as '{name_in_scope}') from module '{module_name_from_ast}' (path '{resolved_module_file_path}') not directly verified in its symbols or as a tracked submodule. Mapping to module path as fallback."
+                            )
+                else:
+                    logger.debug(
+                        f"ImportMap: Module '{module_name_from_ast}' (level {level}) itself could not be resolved from '{current_source_path}'. Items like '{', '.join(a.name for a in node.names)}' not mapped."
+                    )
+
+    except Exception as e:
+        logger.error(
+            f"Error building import map for {norm_source_path} using AST: {e}",
+            exc_info=False,
+        )
+
+    return local_import_map
+
+
+def _resolve_name_key(
+    name_to_resolve: Optional[str] = None,
+    source_path: str = "",
+    current_file_import_map: Optional[Dict[str, str]] = None,
+    path_to_key_info: Optional[Dict[str, KeyInfo]] = None,
+) -> str:
+    return f"{source_path}:{name_to_resolve}"
+
+
+@cached(
+    "structural_resolved_path",
+    key_func=_resolve_name_key,
+)
+def _resolve_name_to_path(
+    name_to_resolve: Optional[str],
+    source_path: str,
+    current_file_import_map: Dict[str, str],
+    path_to_key_info: Dict[str, KeyInfo],
+) -> Optional[str]:
+    if not name_to_resolve:
+        return None
+
+    parts = name_to_resolve.split(".")
+    resolved_module_path_val: Optional[str] = None
+
+    # Iterate from the longest possible prefix down to the shortest (first part)
+    # e.g., for "foo.bar.baz.Item", try "foo.bar.baz", then "foo.bar", then "foo"
+    for i in range(len(parts), 0, -1):
+        current_prefix_to_check = ".".join(parts[:i])
+
+        # Check if this prefix exists in our import map
+        path_from_import_map = current_file_import_map.get(current_prefix_to_check)
+
+        if path_from_import_map:
+            # Ensure the path from the import map is a tracked file
+            if path_from_import_map in path_to_key_info:
+                resolved_module_path_val = path_from_import_map
+                logger.debug(
+                    f"_resolve_name_to_path: Resolved prefix '{current_prefix_to_check}' (from '{name_to_resolve}') to module path '{resolved_module_path_val}' via import map."
+                )
+                break  # Found the longest matching prefix that's an imported module
+            else:
+                # This case should be rare if _build_import_map only stores paths present in path_to_key_info
+                logger.warning(
+                    f"_resolve_name_to_path: Prefix '{current_prefix_to_check}' mapped to '{path_from_import_map}', but path not in path_to_key_info. Import map might be stale or contain unresolved external refs."
+                )
+
+    # if not resolved_module_path_val:
+    # If no prefix was found in the import map, it means the name_to_resolve
+    # was not from an import statement (e.g., it's a local variable, global in current file, or built-in).
+    # In this context, for finding *external module dependencies*, we return None.
+    # logger.debug(
+    #     f"_resolve_name_to_path: Name '{name_to_resolve}' or its prefixes not found in import map for '{source_path}'. Assumed local or built-in."
+    # )
+
+    return resolved_module_path_val
+
+
 def _identify_structural_dependencies(
     source_path: str,
     source_analysis: Dict[str, Any],
     path_to_key_info: Dict[str, KeyInfo],
     project_root: str,
     project_symbol_map: Dict[str, Dict[str, Any]],
+    tracked_paths_globally: Optional[Set[str]] = None,
 ) -> Tuple[List[Tuple[str, str]], List[Dict[str, str]]]:
     """
     Identifies Python structural dependencies (calls, attributes, inheritance) using contextual keys.
@@ -432,6 +802,9 @@ def _identify_structural_dependencies(
     """
     suggestions_path_based: List[Tuple[str, str]] = []
     raw_ast_verified_links: List[Dict[str, str]] = []
+
+    if tracked_paths_globally is None:
+        tracked_paths_globally = tracked_paths_globally or set(path_to_key_info.keys())
 
     if not source_analysis:
         return [], []
@@ -444,236 +817,23 @@ def _identify_structural_dependencies(
     exceptions_handled = source_analysis.get("exceptions_handled", [])
     with_contexts_used = source_analysis.get("with_contexts_used", [])
 
-    def _import_map_key(current_source_path: str, tree: Optional[ast.AST] = None) -> str:
-        return normalize_path(current_source_path)
-
-    @cached(
-        "structural_import_map",
-        key_func=_import_map_key,
-    )
-    def _build_import_map(
-        current_source_path: str, tree: Optional[ast.AST]
-    ) -> Dict[str, str]:  # Add tree parameter
-        """
-        Builds a map of names available in the current scope to the absolute path
-        of the module file they were imported from or represent, using the AST
-        retrieved from the dedicated 'ast_cache'.
-
-        Example:
-        - `import my_module.sub` -> map `{"my_module.sub": "/abs/path/to/my_module/sub.py"}`
-        - `import my_module.sub as s` -> map `{"s": "/abs/path/to/my_module/sub.py"}`
-        - `from my_package import specific_item` -> map `{"specific_item": "/abs/path/to/my_package/__init__.py"}`
-        - `from my_package.another_module import specific_item as si` -> map `{"si": "/abs/path/to/my_package/another_module.py"}`
-        """
-        norm_source_path = normalize_path(current_source_path)
-        local_import_map: Dict[str, str] = {}
-
-        # ast_cache = cache_manager.get_cache("ast_cache")
-        # tree = ast_cache.get(norm_source_path)  # norm_source_path is the key
-
-        if not tree:
-            logger.error(
-                f"ImportMap: AST tree not found for {norm_source_path}. Cannot build import map accurately. This may indicate a parsing failure during the analysis phase or a cache miss/eviction."
-            )
-            return local_import_map  # Return empty map if AST is not available
-
-        try:
-            current_source_dir = os.path.dirname(norm_source_path)
-            # project_root is available from the outer scope of _identify_structural_dependencies
-
-            for node in ast.walk(tree):  # Iterate through the provided AST tree
-                if isinstance(node, ast.Import):
-                    for alias_node in node.names:
-                        imported_module_string = alias_node.name
-                        name_in_scope = alias_node.asname or alias_node.name
-
-                        resolved_paths_info_list = _convert_python_import_to_paths(
-                            import_name=imported_module_string,
-                            source_file_dir=current_source_dir,
-                            project_root=project_root,
-                            path_to_key_info=path_to_key_info,
-                            project_symbol_map=project_symbol_map,
-                            specific_item_name=None,
-                            relative_level=0,
-                        )
-
-                        if resolved_paths_info_list:
-                            resolved_module_file_path = normalize_path(
-                                resolved_paths_info_list[0][0]
-                            )
-                            item_verified = resolved_paths_info_list[0][1]
-                            local_import_map[name_in_scope] = resolved_module_file_path
-                            logger.debug(
-                                f"ImportMap (ast.Import): Mapped '{name_in_scope}' to module path '{resolved_module_file_path}'. Item verified: {item_verified}"
-                            )
-                        else:
-                            logger.debug(
-                                f"ImportMap (ast.Import): Could not resolve module string '{imported_module_string}' (imported as '{name_in_scope}') from '{current_source_path}'."
-                            )
-
-                elif isinstance(node, ast.ImportFrom):
-                    module_name_from_ast = node.module or ""
-                    level = node.level
-
-                    base_dir_for_relative_resolve = current_source_dir
-                    if level > 0:  # Only adjust base_dir if it's a relative import
-                        temp_base = current_source_dir
-                        parent = None
-                        for _ in range(level):
-                            parent = os.path.dirname(temp_base)
-                            if (
-                                not parent
-                                or parent == temp_base
-                                or not parent.startswith(normalize_path(project_root))
-                            ):
-                                logger.warning(
-                                    f"Relative import level {level} for '{module_name_from_ast}' in '{current_source_path}' went too high or out of project. Resolution base fallback to project root."
-                                )
-                                temp_base = normalize_path(project_root)
-                                break
-                            temp_base = parent
-                        base_dir_for_relative_resolve = temp_base
-
-                    module_resolved_paths_info_list = _convert_python_import_to_paths(
-                        import_name=module_name_from_ast,
-                        source_file_dir=base_dir_for_relative_resolve,  # This is the directory from which relative pathing starts
-                        project_root=project_root,
-                        path_to_key_info=path_to_key_info,
-                        project_symbol_map=project_symbol_map,
-                        specific_item_name=None,
-                        relative_level=level,
-                    )
-
-                    if module_resolved_paths_info_list:
-                        resolved_module_file_path = normalize_path(
-                            module_resolved_paths_info_list[0][0]
-                        )
-                        module_symbols = project_symbol_map.get(
-                            resolved_module_file_path, {}
-                        )
-
-                        for alias in node.names:
-                            item_name_actually_imported = alias.name
-                            name_in_scope = alias.asname or alias.name
-
-                            # Verify if item_name_actually_imported exists in resolved_module_file_path's symbols
-                            is_defined_in_module_symbols = any(
-                                s_item.get("name") == item_name_actually_imported
-                                for s_list_key in [
-                                    "functions",
-                                    "classes",
-                                    "globals_defined",
-                                    "exports",
-                                ]
-                                for s_item in module_symbols.get(s_list_key, [])
-                            )
-
-                            is_submodule_or_package = False
-                            if not is_defined_in_module_symbols:
-                                # If not a direct symbol, check if it's a submodule/package re-exported
-                                # by an __init__.py, and if that submodule/package is tracked.
-                                if (
-                                    os.path.basename(resolved_module_file_path)
-                                    == "__init__.py"
-                                ):
-                                    package_dir_for_submodule_check = os.path.dirname(
-                                        resolved_module_file_path
-                                    )
-                                    potential_submodule_path_py = normalize_path(
-                                        os.path.join(
-                                            package_dir_for_submodule_check,
-                                            item_name_actually_imported + ".py",
-                                        )
-                                    )
-                                    potential_subpackage_path_init = normalize_path(
-                                        os.path.join(
-                                            package_dir_for_submodule_check,
-                                            item_name_actually_imported,
-                                            "__init__.py",
-                                        )
-                                    )
-
-                                    if (
-                                        potential_submodule_path_py in path_to_key_info
-                                        or potential_subpackage_path_init
-                                        in path_to_key_info
-                                    ):
-                                        is_submodule_or_package = True
-                                        logger.debug(
-                                            f"ImportMap: Item '{item_name_actually_imported}' (imported as '{name_in_scope}') from module '{module_name_from_ast}' appears to be a tracked submodule/package within '{package_dir_for_submodule_check}'."
-                                        )
-
-                            local_import_map[name_in_scope] = resolved_module_file_path
-
-                            if is_defined_in_module_symbols or is_submodule_or_package:
-                                logger.debug(
-                                    f"ImportMap (ast.ImportFrom): Mapped '{name_in_scope}' (item '{item_name_actually_imported}') to module '{resolved_module_file_path}' (verified in symbols or as tracked submodule)."
-                                )
-                            else:
-                                logger.debug(
-                                    f"ImportMap (ast.ImportFrom): Item '{item_name_actually_imported}' (imported as '{name_in_scope}') from module '{module_name_from_ast}' (path '{resolved_module_file_path}') not directly verified in its symbols or as a tracked submodule. Mapping to module path as fallback."
-                                )
-                    else:
-                        logger.debug(
-                            f"ImportMap: Module '{module_name_from_ast}' (level {level}) itself could not be resolved from '{current_source_path}'. Items like '{', '.join(a.name for a in node.names)}' not mapped."
-                        )
-
-        except Exception as e:
-            logger.error(
-                f"Error building import map for {norm_source_path} using AST: {e}",
-                exc_info=False,
-            )
-
-        return local_import_map
-
     source_ast_tree = source_analysis.get("_ast_tree")
-    current_file_import_map = _build_import_map(source_path, source_ast_tree)
-
-    def _resolve_name_key(name_to_resolve: Optional[str] = None) -> str:
-        return f"{source_path}:{name_to_resolve}"
-
-    @cached(
-        "structural_resolved_path",
-        key_func=_resolve_name_key,
+    current_file_import_map = _build_import_map(
+        source_path,
+        source_ast_tree,
+        project_root,
+        path_to_key_info,
+        project_symbol_map,
+        tracked_paths_globally,
     )
-    def _resolve_name_to_path(name_to_resolve: Optional[str]) -> Optional[str]:
-        if not name_to_resolve:
-            return None
 
-        parts = name_to_resolve.split(".")
-        resolved_module_path_val: Optional[str] = None
-
-        # Iterate from the longest possible prefix down to the shortest (first part)
-        # e.g., for "foo.bar.baz.Item", try "foo.bar.baz", then "foo.bar", then "foo"
-        for i in range(len(parts), 0, -1):
-            current_prefix_to_check = ".".join(parts[:i])
-
-            # Check if this prefix exists in our import map
-            path_from_import_map = current_file_import_map.get(current_prefix_to_check)
-
-            if path_from_import_map:
-                # Ensure the path from the import map is a tracked file
-                if path_from_import_map in path_to_key_info:
-                    resolved_module_path_val = path_from_import_map
-                    logger.debug(
-                        f"_resolve_name_to_path: Resolved prefix '{current_prefix_to_check}' (from '{name_to_resolve}') to module path '{resolved_module_path_val}' via import map."
-                    )
-                    break  # Found the longest matching prefix that's an imported module
-                else:
-                    # This case should be rare if _build_import_map only stores paths present in path_to_key_info
-                    logger.warning(
-                        f"_resolve_name_to_path: Prefix '{current_prefix_to_check}' mapped to '{path_from_import_map}', but path not in path_to_key_info. Import map might be stale or contain unresolved external refs."
-                    )
-
-        # if not resolved_module_path_val:
-        # If no prefix was found in the import map, it means the name_to_resolve
-        # was not from an import statement (e.g., it's a local variable, global in current file, or built-in).
-        # In this context, for finding *external module dependencies*, we return None.
-        # logger.debug(
-        #     f"_resolve_name_to_path: Name '{name_to_resolve}' or its prefixes not found in import map for '{source_path}'. Assumed local or built-in."
-        # )
-
-        return resolved_module_path_val
+    def _resolve_name_to_path_wrapper(name: Optional[str]) -> Optional[str]:
+        return _resolve_name_to_path(
+            name,
+            source_path,
+            current_file_import_map,
+            path_to_key_info,
+        )
 
     # --- MODIFIED: Process Calls and Attributes with symbol verification ---
     for call_item in calls:
@@ -684,7 +844,7 @@ def _identify_structural_dependencies(
             "target_name"
         )  # e.g., "my_module_alias.method_name" or "ImportedClass()"
 
-        target_path_val = _resolve_name_to_path(
+        target_path_val = _resolve_name_to_path_wrapper(
             potential_source_str or target_name_str
         )  # Try potential_source first
 
@@ -768,7 +928,7 @@ def _identify_structural_dependencies(
         )  # e.g., "my_module_alias" or "my_module_alias.instance"
         attribute_name_accessed = attr_item.get("target_name")  # e.g., "some_attribute"
 
-        target_path_val = _resolve_name_to_path(potential_source_str)
+        target_path_val = _resolve_name_to_path_wrapper(potential_source_str)
 
         if (
             target_path_val
@@ -821,7 +981,7 @@ def _identify_structural_dependencies(
     # Process Inheritance (from your last provided snippet, with raw_ast_links addition)
     for inh_item in inheritance:
         base_class_name_str = inh_item.get("base_class_name")
-        target_path_val = _resolve_name_to_path(base_class_name_str)
+        target_path_val = _resolve_name_to_path_wrapper(base_class_name_str)
         if target_path_val and target_path_val != source_path:
             # Verify "Base" is in target_path_val's symbols
             module_symbols = project_symbol_map.get(target_path_val, {})
@@ -857,7 +1017,7 @@ def _identify_structural_dependencies(
         type_name_str = type_ref_item.get(
             "type_name_str"
         )  # e.g., "MyType" or "other_module.TheirType"
-        target_path_val = _resolve_name_to_path(
+        target_path_val = _resolve_name_to_path_wrapper(
             type_name_str
         )  # Resolves "other_module" part if present
 
@@ -932,7 +1092,7 @@ def _identify_structural_dependencies(
             )
             if not item_name_str:
                 continue
-            target_path_val = _resolve_name_to_path(item_name_str)
+            target_path_val = _resolve_name_to_path_wrapper(item_name_str)
             if target_path_val and target_path_val != source_path:
                 module_symbols = project_symbol_map.get(target_path_val, {})
                 actual_item_to_check = (
@@ -986,6 +1146,8 @@ def suggest_python_dependencies(
     project_symbol_map: Dict[str, Dict[str, Any]],
     threshold: float,
     shared_scan_counter: Any = None,
+    tracked_paths_globally: Optional[Set[str]] = None,
+    existing_state: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]] = None,
 ) -> Tuple[List[Tuple[str, str]], List[Dict[str, str]]]:  # MODIFIED return type
     norm_file_path = normalize_path(file_path)
     # source_analysis is already the specific analysis for norm_file_path
@@ -999,6 +1161,9 @@ def suggest_python_dependencies(
         )
         return [], []  # MODIFIED return
 
+    if tracked_paths_globally is None:
+        tracked_paths_globally = tracked_paths_globally or set(path_to_key_info.keys())
+
     explicit_deps_paths, explicit_raw_ast_links = _identify_python_dependencies(
         norm_file_path,
         source_analysis,
@@ -1006,6 +1171,7 @@ def suggest_python_dependencies(
         project_root,
         path_to_key_info,
         project_symbol_map,
+        tracked_paths_globally=tracked_paths_globally,
     )
     structural_suggestions_paths, structural_raw_ast_links = (
         _identify_structural_dependencies(
@@ -1014,6 +1180,7 @@ def suggest_python_dependencies(
             path_to_key_info,
             project_root,
             project_symbol_map,
+            tracked_paths_globally=tracked_paths_globally,
         )
     )
     semantic_suggestions_paths = suggest_semantic_dependencies_path_based(
@@ -1023,6 +1190,8 @@ def suggest_python_dependencies(
         threshold,
         project_symbol_map,
         shared_scan_counter,
+        tracked_paths_globally=tracked_paths_globally,
+        existing_state=existing_state,
     )
 
     all_suggestions_paths = (
@@ -1060,6 +1229,8 @@ def suggest_javascript_dependencies(
     project_symbol_map: Dict[str, Dict[str, Any]],
     threshold: float,
     shared_scan_counter: Any = None,
+    tracked_paths_globally: Optional[Set[str]] = None,
+    existing_state: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]] = None,
 ) -> Tuple[List[Tuple[str, str]], List[Dict[str, str]]]:
     """
     Suggest dependencies for JS/TS/TSX by combining:
@@ -1087,6 +1258,7 @@ def suggest_javascript_dependencies(
             path_to_key_info,
             project_root,
             tsconfig_info,
+            tracked_paths_globally=tracked_paths_globally,
         )
     )
 
@@ -1099,6 +1271,7 @@ def suggest_javascript_dependencies(
             project_root,
             project_symbol_map,
             tsconfig_info,
+            tracked_paths_globally=tracked_paths_globally,
         )
     )
 
@@ -1110,6 +1283,8 @@ def suggest_javascript_dependencies(
         threshold,
         project_symbol_map,
         shared_scan_counter,
+        tracked_paths_globally=tracked_paths_globally,
+        existing_state=existing_state,
     )
 
     # Combine suggestions then return with union of AST links
@@ -1133,6 +1308,7 @@ def _identify_javascript_structural_dependencies(
     project_root: str,
     project_symbol_map: Dict[str, Dict[str, Any]],
     tsconfig_info: Optional[Tuple[str, Dict[str, Any]]],
+    tracked_paths_globally: Optional[Set[str]] = None,
 ) -> Tuple[List[Tuple[str, str]], List[Dict[str, str]]]:
     """
     Identifies JS/TS structural dependencies by verifying that symbols used in the source file
@@ -1140,17 +1316,25 @@ def _identify_javascript_structural_dependencies(
     """
     suggestions_path_based: List[Tuple[str, str]] = []
     raw_ast_verified_links: List[Dict[str, str]] = []
+
+    if tracked_paths_globally is None:
+        tracked_paths_globally = tracked_paths_globally or set(path_to_key_info.keys())
+
     source_dir = os.path.dirname(source_path)
 
     # --- Step 1: Handle re-exports directly ---
     for export_item in source_analysis.get("exports", []):
         if "from" in export_item:
+            # ⚡ Bolt Optimization: Pass tracked_paths_globally to avoid O(N) reconstruction
+            # Impact: Significantly reduces time complexity in parallel workers from O(N * M) to O(M)
+            # Measurement: Check task processing times in _handle_dependency_task
             resolved_path = _resolve_js_import_path(
                 export_item["from"],
                 source_dir,
                 project_root,
                 path_to_key_info,
                 tsconfig_info,
+                tracked_paths_globally=tracked_paths_globally,
             )
             if resolved_path and resolved_path != source_path:
                 dep_char = "<"  # A re-export is a direct dependency
@@ -1171,8 +1355,16 @@ def _identify_javascript_structural_dependencies(
         if not unresolved_path:
             continue
 
+        # ⚡ Bolt Optimization: Pass tracked_paths_globally to avoid O(N) reconstruction
+        # Impact: Significantly reduces time complexity in parallel workers from O(N * M) to O(M)
+        # Measurement: Check task processing times in _handle_dependency_task
         resolved_path = _resolve_js_import_path(
-            unresolved_path, source_dir, project_root, path_to_key_info, tsconfig_info
+            unresolved_path,
+            source_dir,
+            project_root,
+            path_to_key_info,
+            tsconfig_info,
+            tracked_paths_globally=tracked_paths_globally,
         )
         if not resolved_path:
             continue
@@ -1284,6 +1476,7 @@ def _identify_jsts_explicit_import_dependencies(
     path_to_key_info: Dict[str, KeyInfo],
     project_root: str,
     tsconfig_info: Optional[Tuple[str, Dict[str, Any]]],
+    tracked_paths_globally: Optional[Set[str]] = None,
 ) -> Tuple[List[Tuple[str, str]], List[Dict[str, str]]]:
     """
     Converts analyzer 'imports' entries for JS/TS/TSX into direct '<' dependencies.
@@ -1293,11 +1486,12 @@ def _identify_jsts_explicit_import_dependencies(
     suggestions_path_based: List[Tuple[str, str]] = []
     raw_ast_verified_links: List[Dict[str, str]] = []
 
+    if tracked_paths_globally is None:
+        tracked_paths_globally = tracked_paths_globally or set(path_to_key_info.keys())
     if not source_analysis:
         return [], []
 
     source_dir = os.path.dirname(source_path)
-    tracked_paths_globally = set(path_to_key_info.keys())
 
     imports_list = source_analysis.get("imports", [])
     # imports format expected from analyzer:
@@ -1312,7 +1506,12 @@ def _identify_jsts_explicit_import_dependencies(
             continue
 
         resolved = _resolve_js_import_path(
-            unresolved, source_dir, project_root, path_to_key_info, tsconfig_info
+            unresolved,
+            source_dir,
+            project_root,
+            path_to_key_info,
+            tsconfig_info,
+            tracked_paths_globally=tracked_paths_globally,
         )
         if not resolved:
             continue
@@ -1346,14 +1545,24 @@ def suggest_documentation_dependencies(
     _metadata_path: str,
     project_symbol_map: Optional[Dict[str, Any]] = None,
     shared_scan_counter: Any = None,
+    tracked_paths_globally: Optional[Set[str]] = None,
+    existing_state: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]] = None,
 ) -> List[Tuple[str, str]]:
     norm_file_path = normalize_path(file_path)
     analysis = file_analysis_results.get(norm_file_path)
     if analysis is None or "error" in analysis or "skipped" in analysis:
         return []
 
+    if tracked_paths_globally is None:
+        tracked_paths_globally = tracked_paths_globally or set(path_to_key_info.keys())
+
     explicit_deps_paths = _identify_markdown_dependencies(
-        norm_file_path, analysis, file_analysis_results, project_root, path_to_key_info
+        norm_file_path,
+        analysis,
+        file_analysis_results,
+        project_root,
+        path_to_key_info,
+        tracked_paths_globally=tracked_paths_globally,
     )
     semantic_suggestions_paths = suggest_semantic_dependencies_path_based(
         norm_file_path,
@@ -1362,6 +1571,8 @@ def suggest_documentation_dependencies(
         threshold,
         project_symbol_map,
         shared_scan_counter,
+        tracked_paths_globally=tracked_paths_globally,
+        existing_state=existing_state,
     )
 
     all_suggestions_paths = explicit_deps_paths + semantic_suggestions_paths
@@ -1375,14 +1586,24 @@ def suggest_html_dependencies(
     path_to_key_info: Dict[str, KeyInfo],
     project_root: str,
     file_analysis_results: Dict[str, Any],
+    tracked_paths_globally: Optional[Set[str]] = None,
+    existing_state: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]] = None,
 ) -> List[Tuple[str, str]]:  # Output: List[(target_norm_path, char)]
     norm_file_path = normalize_path(file_path)
     analysis = file_analysis_results.get(norm_file_path)
     if analysis is None or "error" in analysis or "skipped" in analysis:
         return []
 
+    if tracked_paths_globally is None:
+        tracked_paths_globally = tracked_paths_globally or set(path_to_key_info.keys())
+
     explicit_deps_paths = _identify_html_dependencies(
-        norm_file_path, analysis, file_analysis_results, project_root, path_to_key_info
+        norm_file_path,
+        analysis,
+        file_analysis_results,
+        project_root,
+        path_to_key_info,
+        tracked_paths_globally=tracked_paths_globally,
     )
     # Optionally add semantic for HTML if meaningful:
     # semantic_suggestions_paths = suggest_semantic_dependencies_path_based(norm_file_path, path_to_key_info, project_root, some_html_threshold)
@@ -1397,14 +1618,24 @@ def suggest_css_dependencies(
     path_to_key_info: Dict[str, KeyInfo],
     project_root: str,
     file_analysis_results: Dict[str, Any],
+    tracked_paths_globally: Optional[Set[str]] = None,
+    existing_state: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]] = None,
 ) -> List[Tuple[str, str]]:  # Output: List[(target_norm_path, char)]
     norm_file_path = normalize_path(file_path)
     analysis = file_analysis_results.get(norm_file_path)
     if analysis is None or "error" in analysis or "skipped" in analysis:
         return []
 
+    if tracked_paths_globally is None:
+        tracked_paths_globally = tracked_paths_globally or set(path_to_key_info.keys())
+
     explicit_deps_paths = _identify_css_dependencies(
-        norm_file_path, analysis, file_analysis_results, project_root, path_to_key_info
+        norm_file_path,
+        analysis,
+        file_analysis_results,
+        project_root,
+        path_to_key_info,
+        tracked_paths_globally=tracked_paths_globally,
     )
     return combine_suggestions_path_based_with_char_priority(
         explicit_deps_paths, norm_file_path
@@ -1420,24 +1651,29 @@ def suggest_json_dependencies(
     threshold: float,
     project_symbol_map: Optional[Dict[str, Any]] = None,
     shared_scan_counter: Any = None,
+    tracked_paths_globally: Optional[Set[str]] = None,
+    existing_state: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]] = None,
 ) -> List[Tuple[str, str]]:
     norm_file_path = normalize_path(file_path)
     analysis = file_analysis_results.get(norm_file_path)
     if analysis is None or "error" in analysis or "skipped" in analysis:
         return []
 
+    # Use passed tracked_paths_globally if available, otherwise reconstruct (O(N))
+    if tracked_paths_globally is None:
+        tracked_paths_globally = tracked_paths_globally or set(path_to_key_info.keys())
     explicit_deps: List[Tuple[str, str]] = []
 
     def _resolve_json_ref(url: str) -> Optional[str]:
         source_dir = os.path.dirname(norm_file_path)
         if url.startswith("."):
             resolved_path = normalize_path(os.path.join(source_dir, url))
-            if resolved_path in path_to_key_info:
+            if resolved_path in tracked_paths_globally:
                 return resolved_path
         elif url.startswith("/"):
             # Absolute path (unlikely in JSON but possible) or project-root relative
             resolved_path = normalize_path(os.path.join(project_root, url.lstrip("/")))
-            if resolved_path in path_to_key_info:
+            if resolved_path in tracked_paths_globally:
                 return resolved_path
         return None
 
@@ -1464,6 +1700,8 @@ def suggest_json_dependencies(
         threshold,
         project_symbol_map,
         shared_scan_counter,
+        tracked_paths_globally=tracked_paths_globally,
+        existing_state=existing_state,
     )
     return combine_suggestions_path_based_with_char_priority(
         explicit_deps + semantic_suggestions_paths, norm_file_path
@@ -1479,12 +1717,17 @@ def suggest_svelte_dependencies(
     threshold: float,
     project_symbol_map: Optional[Dict[str, Any]] = None,
     shared_scan_counter: Any = None,
+    tracked_paths_globally: Optional[Set[str]] = None,
+    existing_state: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]] = None,
 ) -> List[Tuple[str, str]]:
     norm_file_path = normalize_path(file_path)
     analysis = file_analysis_results.get(norm_file_path)
     if analysis is None or "error" in analysis or "skipped" in analysis:
         return []
 
+    # Use passed tracked_paths_globally if available, otherwise reconstruct (O(N))
+    if tracked_paths_globally is None:
+        tracked_paths_globally = tracked_paths_globally or set(path_to_key_info.keys())
     explicit_deps: List[Tuple[str, str]] = []
     source_dir = os.path.dirname(norm_file_path)
 
@@ -1500,6 +1743,7 @@ def suggest_svelte_dependencies(
                 project_root,
                 path_to_key_info,
                 None,  # No tsconfig for now, or could find one
+                tracked_paths_globally=tracked_paths_globally,
             )
             if resolved:
                 explicit_deps.append((resolved, "<"))
@@ -1520,6 +1764,8 @@ def suggest_svelte_dependencies(
         threshold,
         project_symbol_map,
         shared_scan_counter,
+        tracked_paths_globally=tracked_paths_globally,
+        existing_state=existing_state,
     )
     return combine_suggestions_path_based_with_char_priority(
         explicit_deps + semantic_suggestions_paths, norm_file_path
@@ -1553,11 +1799,16 @@ def suggest_sql_dependencies(
     threshold: float,
     project_symbol_map: Optional[Dict[str, Any]] = None,
     shared_scan_counter: Any = None,
+    tracked_paths_globally: Optional[Set[str]] = None,
+    existing_state: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]] = None,
 ) -> List[Tuple[str, str]]:
     """
     Suggests dependencies for SQL files using AST-extracted table definitions and references.
     Builds table map on-demand from project_symbol_map (no global caching).
     """
+    # Use passed tracked_paths_globally if available, otherwise reconstruct (O(N))
+    if tracked_paths_globally is None:
+        tracked_paths_globally = tracked_paths_globally or set(path_to_key_info.keys())
     norm_file_path = normalize_path(file_path)
     structural_suggestions: List[Tuple[str, str]] = []
 
@@ -1648,6 +1899,8 @@ def suggest_generic_dependencies(
     threshold: float,
     project_symbol_map: Optional[Dict[str, Any]] = None,
     shared_scan_counter: Any = None,
+    tracked_paths_globally: Optional[Set[str]] = None,
+    existing_state: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]] = None,
 ) -> List[Tuple[str, str]]:  # Output: List[(target_norm_path, char)]
     norm_file_path = normalize_path(file_path)
     semantic_suggestions_paths = suggest_semantic_dependencies_path_based(
@@ -1657,13 +1910,35 @@ def suggest_generic_dependencies(
         threshold,
         project_symbol_map,
         shared_scan_counter,
+        tracked_paths_globally=tracked_paths_globally,
+        existing_state=existing_state,
     )
     return combine_suggestions_path_based_with_char_priority(
         semantic_suggestions_paths, norm_file_path
     )
 
 
-@cached("ast_verified_links", ttl=1200, track_path_args=[0])
+def _get_ast_links_path_suggester(
+    project_root: str, *args: Any, **kwargs: Any
+) -> List[str]:
+    return [
+        os.path.join(
+            project_root,
+            "cline_utils",
+            "dependency_system",
+            "core",
+            "ast_verified_links.json",
+        )
+    ]
+
+
+@cached(
+    "ast_verified_links",
+    ttl=1200,
+    track_path_args=[0],
+    file_deps=_get_ast_links_path_suggester,
+    check_mtime=True,
+)
 def _load_ast_verified_links(project_root: str) -> List[Dict[str, str]]:
     """
     Load AST-verified links from project_analyzer for structural evidence
@@ -1771,6 +2046,42 @@ def _enhance_semantic_suggestions_with_ast_evidence(
 
 
 # --- Semantic Suggestion (Adapted to return paths) ---
+
+
+@cached("reranking", ttl=600, check_mtime=False)
+def _generate_candidate_text_from_file_cached(target_norm_path: str) -> str:
+    """Generates the base candidate text from file content, cached by target path."""
+    from .embedding_manager import preprocess_doc_structure
+
+    target_ext = os.path.splitext(target_norm_path)[1].lower()
+    target_is_doc = target_ext in [".md", ".txt", ".rst"]
+
+    candidate_text = ""
+
+    if target_is_doc:
+        try:
+            content = _read_file_content_safely(target_norm_path)
+            if content is None:
+                raise Exception("File read failed")
+            candidate_text = preprocess_doc_structure(content)
+        except Exception:
+            candidate_text = f"[DOC: {os.path.basename(target_norm_path)}]"
+    else:
+        # Fallback for non-code or untracked files
+        try:
+            content = _read_file_content_safely(target_norm_path)
+            if content is None:
+                raise Exception("File read failed")
+            # Limit raw content
+            candidate_text = (
+                f"[FILE: {os.path.basename(target_norm_path)}]\n{content[:12800]}"
+            )
+        except Exception:
+            candidate_text = f"[FILE: {os.path.basename(target_norm_path)}]"
+
+    return candidate_text
+
+
 def suggest_semantic_dependencies_path_based(
     file_path: str,
     path_to_key_info: Dict[str, KeyInfo],
@@ -1778,6 +2089,8 @@ def suggest_semantic_dependencies_path_based(
     threshold: float,
     project_symbol_map: Optional[Dict[str, Any]] = None,
     shared_scan_counter: Any = None,
+    tracked_paths_globally: Optional[Set[str]] = None,
+    existing_state: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]] = None,
 ) -> List[Tuple[str, str]]:  # Output: List[(target_norm_path, char)]
     # Check global limit FIRST to avoid unnecessary processing
     if shared_scan_counter is not None:
@@ -1807,6 +2120,9 @@ def suggest_semantic_dependencies_path_based(
         for info in path_to_key_info.values()
         if not info.is_directory
         and info.norm_path != file_path  # Must be a file and not self
+        and not should_skip_suggestion(
+            file_path, info.norm_path, existing_state, path_to_key_info
+        )
     ]
 
     if not target_key_infos_list:
@@ -1828,11 +2144,8 @@ def suggest_semantic_dependencies_path_based(
         )
         return []
 
-    # Load AST verified links and build map early for filtering
     ast_verified_links = _load_ast_verified_links(project_root)
     ast_map = _build_ast_map(file_path, ast_verified_links)
-
-    # Collect all candidates first for potential reranking
     candidates_with_similarity: List[Tuple[KeyInfo, float]] = []
 
     for target_ki in target_key_infos_list:
@@ -1970,9 +2283,6 @@ def suggest_semantic_dependencies_path_based(
                     filtered_candidates.append((target_ki, confidence))
 
             candidates_with_similarity = filtered_candidates
-            # logger.debug(
-            #     f"Pre-reranking filter: {len(candidates_with_similarity)} candidates remaining from original collection"
-            # )
 
             # Use shared counter if available (preferred for parallel execution)
             if shared_scan_counter is not None:
@@ -2075,8 +2385,9 @@ def suggest_semantic_dependencies_path_based(
                             )
                         else:
                             try:
-                                with open(file_path, "r", encoding="utf-8") as f:
-                                    content = f.read()
+                                content = _read_file_content_safely(file_path)
+                                if content is None:
+                                    raise Exception("File read failed")
                                 query_text = preprocess_doc_structure(content)
                             except Exception:
                                 query_text = f"[DOC: {os.path.basename(file_path)}]"
@@ -2090,9 +2401,10 @@ def suggest_semantic_dependencies_path_based(
                     else:
                         # Fallback for untracked code or other files
                         try:
-                            with open(file_path, "r", encoding="utf-8") as f:
-                                content = f.read()
-                            query_text = f"[FILE: {os.path.basename(file_path)}]\n{content[:8192]}"
+                            content = _read_file_content_safely(file_path)
+                            if content is None:
+                                raise Exception("File read failed")
+                            query_text = f"[FILE: {os.path.basename(file_path)}]\n{content[:12800]}"
                         except Exception:
                             query_text = f"[FILE: {os.path.basename(file_path)}]"
                 except Exception as e:
@@ -2123,9 +2435,6 @@ def suggest_semantic_dependencies_path_based(
                             ].lower()
                             target_is_doc = target_ext in [".md", ".txt", ".rst"]
 
-                            # Read the actual content for reranking
-                            candidate_text = ""
-
                             if target_is_doc:
                                 if (
                                     project_symbol_map
@@ -2138,10 +2447,13 @@ def suggest_semantic_dependencies_path_based(
                                     )
                                 else:
                                     try:
-                                        with open(
-                                            target_ki.norm_path, "r", encoding="utf-8"
-                                        ) as f:
-                                            content = f.read()
+                                        content = (
+                                            _generate_candidate_text_from_file_cached(
+                                                target_ki.norm_path
+                                            )
+                                        )
+                                        if not content:
+                                            raise Exception("File read failed")
                                         candidate_text = preprocess_doc_structure(
                                             content
                                         )
@@ -2159,12 +2471,13 @@ def suggest_semantic_dependencies_path_based(
                             else:
                                 # Fallback for non-code or untracked files
                                 try:
-                                    with open(
-                                        target_ki.norm_path, "r", encoding="utf-8"
-                                    ) as f:
-                                        content = f.read()
+                                    content = _read_file_content_safely(
+                                        target_ki.norm_path
+                                    )
+                                    if content is None:
+                                        raise Exception("File read failed")
                                     # Limit raw content
-                                    candidate_text = f"[FILE: {os.path.basename(target_ki.norm_path)}]\n{content[:8192]}"
+                                    candidate_text = f"[FILE: {os.path.basename(target_ki.norm_path)}]\n{content[:12800]}"
                                 except Exception:
                                     candidate_text = f"[FILE: {os.path.basename(target_ki.norm_path)}]"
 
@@ -2222,33 +2535,7 @@ def suggest_semantic_dependencies_path_based(
 
                                 # HIGH CONFIDENCE: Promote to verified dependency character
                                 if rerank_score >= promotion_threshold:
-
-                                    def _classify_role(path: str) -> str:
-                                        ext = os.path.splitext(path)[1].lower()
-                                        if ext in [".md", ".rst", ".txt"]:
-                                            return "doc"
-                                        return "code"
-
-                                    def determine_dependency_direction(
-                                        src_path: str, tgt_path: str
-                                    ) -> str:
-                                        """
-                                        Determine dependency direction based on file roles.
-                                        Returns: 'x' (bidirectional), '<' (source depends on target), '>' (target depends on source)
-                                        """
-                                        src_role = _classify_role(src_path)
-                                        tgt_role = _classify_role(tgt_path)
-
-                                        # Doc -> Code: Documentation describes code ='>')
-                                        if src_role == "doc" and tgt_role == "code":
-                                            return ">"
-                                        # Code -> Doc: Code is documented by doc (='<')
-                                        elif src_role == "code" and tgt_role == "doc":
-                                            return "<"
-                                        # Same role: default to bidirectional
-                                        return "x"
-
-                                    direction = determine_dependency_direction(
+                                    direction = _determine_dependency_direction(
                                         source_key_info.norm_path, target_ki.norm_path
                                     )
                                     assigned_char_semantic = direction
@@ -2270,7 +2557,6 @@ def suggest_semantic_dependencies_path_based(
                                         (target_ki.norm_path, assigned_char_semantic)
                                     )
 
-                        # CORRECTED: After processing reranked results, DO NOT return.
                         # The function will now proceed to the enhancement step below.
 
         except ImportError as e:
@@ -2309,27 +2595,7 @@ def suggest_semantic_dependencies_path_based(
 
             # HIGH CONFIDENCE: Promote to verified dependency character
             if confidence >= promotion_threshold:
-
-                def _classify_role(path: str) -> str:
-                    ext = os.path.splitext(path)[1].lower()
-                    if ext in [".md", ".rst", ".txt"]:
-                        return "doc"
-                    return "code"
-
-                def determine_fallback_dependency_direction(
-                    src_path: str, tgt_path: str
-                ) -> str:
-                    """Determine dependency direction for high-confidence fallback assignments."""
-                    src_role = _classify_role(src_path)
-                    tgt_role = _classify_role(tgt_path)
-
-                    if src_role == "doc" and tgt_role == "code":
-                        return ">"
-                    elif src_role == "code" and tgt_role == "doc":
-                        return "<"
-                    return "x"
-
-                direction = determine_fallback_dependency_direction(
+                direction = _determine_dependency_direction(
                     source_key_info.norm_path, target_ki.norm_path
                 )
                 assigned_char_semantic = direction
@@ -2406,6 +2672,7 @@ def _convert_python_import_to_paths(
     specific_item_name: Optional[str] = None,  # e.g., "X" in "from .foo import X"
     _is_from_import: bool = False,  # Kept for signature, could be used for nuanced logic
     relative_level: int = 0,  # 0 for absolute, 1 for '.', 2 for '..'
+    tracked_paths_globally: Optional[Set[str]] = None,
 ) -> List[
     Tuple[str, bool]
 ]:  # Returns List[(resolved_module_path, item_verified_in_module_symbols)]
@@ -2503,10 +2770,14 @@ def _convert_python_import_to_paths(
         )
 
     # --- Check generated candidates against path_to_key_info and verify specific_item_name ---
+    if tracked_paths_globally is None:
+        tracked_paths_globally = tracked_paths_globally or set(path_to_key_info.keys())
     seen_paths: Set[str] = set()
     for p_candidate_str in candidate_module_file_paths_to_check_in_map:
         # p_candidate_str is already a normalized absolute path from the generation logic
-        if p_candidate_str in path_to_key_info:  # Direct check against tracked files
+        if (
+            p_candidate_str in tracked_paths_globally
+        ):  # Direct check against tracked files
             if p_candidate_str not in seen_paths:
                 item_verified_in_symbols = (
                     True  # Default to true if no specific item to check
@@ -2547,8 +2818,8 @@ def _convert_python_import_to_paths(
 
                         # Crucially, check if these potential submodule paths are ALSO tracked
                         if (
-                            potential_submodule_file in path_to_key_info
-                            or potential_subpackage_init in path_to_key_info
+                            potential_submodule_file in tracked_paths_globally
+                            or potential_subpackage_init in tracked_paths_globally
                         ):
                             is_defined = True
                             logger.debug(
@@ -2591,13 +2862,13 @@ def _identify_python_dependencies(
     project_root: str,
     path_to_key_info: Dict[str, KeyInfo],
     project_symbol_map: Dict[str, Dict[str, Any]],
+    tracked_paths_globally: Set[str],
 ) -> Tuple[List[Tuple[str, str]], List[Dict[str, str]]]:  # MODIFIED return type
     dependencies_paths: List[Tuple[str, str]] = []
     raw_ast_links: List[Dict[str, str]] = []  # NEW: For collecting AST-derived links
 
     imports_in_source = source_analysis.get("imports", [])
     source_dir_norm = os.path.dirname(source_path)
-    tracked_paths_globally = set(path_to_key_info.keys())
 
     for import_item in imports_in_source:
         if isinstance(import_item, dict):
@@ -2616,6 +2887,9 @@ def _identify_python_dependencies(
             temp_import_name = temp_import_name[1:]
         module_to_resolve_for_convert = temp_import_name
 
+        # ⚡ Bolt Optimization: Pass tracked_paths_globally to avoid O(N) reconstruction
+        # Impact: Significantly reduces time complexity in parallel workers from O(N * M) to O(M)
+        # Measurement: Check task processing times in _handle_dependency_task
         resolved_path_infos = _convert_python_import_to_paths(
             import_name=module_to_resolve_for_convert,
             source_file_dir=source_dir_norm,
@@ -2625,6 +2899,7 @@ def _identify_python_dependencies(
             specific_item_name=None,
             _is_from_import=True,
             relative_level=level_for_convert,
+            tracked_paths_globally=tracked_paths_globally,
         )
         for path_abs_val, item_verified_flag in resolved_path_infos:
             if path_abs_val in tracked_paths_globally and path_abs_val != source_path:
@@ -2656,8 +2931,11 @@ def _resolve_js_import_path(
     project_root: str,
     path_to_key_info: Dict[str, KeyInfo],
     tsconfig_info: Optional[Tuple[str, Dict[str, Any]]],
+    tracked_paths_globally: Optional[Set[str]] = None,
 ) -> Optional[str]:
     """Resolves a JS/TS import path to a tracked file path."""
+    if tracked_paths_globally is None:
+        tracked_paths_globally = tracked_paths_globally or set(path_to_key_info.keys())
     if import_path.startswith("."):
         base_path = normalize_path(
             os.path.abspath(os.path.join(source_dir, import_path))
@@ -2675,7 +2953,7 @@ def _resolve_js_import_path(
         ]
         for ext in extensions:
             candidate = normalize_path(base_path + ext)
-            if candidate in path_to_key_info:
+            if candidate in tracked_paths_globally:
                 return candidate
         return None
 
@@ -2711,7 +2989,7 @@ def _resolve_js_import_path(
                     ]
                     for ext in extensions:
                         candidate = normalize_path(candidate_base + ext)
-                        if candidate in path_to_key_info:
+                        if candidate in tracked_paths_globally:
                             return candidate
 
     # Fallback for non-aliased, non-relative paths (e.g. from baseUrl)
@@ -2736,7 +3014,7 @@ def _resolve_js_import_path(
         ]
         for ext in extensions:
             candidate = normalize_path(candidate_base + ext)
-            if candidate in path_to_key_info:
+            if candidate in tracked_paths_globally:
                 return candidate
 
     return None
@@ -2748,11 +3026,12 @@ def _identify_markdown_dependencies(
     _file_analyses: Dict[str, Dict[str, Any]],
     project_root: str,
     path_to_key_info: Dict[str, KeyInfo],
+    tracked_paths_globally: Set[str],
 ) -> List[Tuple[str, str]]:
     dependencies_paths: List[Tuple[str, str]] = []
     links_in_source = source_analysis.get("links", [])
     source_dir_norm = os.path.dirname(source_path)
-    tracked_paths_globally = set(path_to_key_info.keys())
+
     norm_project_root = normalize_path(project_root)
     for link_item in links_in_source:
         url_val = link_item.get("url", "")
@@ -2808,10 +3087,11 @@ def _identify_html_dependencies(
     _file_analyses: Dict[str, Dict[str, Any]],
     project_root: str,
     path_to_key_info: Dict[str, KeyInfo],
+    tracked_paths_globally: Set[str],
 ) -> List[Tuple[str, str]]:
     dependencies_paths: List[Tuple[str, str]] = []
     source_dir_norm = os.path.dirname(source_path)
-    tracked_paths_globally = set(path_to_key_info.keys())
+
     norm_project_root = normalize_path(project_root)
 
     # --- ADDED: Get doc_roots from ConfigManager ---
@@ -2927,11 +3207,12 @@ def _identify_css_dependencies(
     _file_analyses: Dict[str, Dict[str, Any]],
     project_root: str,
     path_to_key_info: Dict[str, KeyInfo],
+    tracked_paths_globally: Set[str],
 ) -> List[Tuple[str, str]]:
     dependencies_paths: List[Tuple[str, str]] = []
     imports_in_css = source_analysis.get("imports", [])
     source_dir_norm = os.path.dirname(source_path)
-    tracked_paths_globally = set(path_to_key_info.keys())
+
     norm_project_root = normalize_path(project_root)
     for import_item_css in imports_in_css:
         url_val_css = import_item_css.get("url", "")  # CSS @import url(...)

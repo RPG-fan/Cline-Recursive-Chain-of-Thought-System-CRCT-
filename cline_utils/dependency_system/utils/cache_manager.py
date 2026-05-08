@@ -30,11 +30,9 @@ CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 DEFAULT_MAX_SIZE = 10000  # Default max items per cache
 DEFAULT_TTL = 600
 CACHE_SIZES = {
-    "embeddings_generation": 300,  # Smaller for heavy data
-    "key_generation": 5000,  # Larger for key maps
     "reranking": 35000,  # Reranking results
     "reranker_history": 200,  # Historical pairs (Set/List)
-    "ast_verified_links": 200,  # Structural data
+    "aggregation_v2_gi": 1000000,
     "default": DEFAULT_MAX_SIZE,
 }
 
@@ -98,6 +96,7 @@ class Cache:
         self.metrics = CacheMetrics()  # This will call __post_init__ automatically
         self.creation_time = time.time()
         self.default_ttl = ttl
+        self.modified = False  # Track if cache changed in-memory
         self.max_size = CACHE_SIZES.get(name, max_size)
         self.eviction_policy = eviction_policy
         self.enable_compression = enable_compression
@@ -211,6 +210,7 @@ class Cache:
         ttl: Optional[int] = None,
     ) -> None:
         with self._lock:
+            self.modified = True
             # Compress if beneficial
             if self._should_compress(key, value):
                 value = self._compress_value(value)
@@ -313,6 +313,7 @@ class Cache:
             )
 
     def _remove_key(self, key: str) -> None:
+        self.modified = True
         try:
             if key in self.data:
                 # Update size metrics before removal
@@ -381,6 +382,7 @@ class Cache:
     def invalidate(self, key_pattern: str) -> None:
         """Invalidate entries matching a key pattern (supports regex). Also invalidates dependent entries."""
         with self._lock:
+            self.modified = True
             compiled_pattern = re.compile(key_pattern)
             # Iterate over a copy of keys for safety during removal
             keys_to_remove_initial = [
@@ -457,18 +459,20 @@ class CacheManager:
         """Migrate legacy .json caches to the new .pkl format."""
         if not os.path.exists(CACHE_DIR):
             return
-        
+
         json_files = [f for f in os.listdir(CACHE_DIR) if f.endswith(".json")]
         if not json_files:
             return
 
-        logger.info(f"Found {len(json_files)} legacy JSON caches. Migrating to Pickle format...")
-        
+        logger.info(
+            f"Found {len(json_files)} legacy JSON caches. Migrating to Pickle format..."
+        )
+
         for json_file in json_files:
             json_path = os.path.join(CACHE_DIR, json_file)
             cache_name = json_file[:-5]
             pkl_path = os.path.join(CACHE_DIR, f"{cache_name}.pkl")
-            
+
             # Skip if pickle version already exists (migration already done or new cache created)
             if os.path.exists(pkl_path):
                 try:
@@ -484,24 +488,23 @@ class CacheManager:
 
                 with open(json_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                
+
                 # Revive data
                 revived_data = {
                     "data": {
-                        k: self._json_revive(v)
-                        for k, v in data.get("data", {}).items()
+                        k: self._json_revive(v) for k, v in data.get("data", {}).items()
                     },
                     "dependencies": data.get("dependencies", {}),
                 }
-                
+
                 # Save as pickle
                 with open(pkl_path, "wb") as f:
                     pickle.dump(revived_data, f)
-                
+
                 # Remove old JSON
                 os.remove(json_path)
                 logger.debug(f"Migrated cache '{cache_name}' to Pickle format.")
-                
+
             except Exception as e:
                 logger.error(f"Failed to migrate legacy cache {json_file}: {e}")
                 # Don't delete if it failed, let user handle it
@@ -634,33 +637,74 @@ class CacheManager:
                     total += cache_ref.metrics.total_size_bytes
         return total
 
-    def clear_all(self) -> None:
-        if self.persist:
-            for name in list(self.caches.keys()):
+    def save_all(self) -> None:
+        """Save all modified persistent caches to disk."""
+        if not self.persist:
+            return
+
+        saved_count = 0
+        for name, cache in self.caches.items():
+            if cache.modified:
                 self._save_cache(name)
+                saved_count += 1
+
+        if saved_count > 0:
+            logger.info(f"Saved {saved_count} modified caches to disk.")
+        else:
+            logger.debug("No modified caches to save.")
+
+    def _wipe_on_disk(self) -> None:
+        """Delete all persistent cache files from disk."""
+        if not os.path.exists(CACHE_DIR):
+            return
+        try:
+            removed_count = 0
+            for f in os.listdir(CACHE_DIR):
+                if f.endswith(".pkl"):
+                    os.remove(os.path.join(CACHE_DIR, f))
+                    removed_count += 1
+            if removed_count > 0:
+                logger.info(f"Wiped {removed_count} persistent cache files from disk.")
+        except Exception as e:
+            logger.error(f"Error wiping persistent caches: {e}")
+
+    def clear_all(self, wipe: bool = False) -> None:
+        """
+        Clear all in-memory caches.
+        If persist is True and wipe is False, saves modified caches to disk first.
+        If wipe is True, deletes the persistent cache files from disk.
+        """
+        if self.persist:
+            if wipe:
+                self._wipe_on_disk()
+            else:
+                self.save_all()
         self.caches.clear()
-        logger.info("All caches cleared.")
+        if wipe:
+            logger.info("All caches cleared and wiped from disk.")
+        else:
+            logger.debug("In-memory caches cleared.")
 
     def _save_cache(self, cache_name: str) -> None:
         if cache_name in self.caches:
+            cache = self.caches[cache_name]
             cache_file = os.path.join(CACHE_DIR, f"{cache_name}.pkl")
             # Use UUID to ensure uniqueness across threads/processes
             temp_file = f"{cache_file}.{uuid.uuid4()}.tmp"
             try:
                 with open(temp_file, "wb") as f:
                     # Ensure there's data to write
-                    if not self.caches[cache_name].data:
+                    if not cache.data:
                         # If cache is empty, don't write an empty file, just ensure old one is gone
                         if os.path.exists(cache_file):
                             try:
                                 os.remove(cache_file)
                             except OSError:
                                 pass
+                        cache.modified = False
                         return
 
-                    current_cache_data_items = list(
-                        self.caches[cache_name].data.items()
-                    )
+                    current_cache_data_items = list(cache.data.items())
 
                     data = {
                         "data": {
@@ -668,7 +712,7 @@ class CacheManager:
                             for k, v in current_cache_data_items
                             if v[2] is None or v[2] > time.time()
                         },
-                        "dependencies": dict(self.caches[cache_name].dependencies),
+                        "dependencies": dict(cache.dependencies),
                     }
                     pickle.dump(data, f)
 
@@ -677,6 +721,7 @@ class CacheManager:
                 for i in range(max_retries):
                     try:
                         os.replace(temp_file, cache_file)
+                        cache.modified = False  # Successfully saved
                         break
                     except OSError as e:
                         if i == max_retries - 1:
@@ -717,6 +762,7 @@ class CacheManager:
                         for key, value in data.get("data", {}).items():
                             cache.set(key, value, ttl=0)
                         cache.dependencies = data.get("dependencies", {})
+                        cache.modified = False  # Reset after loading/population
                         self.caches[cache_name] = cache
                     logger.debug(f"Loaded persistent cache: {cache_name}")
                 except Exception as e:
@@ -735,9 +781,9 @@ def get_tracker_cache_key(tracker_path: str, tracker_type: str) -> str:
     return f"tracker:{normalize_path(tracker_path)}:{tracker_type}"
 
 
-def clear_all_caches() -> None:
+def clear_all_caches(wipe: bool = False) -> None:
     """Clear all caches in the manager."""
-    cache_manager.clear_all()
+    cache_manager.clear_all(wipe=wipe)
 
 
 def invalidate_dependent_entries(cache_name: str, key_pattern: str) -> None:
@@ -1049,4 +1095,4 @@ def get_cache_stats(cache_name: str) -> Dict[str, int]:
 
 
 cache_manager = CacheManager(persist=True)
-atexit.register(cache_manager.clear_all)
+atexit.register(cache_manager.save_all)

@@ -13,7 +13,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from logging import LogRecord
-from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
+from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple, Union, cast
 
 from cline_utils.dependency_system.analysis.dependency_analyzer import analyze_file
 from cline_utils.dependency_system.analysis.dependency_suggester import (
@@ -79,16 +79,17 @@ from cline_utils.dependency_system.utils.tracker_batch_collector import (
     create_mini_tracker_update,
 )
 from cline_utils.dependency_system.utils.tracker_utils import (
+    aggregate_all_dependencies,
     find_all_tracker_paths,
     get_globally_resolved_key_info_for_cli,
     get_key_global_instance_string,
     read_grid_from_lines,
     read_key_definitions_from_lines,
-    read_tracker_file_structured,
     resolve_key_global_instance_to_ki,
 )
 from cline_utils.dependency_system.utils.visualize_dependencies import (
-    generate_mermaid_diagram,
+    generate_dependency_diagram,
+    render_mermaid_to_image,
 )
 
 # Configure logging
@@ -1040,8 +1041,8 @@ def handle_merge_trackers(args: argparse.Namespace) -> int:
 
 def handle_clear_caches(args: argparse.Namespace) -> int:
     try:
-        clear_all_caches()
-        print("All caches cleared.")
+        clear_all_caches(wipe=True)
+        print("All caches wiped from memory and disk.")
         return 0
     except Exception as e:
         logger.exception(f"Error clearing caches: {e}")
@@ -1615,14 +1616,19 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
     """Handles the visualize-dependencies command by calling the core generation function."""
     focus_keys_list_cli: List[str] = args.key if args.key is not None else []
     output_format_cli = args.format.lower()
+    backend_cli = getattr(args, "backend", None) or (
+        "native" if output_format_cli == "svg" else "mermaid"
+    )
     output_path_arg_cli = args.output
 
     logger.info(
         f"CLI: visualize-dependencies called. Focus Keys: {focus_keys_list_cli or 'Project Overview'}"
     )
 
-    if output_format_cli != "mermaid":
-        print(f"Error: Only 'mermaid' format supported at this time.")
+    if output_format_cli == "svg":
+        backend_cli = "native"
+    if backend_cli not in {"mermaid", "native"}:
+        print(f"Error: Unsupported visualization backend '{backend_cli}'.")
         return 1
 
     try:
@@ -1667,29 +1673,31 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
         print(f"Error loading data needed for visualization: {e}", file=sys.stderr)
         return 1
 
-    mermaid_string_generated = generate_mermaid_diagram(
+    diagram_string_generated = generate_dependency_diagram(
         focus_keys_list_input=focus_keys_list_cli,
         global_path_to_key_info_map=current_global_map_cli,
         path_migration_info=path_migration_info_cli,
         all_tracker_paths_list=list(all_tracker_paths_cli),
         config_manager_instance=config_cli,
+        backend=backend_cli,
+        render=False,
     )
 
-    if mermaid_string_generated is None:
+    if diagram_string_generated is None:
         print(
-            "Error: Mermaid diagram generation failed internally. Check logs.",
+            "Error: Dependency diagram generation failed internally. Check logs.",
             file=sys.stderr,
         )
         return 1
-    elif "Error:" in mermaid_string_generated[:20]:
-        print(mermaid_string_generated, file=sys.stderr)
+    elif "Error:" in diagram_string_generated[:20]:
+        print(diagram_string_generated, file=sys.stderr)
         return 1
-    elif "// No relevant data" in mermaid_string_generated:
+    elif "No relevant data" in diagram_string_generated:
         print(
             "Info: No relevant data found to visualize based on focus keys and filters."
         )
     else:
-        logger.debug("Mermaid code generated successfully.")
+        logger.debug(f"{backend_cli} visualization generated successfully.")
 
     output_path_cli = output_path_arg_cli
     if not output_path_cli:
@@ -1725,9 +1733,11 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
             max_len = 50
             if len(safe_keys_str) > max_len:
                 safe_keys_str = safe_keys_str[:max_len] + "_etc"
-            default_filename = f"focus_{safe_keys_str}_dependencies.{output_format_cli}"
+            ext = "svg" if backend_cli == "native" else output_format_cli
+            default_filename = f"focus_{safe_keys_str}_dependencies.{ext}"
         else:
-            default_filename = f"project_overview_dependencies.{output_format_cli}"
+            ext = "svg" if backend_cli == "native" else output_format_cli
+            default_filename = f"project_overview_dependencies.{ext}"
 
         memory_dir_rel = config_cli.get_path("memory_dir", "cline_docs")
         default_output_dir_rel = os.path.join(memory_dir_rel, "dependency_diagrams")
@@ -1749,11 +1759,24 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
             os.makedirs(output_dir_cli, exist_ok=True)
 
         with open(output_path_cli, "w", encoding="utf-8") as f_out:
-            f_out.write(mermaid_string_generated)
+            f_out.write(diagram_string_generated)
 
-        logger.info(f"Successfully wrote Mermaid visualization to: {output_path_cli}")
+        logger.info(
+            f"Successfully wrote dependency visualization to: {output_path_cli}"
+        )
         print(f"\nDependency visualization saved to: {output_path_cli}")
-        if "// No relevant data" not in mermaid_string_generated:
+        if (
+            backend_cli == "mermaid"
+            and "No relevant data" not in diagram_string_generated
+            and not diagram_string_generated.startswith("Error:")
+        ):
+            rendered_svg_path = os.path.splitext(output_path_cli)[0] + ".svg"
+            render_mermaid_to_image(diagram_string_generated, rendered_svg_path)
+            print(f"Rendered Mermaid SVG saved to: {rendered_svg_path}")
+        if (
+            "No relevant data" not in diagram_string_generated
+            and backend_cli == "mermaid"
+        ):
             print(
                 "You can view this file using Mermaid Live Editor (mermaid.live) or compatible Markdown viewers."
             )
@@ -1885,6 +1908,8 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
     if not hasattr(args, "_processed_pairs"):
         args._processed_pairs = set()
+    if not hasattr(args, "accumulated_tracker_updates"):
+        args.accumulated_tracker_updates = []
 
     _raw_pairs = getattr(args, "_processed_pairs")
     processed_pairs = cast(Set[Tuple[str, str, str, str]], _raw_pairs)
@@ -1922,64 +1947,15 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
         doc_trackers: List[str] = []
         mini_trackers: List[str] = []
-        _other_trackers: List[str] = []
         for t in all_trackers:
             basename = os.path.basename(t)
             if "doc_tracker.md" in basename:
                 doc_trackers.append(t)
             elif basename.endswith("_module.md"):
                 mini_trackers.append(t)
-            else:
-                pass
 
-        ordered_trackers = doc_trackers + mini_trackers
-
+        trackers_to_scan = doc_trackers + mini_trackers
         dep_chars = ("p", "S", "s") if dep_char == "p" else (dep_char,)
-        selected_tracker: Optional[str] = None
-
-        for t_path in ordered_trackers:
-            if not os.path.isfile(t_path):
-                continue
-            with open(t_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            try:
-                key_def_pairs = read_key_definitions_from_lines(lines)
-                _, grid_rows_data = read_grid_from_lines(lines)
-                found = False
-                for row_idx, (row_label, compressed_row) in enumerate(grid_rows_data):
-                    if row_idx >= len(key_def_pairs):
-                        continue
-                    decomp = list(decompress(compressed_row))
-                    for col_idx, char in enumerate(decomp):
-                        if char in dep_chars and col_idx < len(key_def_pairs):
-                            tgt_key_label, _ = key_def_pairs[col_idx]
-                            if (
-                                t_path,
-                                row_label,
-                                tgt_key_label,
-                                char,
-                            ) not in processed_pairs:
-                                found = True
-                                break
-                    if found:
-                        break
-                if found:
-                    selected_tracker = t_path
-                    break
-            except Exception:
-                continue
-
-        if not selected_tracker:
-            print(
-                f"No unresolved dependencies ({', '.join(dep_chars)}) found in any known trackers."
-            )
-            return 0
-
-        tracker_path: str = str(selected_tracker)
-        dep_chars_str = "', '".join(dep_chars)
-        print(
-            f"Automatically selected tracker: {tracker_path} (scanning for: '{dep_chars_str}')"
-        )
     else:
         tracker_path: str = str(normalize_path(args.tracker))
         if not os.path.isfile(tracker_path):
@@ -1988,6 +1964,7 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        trackers_to_scan = [tracker_path]
         dep_chars = (dep_char,)
 
     model_path = args.model if args.model else "models/Qwen3-4B-Instruct-2507-Q8_0.gguf"
@@ -1999,355 +1976,491 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
     file_descendants_by_dir = indexes.get("file_descendants_by_dir", {})
     ancestor_chain = indexes.get("ancestor_chain", {})
 
-    # Determine Tracker Type matches handle_add_dependency logic
-    is_mini = tracker_path.endswith("_module.md")
-    tracker_type = (
-        "mini"
-        if is_mini
-        else ("doc" if "doc_tracker.md" in os.path.basename(tracker_path) else "main")
+    # --- PREPARATION ---
+    config_mgr = ConfigManager()
+    get_prio = config_mgr.get_char_priority
+    all_tp = find_all_tracker_paths(config_mgr, get_project_root())
+    old_global_map = load_old_global_key_map()
+    path_migration_info = build_path_migration_map(old_global_map, global_map)
+
+    # Build Global Edges Map (Aggregated from all trackers)
+    agg_deps = aggregate_all_dependencies(
+        tracker_paths=all_tp,
+        path_migration_info=path_migration_info,
+        current_global_path_to_key_info=global_map,
+        show_progress=False,
+    )
+    edges: DefaultDict[str, Dict[str, str]] = defaultdict(dict)
+    gi_to_path = {ki.key_string: p for p, ki in global_map.items()}
+    for (src_gi, tgt_gi), (char, _) in agg_deps.items():
+        s_path = gi_to_path.get(src_gi)
+        t_path = gi_to_path.get(tgt_gi)
+        if s_path and t_path:
+            edges[s_path][t_path] = char
+
+    import time
+
+    # --- Global Algorithmic Resolution ---
+    global_suggestions: DefaultDict[str, DefaultDict[str, List[Tuple[str, str]]]] = (
+        defaultdict(lambda: defaultdict(list))
     )
 
-    # Read Tracker
-    try:
-        with open(tracker_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        key_def_pairs = read_key_definitions_from_lines(lines)
-        _, grid_rows_data = read_grid_from_lines(lines)
-    except Exception as e:
-        print(f"Error reading tracker: {e}", file=sys.stderr)
-        return 1
+    algo_processed_count = 0
+    shortcut_processed_count = 0
 
-    if not key_def_pairs or not grid_rows_data:
-        print("Tracker appears empty or invalid.", file=sys.stderr)
-        return 1
-
-    # Find Tasks
-    tasks: List[Tuple[str, str, str, str]] = (
-        []
-    )  # (src_key, src_path, tgt_key, tgt_path)
-
-    for row_idx, (row_label, compressed_row) in enumerate(grid_rows_data):
-        if focus_key and row_label != focus_key:
-            continue
-
-        if row_idx >= len(key_def_pairs):
-            continue
-
-        _, src_path = key_def_pairs[row_idx]
-
-        if not src_path or not os.path.exists(src_path):
+    # Collect all algorithmic/shortcut tasks globally
+    for t_path in trackers_to_scan:
+        if not os.path.isfile(t_path):
             continue
 
         try:
-            decomp = list(decompress(compressed_row))
-            for col_idx, char in enumerate(decomp):
-                if char in dep_chars:
-                    if col_idx < len(key_def_pairs):
-                        tgt_key_label, tgt_path = key_def_pairs[col_idx]
-
-                        if tgt_path and os.path.exists(tgt_path):
-                            if (
-                                tracker_path,
-                                row_label,
-                                tgt_key_label,
-                                char,
-                            ) not in processed_pairs:
-                                tasks.append(
-                                    (row_label, src_path, tgt_key_label, tgt_path)
-                                )
-                                processed_pairs.add(
-                                    (tracker_path, row_label, tgt_key_label, char)
-                                )
+            with open(t_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            key_def_pairs = read_key_definitions_from_lines(lines)
+            _, grid_rows_data = read_grid_from_lines(lines)
         except Exception:
             continue
 
-    dep_chars_str = "', '".join(dep_chars)
-    print(f"Found {len(tasks)} unresolved dependencies for ('{dep_chars_str}').")
-    if not tasks:
-        return 0
+        if not key_def_pairs or not grid_rows_data:
+            continue
 
-    tasks = tasks[:limit]
-
-    algo_tasks: List[Tuple[str, str, str, str]] = []
-    llm_tasks: List[Tuple[str, str, str, str]] = []
-    for pair in tasks:
-        _, sp, _, tp = pair
-        spn = normalize_path(sp)
-        tpn = normalize_path(tp)
-
-        # Use indexed directory metadata for classification
-        s_is_dir = is_dir_map.get(spn, os.path.isdir(sp))
-        t_is_dir = is_dir_map.get(tpn, os.path.isdir(tp))
-
-        if s_is_dir or t_is_dir:
-            algo_tasks.append(pair)
-        else:
-            llm_tasks.append(pair)
-
-    if algo_tasks:
-        print(
-            f"\n--- Resolving {len(algo_tasks)} directory placeholders algorithmically ---"
-        )
-
-        config_mgr = ConfigManager()
-        get_prio = config_mgr.get_char_priority
-        all_tp = find_all_tracker_paths(config_mgr, get_project_root())
-
-        edges: Dict[str, Dict[str, str]] = {}
-        for tp in all_tp:
-            try:
-                t_data = read_tracker_file_structured(tp)
-                defs = t_data.get("definitions_ordered", [])
-                grid = t_data.get("grid_rows_ordered", [])
-                key_to_path = {k: normalize_path(p) for k, p in defs}
-                keys_list = [k for k, _ in defs]
-
-                for row_k, comp_row in grid:
-                    try:
-                        src_path_norm = key_to_path.get(str(row_k))
-                        if not src_path_norm:
-                            continue
-                        if src_path_norm not in edges:
-                            edges[src_path_norm] = {}
-
-                        decomp = list(decompress(str(comp_row)))
-                        for col_idx, char in enumerate(decomp):
-                            char_str = str(char)
-                            if char_str in (PLACEHOLDER_CHAR, DIAGONAL_CHAR, " "):
-                                continue
-                            if col_idx < len(keys_list):
-                                tgt_k = keys_list[col_idx]
-                                tgt_path_norm = key_to_path.get(tgt_k)
-                                if tgt_path_norm:
-                                    existing: str = edges[src_path_norm].get(
-                                        tgt_path_norm, " "
-                                    )
-                                    if get_prio(char_str) > get_prio(existing):
-                                        edges[src_path_norm][tgt_path_norm] = char_str
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        algo_suggestions: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
-        for src_key, src_path, tgt_key, tgt_path in algo_tasks:
-            sn: str = normalize_path(src_path)
-            tn: str = normalize_path(tgt_path)
-
-            # Fast parent-child relation test using indexed ancestor chains
-            is_parent_child_rel = (
-                sn == tn
-                or sn in ancestor_chain.get(tn, ())
-                or tn in ancestor_chain.get(sn, ())
-            )
-
-            if is_parent_child_rel:
-                logger.info(
-                    f"Algorithmically resolved {src_key} -> {tgt_key}: 'x' (Parent-Child relation)"
-                )
-                algo_suggestions[src_key].append((tgt_key, "x"))
+        for row_idx, (row_label, compressed_row) in enumerate(grid_rows_data):
+            if focus_key and row_label != focus_key:
+                continue
+            if row_idx >= len(key_def_pairs):
                 continue
 
-            # Fast descendant lookup using indexed structures
-            s_children_tuple = file_descendants_by_dir.get(sn)
-            if s_children_tuple is not None:
-                s_children = list(s_children_tuple)
-            else:
-                # If not a directory in index, treat as file if it's in the map or on disk
-                if not is_dir_map.get(sn, os.path.isdir(src_path)):
-                    s_children = [sn]
-                else:
-                    s_children = []
+            _, src_path = key_def_pairs[row_idx]
+            if not src_path or not os.path.exists(src_path):
+                continue
 
-            t_children_tuple = file_descendants_by_dir.get(tn)
-            if t_children_tuple is not None:
-                t_children = list(t_children_tuple)
-            else:
-                if not is_dir_map.get(tn, os.path.isdir(tgt_path)):
-                    t_children = [tn]
-                else:
-                    t_children = []
+            try:
+                decomp = list(decompress(compressed_row))
+                for col_idx, char in enumerate(decomp):
+                    if char in dep_chars and col_idx < len(key_def_pairs):
+                        tgt_key_label, tgt_path = key_def_pairs[col_idx]
+                        if tgt_path and os.path.exists(tgt_path):
+                            if (
+                                t_path,
+                                row_label,
+                                tgt_key_label,
+                                char,
+                            ) in processed_pairs:
+                                continue
 
-            best_char: str = " "
-            best_prio: int = -1
-            found_chars: Set[str] = set()
+                            sn = normalize_path(src_path)
+                            tn = normalize_path(tgt_path)
 
-            for sc in s_children:
-                for tc in t_children:
-                    char = edges.get(sc, {}).get(tc)
-                    if char:
-                        prio = get_prio(char)
-                        found_chars.add(char)
-                        if prio > best_prio:
-                            best_prio = prio
-                            best_char = char
+                            # Check Shortcut 1A (Global Cache)
+                            existing_global_char = edges.get(sn, {}).get(tn)
+                            if existing_global_char and existing_global_char in (
+                                "x",
+                                "<",
+                                ">",
+                                "d",
+                                "n",
+                            ):
+                                global_suggestions[t_path][row_label].append(
+                                    (tgt_key_label, existing_global_char)
+                                )
+                                processed_pairs.add(
+                                    (t_path, row_label, tgt_key_label, char)
+                                )
+                                shortcut_processed_count += 1
+                                logger.info(
+                                    f"Shortcut: Resolved {row_label} -> {tgt_key_label}: '{existing_global_char}' (Propagated from global cache)"
+                                )
+                                continue
 
-            if best_prio > -1:
-                if {"<", ">"} <= found_chars:
-                    best_char = "x"
-                logger.info(
-                    f"Algorithmically resolved {src_key} -> {tgt_key}: '{best_char}' (Rolled up)"
-                )
-                algo_suggestions[src_key].append((tgt_key, best_char))
-            else:
-                logger.info(
-                    f"Algorithmically resolved {src_key} -> {tgt_key}: 'n' (No dependencies found)"
-                )
-                algo_suggestions[src_key].append((tgt_key, "n"))
+                            # Check Shortcut 1B (Parent-Child)
+                            is_pc = (
+                                sn == tn
+                                or sn in ancestor_chain.get(tn, ())
+                                or tn in ancestor_chain.get(sn, ())
+                            )
+                            if is_pc:
+                                global_suggestions[t_path][row_label].append(
+                                    (tgt_key_label, "x")
+                                )
+                                processed_pairs.add(
+                                    (t_path, row_label, tgt_key_label, char)
+                                )
+                                shortcut_processed_count += 1
+                                logger.info(
+                                    f"Shortcut: Resolved {row_label} -> {tgt_key_label}: 'x' (Parent-Child relation)"
+                                )
+                                if sn not in edges:
+                                    edges[sn] = {}
+                                edges[sn][tn] = "x"
+                                continue
 
-        if algo_suggestions:
-            algo_collector = TrackerBatchCollector()
+                            # Check Algorithmic Phase 2 (Directories)
+                            if is_dir_map.get(
+                                sn, os.path.isdir(src_path)
+                            ) or is_dir_map.get(tn, os.path.isdir(tgt_path)):
+                                s_children_tuple = file_descendants_by_dir.get(sn)
+                                s_children = (
+                                    list(s_children_tuple)
+                                    if s_children_tuple is not None
+                                    else (
+                                        [sn]
+                                        if not is_dir_map.get(
+                                            sn, os.path.isdir(src_path)
+                                        )
+                                        else []
+                                    )
+                                )
+                                t_children_tuple = file_descendants_by_dir.get(tn)
+                                t_children = (
+                                    list(t_children_tuple)
+                                    if t_children_tuple is not None
+                                    else (
+                                        [tn]
+                                        if not is_dir_map.get(
+                                            tn, os.path.isdir(tgt_path)
+                                        )
+                                        else []
+                                    )
+                                )
+
+                                best_char: str = " "
+                                best_prio: int = -1
+                                found_chars: Set[str] = set()
+
+                                s_set = set(s_children)
+                                t_set = set(t_children)
+                                relevant_sources = s_set.intersection(edges.keys())
+
+                                for sc in relevant_sources:
+                                    sc_edges = edges[sc]
+                                    relevant_targets = t_set.intersection(
+                                        sc_edges.keys()
+                                    )
+                                    for tc in relevant_targets:
+                                        echar = sc_edges[tc]
+                                        if echar:
+                                            prio = get_prio(echar)
+                                            found_chars.add(echar)
+                                            if prio > best_prio:
+                                                best_prio = prio
+                                                best_char = echar
+
+                                if best_prio > -1:
+                                    if {"<", ">"} <= found_chars:
+                                        best_char = "x"
+                                    if best_char in ("p", "S", "s"):
+                                        # Not ready to resolve. Skip, but mark as processed so it's not checked again in this run
+                                        processed_pairs.add(
+                                            (t_path, row_label, tgt_key_label, char)
+                                        )
+                                        continue
+
+                                    global_suggestions[t_path][row_label].append(
+                                        (tgt_key_label, best_char)
+                                    )
+                                    logger.info(
+                                        f"Algorithmically resolved {row_label} -> {tgt_key_label}: '{best_char}' (Rolled up)"
+                                    )
+                                    if sn not in edges:
+                                        edges[sn] = {}
+                                    edges[sn][tn] = best_char
+                                else:
+                                    global_suggestions[t_path][row_label].append(
+                                        (tgt_key_label, "n")
+                                    )
+                                    logger.info(
+                                        f"Algorithmically resolved {row_label} -> {tgt_key_label}: 'n' (No dependencies found)"
+                                    )
+                                    if sn not in edges:
+                                        edges[sn] = {}
+                                    edges[sn][tn] = "n"
+
+                                processed_pairs.add(
+                                    (t_path, row_label, tgt_key_label, char)
+                                )
+                                algo_processed_count += 1
+                                continue
+            except Exception:
+                continue
+
+    # Apply results globally
+    if global_suggestions:
+        print(
+            f"\n--- Resolving {algo_processed_count} directory placeholders and {shortcut_processed_count} shortcuts algorithmically ---"
+        )
+        algo_start_time = time.time()
+
+        global_collector = TrackerBatchCollector()
+        for t_path, suggestions in global_suggestions.items():
+            t_type = (
+                "mini"
+                if t_path.endswith("_module.md")
+                else ("doc" if "doc_tracker.md" in os.path.basename(t_path) else "main")
+            )
+
+            # Use cast to ensure type checker knows suggestions is Dict[str, List[Tuple[str, str]]]
+            cast_suggestions: Dict[str, List[Tuple[str, str]]] = dict(suggestions)
             update_data = update_tracker(
-                output_file_suggestion=tracker_path,
+                output_file_suggestion=t_path,
                 path_to_key_info=global_map,
-                tracker_type=tracker_type,
-                suggestions_external=algo_suggestions,
+                tracker_type=t_type,
+                suggestions_external=cast_suggestions,
                 return_update=True,
                 force_apply_suggestions=True,
                 apply_ast_overrides=False,
             )
+            if not update_data:
+                continue
 
-            if update_data:
-                t_update = None
-                if tracker_type == "mini":
-                    t_update = create_mini_tracker_update(
-                        output_file=update_data["output_file"],
-                        key_info_list=update_data["key_info_list"],
-                        grid_rows=update_data["grid_rows"],
-                        last_key_edit=update_data["last_key_edit"],
-                        last_grid_edit=update_data["last_grid_edit"],
-                        module_path=update_data["module_path"],
-                        path_to_key_info=update_data["path_to_key_info"],
-                        existing_lines=update_data["existing_lines"],
-                        tracker_exists=update_data["tracker_exists"],
-                        ast_overrides_applied_count=update_data.get(
-                            "ast_overrides_applied_count", 0
-                        ),
-                        suggestion_applied_count=update_data.get(
-                            "suggestion_applied_count", 0
-                        ),
-                        structural_deps_applied_count=update_data.get(
-                            "structural_deps_applied_count", 0
-                        ),
-                    )
-                elif tracker_type == "doc":
-                    t_update = create_doc_tracker_update(
-                        output_file=tracker_path,
-                        key_info_list=update_data["key_info_list"],
-                        grid_rows=update_data["grid_rows"],
-                        last_key_edit=update_data["last_key_edit"],
-                        last_grid_edit=update_data["last_grid_edit"],
-                        path_to_key_info=update_data["path_to_key_info"],
-                        ast_overrides_applied_count=update_data.get(
-                            "ast_overrides_applied_count", 0
-                        ),
-                        suggestion_applied_count=update_data.get(
-                            "suggestion_applied_count", 0
-                        ),
-                        structural_deps_applied_count=update_data.get(
-                            "structural_deps_applied_count", 0
-                        ),
-                    )
-                else:
-                    t_update = create_main_tracker_update(
-                        output_file=tracker_path,
-                        key_info_list=update_data["key_info_list"],
-                        grid_rows=update_data["grid_rows"],
-                        last_key_edit=update_data["last_key_edit"],
-                        last_grid_edit=update_data["last_grid_edit"],
-                        path_to_key_info=update_data["path_to_key_info"],
-                        ast_overrides_applied_count=update_data.get(
-                            "ast_overrides_applied_count", 0
-                        ),
-                        suggestion_applied_count=update_data.get(
-                            "suggestion_applied_count", 0
-                        ),
-                        structural_deps_applied_count=update_data.get(
-                            "structural_deps_applied_count", 0
-                        ),
-                    )
-                if t_update:
-                    algo_collector.add(t_update)
-                    algo_collector.commit_all()
-                else:
-                    print(
-                        "Error: Failed to create tracker update object for algorithmic tasks."
-                    )
+            out_path = update_data.get("output_file", t_path)
+            t_update = None
+            if t_type == "mini":
+                t_update = create_mini_tracker_update(
+                    output_file=out_path,
+                    key_info_list=update_data["key_info_list"],
+                    grid_rows=update_data["grid_rows"],
+                    last_key_edit=update_data["last_key_edit"],
+                    last_grid_edit=update_data["last_grid_edit"],
+                    module_path=update_data.get("module_path", ""),
+                    path_to_key_info=update_data.get("path_to_key_info", global_map),
+                    existing_lines=update_data.get("existing_lines", []),
+                    tracker_exists=update_data.get("tracker_exists", False),
+                    ast_overrides_applied_count=update_data.get(
+                        "ast_overrides_applied_count", 0
+                    ),
+                    suggestion_applied_count=update_data.get(
+                        "suggestion_applied_count", 0
+                    ),
+                    structural_deps_applied_count=update_data.get(
+                        "structural_deps_applied_count", 0
+                    ),
+                    force_apply_suggestions=True,
+                )
+            elif t_type == "doc":
+                t_update = create_doc_tracker_update(
+                    output_file=out_path,
+                    key_info_list=update_data["key_info_list"],
+                    grid_rows=update_data["grid_rows"],
+                    last_key_edit=update_data["last_key_edit"],
+                    last_grid_edit=update_data["last_grid_edit"],
+                    path_to_key_info=update_data.get("path_to_key_info", global_map),
+                    ast_overrides_applied_count=update_data.get(
+                        "ast_overrides_applied_count", 0
+                    ),
+                    suggestion_applied_count=update_data.get(
+                        "suggestion_applied_count", 0
+                    ),
+                    structural_deps_applied_count=update_data.get(
+                        "structural_deps_applied_count", 0
+                    ),
+                    force_apply_suggestions=True,
+                )
+            else:
+                t_update = create_main_tracker_update(
+                    output_file=out_path,
+                    key_info_list=update_data["key_info_list"],
+                    grid_rows=update_data["grid_rows"],
+                    last_key_edit=update_data["last_key_edit"],
+                    last_grid_edit=update_data["last_grid_edit"],
+                    path_to_key_info=update_data.get("path_to_key_info", global_map),
+                    ast_overrides_applied_count=update_data.get(
+                        "ast_overrides_applied_count", 0
+                    ),
+                    suggestion_applied_count=update_data.get(
+                        "suggestion_applied_count", 0
+                    ),
+                    structural_deps_applied_count=update_data.get(
+                        "structural_deps_applied_count", 0
+                    ),
+                    force_apply_suggestions=True,
+                )
 
-    tasks = llm_tasks
-    if not tasks:
-        if algo_tasks:
-            print("No LLM tasks required. Finished resolving algorithmically.")
-            args.limit -= len(algo_tasks)
-            if args.limit > 0 and len(algo_tasks) > 0 and args.tracker is None:
-                print(f"Continuing to next tracker. Remaining limit: {args.limit}")
-                return handle_resolve_placeholders(args)
+            if t_update:
+                global_collector.add(t_update)
+
+        # Commit all algorithmic updates at once, passing accumulated_updates
+        global_collector.commit_all(
+            skip_populate_hook=True,
+            accumulated_updates=cast(List[Any], args.accumulated_tracker_updates),
+        )
+        logger.info(
+            f"Global Algorithmic/Shortcut phase complete in {time.time()-algo_start_time:.2f}s"
+        )
+
+    # --- LLM Resolution Phase ---
+    selected_tracker: Optional[str] = None
+    llm_tasks: List[Tuple[str, str, str, str]] = []
+    tracker_type = ""
+
+    for t_path in trackers_to_scan:
+        if not os.path.isfile(t_path):
+            continue
+
+        t_type = (
+            "mini"
+            if t_path.endswith("_module.md")
+            else ("doc" if "doc_tracker.md" in os.path.basename(t_path) else "main")
+        )
+        try:
+            with open(t_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            key_def_pairs = read_key_definitions_from_lines(lines)
+            _, grid_rows_data = read_grid_from_lines(lines)
+        except Exception:
+            continue
+
+        if not key_def_pairs or not grid_rows_data:
+            continue
+
+        found_llm_tasks = []
+        for row_idx, (row_label, compressed_row) in enumerate(grid_rows_data):
+            if focus_key and row_label != focus_key:
+                continue
+            if row_idx >= len(key_def_pairs):
+                continue
+
+            _, src_path = key_def_pairs[row_idx]
+            if not src_path or not os.path.exists(src_path):
+                continue
+
+            try:
+                decomp = list(decompress(compressed_row))
+                for col_idx, char in enumerate(decomp):
+                    if char in dep_chars and col_idx < len(key_def_pairs):
+                        tgt_key_label, tgt_path = key_def_pairs[col_idx]
+                        if tgt_path and os.path.exists(tgt_path):
+                            if (
+                                t_path,
+                                row_label,
+                                tgt_key_label,
+                                char,
+                            ) in processed_pairs:
+                                continue
+
+                            sn = normalize_path(src_path)
+                            tn = normalize_path(tgt_path)
+                            if is_dir_map.get(
+                                sn, os.path.isdir(src_path)
+                            ) or is_dir_map.get(tn, os.path.isdir(tgt_path)):
+                                # This is a directory placeholder that wasn't resolved in Phase 2
+                                # Do NOT send it to the LLM.
+                                processed_pairs.add(
+                                    (t_path, row_label, tgt_key_label, char)
+                                )
+                                continue
+
+                            found_llm_tasks.append(
+                                (row_label, src_path, tgt_key_label, tgt_path)
+                            )
+            except Exception:
+                continue
+
+        if found_llm_tasks:
+            selected_tracker = t_path
+            llm_tasks = found_llm_tasks
+            tracker_type = t_type
+            break
+
+    if not selected_tracker or not llm_tasks:
+        print("Finished resolving. No LLM tasks required.")
         return 0
 
-    # Setup for token checks
+    dep_chars_str = "', '".join(dep_chars)
+    print(
+        f"Automatically selected tracker: {selected_tracker} (scanning for: '{dep_chars_str}')"
+    )
+    print(f"Found {len(llm_tasks)} unresolved dependencies for ('{dep_chars_str}').")
+
+    llm_tasks = llm_tasks[:limit]
+
     MAX_MODEL_TOKENS = 30000  # Leave buffer for system prompt (total ctx 32768)
     WRAPPER_OVERHEAD = 1000  # Approximate system prompt + overhead
 
-    # Pre-fetch token counts for all involved files to avoid repeated lookups
-    # keys in global_map map to KeyInfo which has .norm_path
-    # token_map uses norm_path as key
     token_map = _load_token_metadata(get_project_root())
-
-    # Load symbol map to check for SES availability
     symbol_map = load_project_symbol_map()
-
-    # Helper to get appropriate token count (defined once, reused by sort and loop)
-    def get_tokens(path_norm: str, is_ses: bool) -> int:
-        data = token_map.get(path_norm, {})
-        if is_ses:
-            val = data.get("ses_tokens", data.get("tokens"))
-        else:
-            val = data.get("full_tokens", data.get("tokens"))
-        return val if val is not None else 0
-
-    # --- Context-Sorted Processing Order ---
-    # Sort pairs by estimated context size (largest first).
-    # This minimizes model reloads: the context window starts at max size
-    # and monotonically shrinks, avoiding "see-sawing" reloads.
-    def _estimate_pair_context(pair: Tuple[str, str, str, str]) -> int:
-        _sk, sp, _tk, tp = pair
-        sn = normalize_path(sp)
-        tn = normalize_path(tp)
-        s_ses = sn in symbol_map
-        t_ses = tn in symbol_map
-        st = get_tokens(sn, s_ses)
-        tt = get_tokens(tn, t_ses)
-        return st + tt + WRAPPER_OVERHEAD
-
-    tasks.sort(key=_estimate_pair_context, reverse=True)
-    print(
-        f"Processing batch of {len(tasks)} items (sorted by descending context size)..."
-    )
-
-    processor = LocalLLMProcessor(model_path=model_path)
 
     from cline_utils.dependency_system.utils.placeholder_resolver import (
         PlaceholderResolver,
     )
 
-    resolver = PlaceholderResolver(processor)
+    # --- Initialize processor first so its tokenizer is available for exact counting ---
+    processor = LocalLLMProcessor(model_path=model_path)
 
-    def _prepare_wrapper(sk: str, sp: str, tk: str, tp: str) -> PreparedPair:
-        return _prepare_pair(
+    # --- Eager preparation: read files + SES substitution for every pair ---
+    print(f"Preparing {len(llm_tasks)} pairs and measuring exact token requirements...")
+    all_prepared: List[PreparedPair] = [
+        _prepare_pair(
             sk, sp, tk, tp, symbol_map, token_map, MAX_MODEL_TOKENS, WRAPPER_OVERHEAD
         )
+        for sk, sp, tk, tp in llm_tasks
+    ]
 
-    total_processed = resolver.resolve_batch(
-        tasks=tasks,
-        tracker_path=tracker_path,
-        global_map=global_map,
-        tracker_type=tracker_type,
-        prepare_func=_prepare_wrapper,
+    # Partition: pairs that exceed the token limit are already flagged skip=True by _prepare_pair
+    valid_prepared = [p for p in all_prepared if not p.skip]
+    skipped_prepared = [p for p in all_prepared if p.skip]
+
+    if skipped_prepared:
+        print(f"  {len(skipped_prepared)} pair(s) skipped (exceed token limit).")
+
+    # --- Exact token measurement: count src+tgt content tokens for each valid pair ---
+    # The instruction wrapper is constant across all pairs, so counting content tokens
+    # gives an exact proportional ordering.  We use the processor's own tokenizer so
+    # the counts reflect the actual model vocabulary — no heuristics involved.
+    print(f"  Counting exact tokens for {len(valid_prepared)} pair(s)...")
+    for prep in valid_prepared:
+        exact = processor.get_token_count(prep.srccontent + prep.tgtcontent)
+        # Store the exact count back into the PreparedPair fields for the sort key.
+        # stokens + ttokens are used as a hint by determine_dependency but not for
+        # correctness — overwriting them with the exact combined count is safe here.
+        prep.stokens = exact
+        prep.ttokens = 0  # absorbed into stokens; ttokens is now redundant
+
+    # --- Deterministic sort: largest context first so n_ctx only ever shrinks ---
+    valid_prepared.sort(key=lambda p: p.stokens, reverse=True)
+    print(
+        f"Processing batch of {len(valid_prepared)} items (sorted by descending exact token count)..."
     )
 
-    actual_processed = total_processed + (len(algo_tasks) if algo_tasks else 0)
-    args.limit -= actual_processed
-    if args.limit > 0 and actual_processed > 0 and args.tracker is None:
+    # Re-mark processed_pairs to include all tasks (valid + skipped) before GPU work begins
+    for prep in all_prepared:
+        processed_pairs.add((selected_tracker, prep.srckey, prep.tgtkey, dep_chars[0]))
+
+    resolver = PlaceholderResolver(processor)
+
+    # Identity wrapper: pairs are already prepared; no I/O needed inside resolve_batch
+    prepared_index: Dict[Tuple[str, str], PreparedPair] = {
+        (p.srckey, p.tgtkey): p for p in valid_prepared
+    }
+
+    def _identity_prepare(sk: str, sp: str, tk: str, tp: str) -> PreparedPair:
+        return prepared_index.get(
+            (sk, tk),
+            _prepare_pair(
+                sk,
+                sp,
+                tk,
+                tp,
+                symbol_map,
+                token_map,
+                MAX_MODEL_TOKENS,
+                WRAPPER_OVERHEAD,
+            ),
+        )
+
+    # Pass valid_prepared as (srckey, srcpath, tgtkey, tgtpath) tuples
+    sorted_tasks = [(p.srckey, p.srcpath, p.tgtkey, p.tgtpath) for p in valid_prepared]
+
+    total_processed = resolver.resolve_batch(
+        tasks=sorted_tasks,
+        tracker_path=selected_tracker,
+        global_map=global_map,
+        tracker_type=tracker_type,
+        prepare_func=_identity_prepare,
+        accumulated_updates=cast(List[Any], args.accumulated_tracker_updates),
+    )
+
+    args.limit -= total_processed
+    if args.limit > 0 and total_processed > 0 and args.tracker is None:
         print(f"Continuing to next tracker. Remaining limit: {args.limit}")
         processor.close()
         return handle_resolve_placeholders(args)
@@ -2546,9 +2659,15 @@ def main():
     )
     visualize_parser.add_argument(
         "--format",
-        choices=["mermaid"],
+        choices=["mermaid", "svg"],
         default="mermaid",
-        help="Output format (only mermaid currently)",
+        help="Output format. Use 'svg' for the native renderer.",
+    )
+    visualize_parser.add_argument(
+        "--backend",
+        choices=["mermaid", "native"],
+        default=None,
+        help="Rendering backend. Defaults to native when --format svg is used.",
     )
     visualize_parser.add_argument(
         "--output",
@@ -2682,6 +2801,41 @@ def main():
     # Execute command
     if hasattr(args, "func"):
         exit_code = args.func(args)
+
+        # If it was resolve-placeholders, run the hook at the end
+        if args.func == handle_resolve_placeholders and hasattr(
+            args, "accumulated_tracker_updates"
+        ):
+            if args.accumulated_tracker_updates:
+                from cline_utils.dependency_system.utils.populate_comments import (
+                    populate_comments_for_batch,
+                    report_batch_results,
+                )
+                from cline_utils.dependency_system.analysis.dependency_suggester import (
+                    load_project_symbol_map,
+                )
+                from cline_utils.dependency_system.utils.cache_manager import (
+                    get_project_root_cached,
+                )
+                from pathlib import Path
+
+                print(
+                    f"Running final populate_comments_hook for {len(args.accumulated_tracker_updates)} accumulated updates..."
+                )
+                try:
+                    results = populate_comments_for_batch(
+                        project_root=Path(get_project_root_cached()),
+                        updates=args.accumulated_tracker_updates,
+                        symbol_map=load_project_symbol_map(),
+                        dry_run=False,
+                        verbose=False,
+                    )
+                    if results:
+                        report_batch_results(results, dry_run=False)
+                except Exception as e:
+                    logger.error(f"Error in final populate_comments hook: {e}")
+                args.accumulated_tracker_updates.clear()
+
         sys.exit(exit_code)
     else:
         parser.print_help()

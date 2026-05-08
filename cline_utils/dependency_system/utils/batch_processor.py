@@ -14,18 +14,8 @@ from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from cline_utils.dependency_system.utils.phase_tracker import PhaseTracker
 
-# VRAM-aware imports
-try:
-    import torch
-
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-    torch = None
-
-# Removed cache import as caching batch processing itself is complex and often not desired
-# from cline_utils.dependency_system.utils.cache_manager import cached
-
+# VRAM-aware imports (lazy)
+# import torch -> moved to usage sites
 
 logger = logging.getLogger(__name__)
 
@@ -61,21 +51,28 @@ class BatchProcessor:
         default_workers = min(25, (cpu_count * 4))
 
         # VRAM-aware worker limiting - ONLY apply if explicitly requested
-        if respect_vram_limits and TORCH_AVAILABLE and torch.cuda.is_available():
+        if respect_vram_limits:
             try:
-                from cline_utils.dependency_system.utils.resource_validator import (
-                    get_vram_manager,
-                )
+                import torch
 
-                vram_manager = get_vram_manager()
-                vram_recommended = vram_manager.get_recommended_max_workers()
-                original_default = default_workers
-                default_workers = min(default_workers, vram_recommended)
-                if default_workers < original_default:
-                    logger.info(
-                        f"VRAM-aware worker limit applied: {default_workers} workers "
-                        f"(CPU limit: {original_default}, VRAM limit: {vram_recommended})"
+                if torch.cuda.is_available():
+                    from cline_utils.dependency_system.utils.resource_validator import (
+                        get_vram_manager,
                     )
+
+                    vram_manager = get_vram_manager()
+                    vram_recommended = vram_manager.get_recommended_max_workers()
+                    original_default = default_workers
+                    default_workers = min(default_workers, vram_recommended)
+                    if default_workers < original_default:
+                        logger.info(
+                            f"VRAM-aware worker limit applied: {default_workers} workers "
+                            f"(CPU limit: {original_default}, VRAM limit: {vram_recommended})"
+                        )
+            except ImportError:
+                logger.debug(
+                    "Torch not installed, skipping VRAM-aware worker limiting."
+                )
             except Exception as e:
                 logger.warning(f"Could not apply VRAM-aware worker limits: {e}")
 

@@ -12,6 +12,24 @@ import tempfile
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from cline_utils.dependency_system.core.dependency_grid import (
+    DIAGONAL_CHAR,
+    EMPTY_CHAR,
+    PLACEHOLDER_CHAR,
+    compress,
+    decompress,
+)
+from cline_utils.dependency_system.core.key_manager import (
+    KeyInfo,
+    get_sortable_parts_for_key,
+)
+from cline_utils.dependency_system.io.tracker_io import is_path_in_doc_roots
+from cline_utils.dependency_system.utils.cache_manager import (
+    get_project_root_cached as get_project_root,
+)
+from cline_utils.dependency_system.utils.config_manager import ConfigManager
+from cline_utils.dependency_system.utils.path_utils import is_subpath, normalize_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,7 +44,7 @@ class TrackerUpdate:
 
     tracker_type: str  # "mini", "doc", or "main"
     output_file: str  # Target file path
-    key_info_list: List[Any]  # List[KeyInfo] - key definitions
+    key_info_list: List[KeyInfo]  # List[KeyInfo] - key definitions
     grid_rows: List[str]  # Compressed grid data
     last_key_edit: str
     last_grid_edit: str
@@ -41,6 +59,7 @@ class TrackerUpdate:
     ast_overrides_applied_count: int = 0
     suggestion_applied_count: int = 0
     structural_deps_applied_count: int = 0
+    force_apply_suggestions: bool = False
 
     def __post_init__(self):
         """Validate the update data."""
@@ -102,13 +121,6 @@ class TrackerBatchCollector:
 
         self.pending_updates.append(update)
         try:
-            from cline_utils.dependency_system.core.dependency_grid import (
-                decompress,
-                PLACEHOLDER_CHAR,
-                EMPTY_CHAR,
-            )
-            from cline_utils.dependency_system.utils.config_manager import ConfigManager
-
             config = ConfigManager()
             get_priority = config.get_char_priority
 
@@ -202,7 +214,11 @@ class TrackerBatchCollector:
 
         return len(errors) == 0, errors
 
-    def commit_all(self) -> Dict[str, bool]:
+    def commit_all(
+        self,
+        skip_populate_hook: bool = False,
+        accumulated_updates: Optional[List[TrackerUpdate]] = None,
+    ) -> Dict[str, bool]:
         """
         Write all pending updates to disk in a batch.
 
@@ -265,6 +281,12 @@ class TrackerBatchCollector:
 
             set_runtime_aggregation_cache(self.highest_dependency_cache)
 
+            # Trigger populate_comments hook
+            if not skip_populate_hook:
+                self._run_populate_comments_hook()
+            elif accumulated_updates is not None:
+                accumulated_updates.extend(self.pending_updates)
+
             # Invalidate caches once after all successful writes
             self._invalidate_caches()
 
@@ -285,6 +307,43 @@ class TrackerBatchCollector:
             self.pending_updates = []
 
         return results
+
+    def _run_populate_comments_hook(self) -> None:
+        """
+        Trigger comment population on files affected by the batch.
+        Runs after trackers are written and aggregation cache is hot,
+        but before cache invalidation.
+        """
+        try:
+            from pathlib import Path
+            from cline_utils.dependency_system.utils.populate_comments import (
+                populate_comments_for_batch,
+                report_batch_results,
+            )
+            from cline_utils.dependency_system.utils.cache_manager import (
+                get_project_root_cached,
+            )
+            from cline_utils.dependency_system.analysis.dependency_suggester import (
+                load_project_symbol_map,
+            )
+
+            project_root = Path(get_project_root_cached())
+            symbol_map = load_project_symbol_map()
+
+            results = populate_comments_for_batch(
+                project_root=project_root,
+                updates=self.pending_updates,
+                symbol_map=symbol_map,
+                dry_run=False,
+                verbose=False,
+            )
+            if results:
+                report_batch_results(results, dry_run=False)
+
+        except ImportError as e:
+            logger.debug(f"populate_comments hook skipped: {e}")
+        except Exception as e:
+            logger.error(f"Error in populate_comments hook: {e}")
 
     def rollback(self) -> None:
         """
@@ -337,21 +396,6 @@ class TrackerBatchCollector:
             f"Starting batch consolidation for {len(self.pending_updates)} trackers..."
         )
         try:
-            from cline_utils.dependency_system.core.dependency_grid import (
-                decompress,
-                compress,
-                PLACEHOLDER_CHAR,
-                EMPTY_CHAR,
-            )
-            from cline_utils.dependency_system.utils.config_manager import ConfigManager
-            from cline_utils.dependency_system.utils.path_utils import (
-                normalize_path,
-                is_subpath,
-            )
-            from cline_utils.dependency_system.utils.cache_manager import (
-                get_project_root_cached as get_project_root,
-            )
-
             config = ConfigManager()
             get_priority = config.get_char_priority
             pr = get_project_root()
@@ -359,6 +403,10 @@ class TrackerBatchCollector:
                 normalize_path(os.path.join(pr, p))
                 for p in config.get_doc_directories()
             }
+
+            # --- PHASE 0: Global Context Prep ---
+            ast_links = self._load_ast_links()
+            self._import_external_relationships(config, pr, d_roots)
 
             def key_in_doc_root(key_str: str) -> bool:
                 paths = self.key_to_paths.get(key_str, set())
@@ -382,6 +430,13 @@ class TrackerBatchCollector:
 
                 if not u.grid_rows or not u.key_info_list:
                     continue
+
+                # Apply AST overrides centrally if available
+                if ast_links:
+                    u.ast_overrides_applied_count += (
+                        self._apply_ast_overrides_to_update(u, ast_links, config)
+                    )
+                    total_ast += u.ast_overrides_applied_count
 
                 new_rows: List[str] = []
                 tracker_changes = 0
@@ -455,8 +510,332 @@ class TrackerBatchCollector:
                 ", ".join(summary_parts) if summary_parts else "Total changes: 0"
             )
             logger.info(summary_msg)
+
+            # --- PHASE 2: PRUNING ---
+            logger.info("Starting batch pruning for trackers...")
+            total_pruned_count = 0
+            for u in self.pending_updates:
+                if not u.grid_rows or not u.key_info_list:
+                    continue
+
+                if u.tracker_type == "mini":
+                    # --- Mini Tracker Foreign Key Pruning ---
+                    if not u.force_apply_suggestions and u.module_path:
+                        logger.debug(
+                            f"Pruning Mini Tracker: {os.path.basename(u.output_file)}"
+                        )
+
+                        original_ki_list = list(u.key_info_list)
+                        # Identify internal vs foreign
+                        internal_paths = {
+                            ki.norm_path
+                            for ki in original_ki_list
+                            if ki.parent_path == u.module_path
+                            or ki.norm_path == u.module_path
+                        }
+
+                        manual_pins = set(u.manual_foreign_pins or [])
+                        paths_to_keep = internal_paths.union(manual_pins)
+
+                        # Decompress all rows to check for links
+                        decomp_rows: List[List[str]] = []
+                        for row_data in u.grid_rows:
+                            try:
+                                decomp_rows.append(list(decompress(row_data)))
+                            except:
+                                decomp_rows.append([])
+
+                        # Analyze links for foreign files
+                        for ri, rki in enumerate(original_ki_list):
+                            if ri >= len(decomp_rows):
+                                continue
+                            row_is_int = rki.norm_path in internal_paths
+
+                            for ci, cki in enumerate(original_ki_list):
+                                if ri == ci or ci >= len(decomp_rows[ri]):
+                                    continue
+                                col_is_int = cki.norm_path in internal_paths
+                                val = decomp_rows[ri][ci]
+
+                                if val not in (
+                                    PLACEHOLDER_CHAR,
+                                    DIAGONAL_CHAR,
+                                    EMPTY_CHAR,
+                                    "n",
+                                ):
+                                    try:
+                                        prio = get_priority(val)
+                                        # Threshold logic (matches tracker_io)
+                                        if prio >= 1:
+                                            if (
+                                                not rki.is_directory
+                                                and not cki.is_directory
+                                            ):
+                                                if row_is_int and not col_is_int:
+                                                    paths_to_keep.add(cki.norm_path)
+                                                elif not row_is_int and col_is_int:
+                                                    paths_to_keep.add(rki.norm_path)
+                                    except:
+                                        pass
+
+                        if len(paths_to_keep) < len(original_ki_list):
+                            pruned_ki = [
+                                ki
+                                for ki in original_ki_list
+                                if ki.norm_path in paths_to_keep
+                            ]
+                            # Sort matches tracker_io
+                            pruned_ki.sort(
+                                key=lambda x: (
+                                    get_sortable_parts_for_key(x.key_string),
+                                    x.norm_path,
+                                )
+                            )
+
+                            # Rebuild grid
+                            new_size = len(pruned_ki)
+                            new_grid = [
+                                [PLACEHOLDER_CHAR] * new_size for _ in range(new_size)
+                            ]
+                            for i in range(new_size):
+                                new_grid[i][i] = DIAGONAL_CHAR
+
+                            orig_path_to_idx = {
+                                ki.norm_path: i for i, ki in enumerate(original_ki_list)
+                            }
+
+                            for ni, nki in enumerate(pruned_ki):
+                                oi = orig_path_to_idx.get(nki.norm_path)
+                                if oi is None or oi >= len(decomp_rows):
+                                    continue
+
+                                for nj, nkj in enumerate(pruned_ki):
+                                    if ni == nj:
+                                        continue
+                                    oj = orig_path_to_idx.get(nkj.norm_path)
+                                    if oj is not None and oj < len(decomp_rows[oi]):
+                                        new_grid[ni][nj] = decomp_rows[oi][oj]
+
+                            u.key_info_list = pruned_ki
+                            u.grid_rows = [compress("".join(r)) for r in new_grid]
+                            total_pruned_count += len(original_ki_list) - new_size
+                            logger.debug(
+                                f"  Pruned {len(original_ki_list) - new_size} keys from {os.path.basename(u.output_file)}"
+                            )
+
+                elif u.tracker_type == "doc":
+                    # --- Doc Tracker Pruning ---
+                    logger.debug(
+                        f"Pruning Doc Tracker: {os.path.basename(u.output_file)}"
+                    )
+                    original_ki_list = list(u.key_info_list)
+
+                    pruned_ki = [
+                        ki
+                        for ki in original_ki_list
+                        if is_path_in_doc_roots(ki.norm_path, d_roots)
+                    ]
+
+                    if len(pruned_ki) < len(original_ki_list):
+                        # Sort
+                        pruned_ki.sort(
+                            key=lambda x: (
+                                get_sortable_parts_for_key(x.key_string),
+                                x.norm_path,
+                            )
+                        )
+
+                        # Rebuild grid (simplified since we don't care about links for docs)
+                        new_size = len(pruned_ki)
+                        new_grid = [
+                            [PLACEHOLDER_CHAR] * new_size for _ in range(new_size)
+                        ]
+                        for i in range(new_size):
+                            new_grid[i][i] = DIAGONAL_CHAR
+
+                        decomp_rows: List[List[str]] = []
+                        for row_data in u.grid_rows:
+                            try:
+                                decomp_rows.append(list(decompress(row_data)))
+                            except:
+                                decomp_rows.append([])
+
+                        orig_path_to_idx = {
+                            ki.norm_path: i for i, ki in enumerate(original_ki_list)
+                        }
+
+                        for ni, nki in enumerate(pruned_ki):
+                            oi = orig_path_to_idx.get(nki.norm_path)
+                            if oi is None or oi >= len(decomp_rows):
+                                continue
+                            for nj, nkj in enumerate(pruned_ki):
+                                if ni == nj:
+                                    continue
+                                oj = orig_path_to_idx.get(nkj.norm_path)
+                                if oj is not None and oj < len(decomp_rows[oi]):
+                                    new_grid[ni][nj] = decomp_rows[oi][oj]
+
+                        u.key_info_list = pruned_ki
+                        u.grid_rows = [compress("".join(r)) for r in new_grid]
+                        total_pruned_count += len(original_ki_list) - new_size
+                        logger.debug(
+                            f"  Pruned {len(original_ki_list) - new_size} keys from doc tracker"
+                        )
+
+            if total_pruned_count > 0:
+                logger.info(
+                    f"Batch pruning complete. Total keys pruned: {total_pruned_count}"
+                )
+            else:
+                logger.info("Batch pruning complete. No keys pruned.")
         except Exception as e:
-            logger.error(f"Batch consolidation error: {e}", exc_info=True)
+            logger.error(f"Batch consolidation/pruning error: {e}", exc_info=True)
+
+    def _load_ast_links(self) -> List[Dict[str, str]]:
+        """Loads AST-verified links from the central JSON file once per batch."""
+
+        ast_links_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "analysis",
+            "ast_verified_links.json",
+        )
+        if os.path.exists(ast_links_path):
+            try:
+                import json
+
+                with open(ast_links_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("links", [])
+            except Exception as e:
+                logger.error(f"Error loading AST links: {e}")
+        return []
+
+    def _apply_ast_overrides_to_update(
+        self, u: TrackerUpdate, ast_links: List[Dict[str, str]], config: ConfigManager
+    ) -> int:
+        """
+        Applies AST-verified links to a single tracker update.
+        Note: This is a simplified version of the logic in tracker_io.
+        It focuses on character overrides within the existing grid.
+        """
+        if not u.grid_rows or not u.key_info_list:
+            return 0
+
+        applied_count = 0
+        get_priority = config.get_char_priority
+
+        # Decompress rows for modification
+        decomp_rows: List[List[str]] = []
+        for row in u.grid_rows:
+            try:
+                decomp_rows.append(list(decompress(row)))
+            except:
+                decomp_rows.append([])
+
+        path_to_idx = {ki.norm_path: i for i, ki in enumerate(u.key_info_list)}
+
+        for link in ast_links:
+            src = normalize_path(link.get("source_path", ""))
+            tgt = normalize_path(link.get("target_path", ""))
+            char = link.get("char", "")
+
+            if not src or not tgt or not char:
+                continue
+
+            ri = path_to_idx.get(src)
+            ci = path_to_idx.get(tgt)
+
+            if ri is not None and ci is not None:
+                if ri < len(decomp_rows) and ci < len(decomp_rows[ri]):
+                    current = decomp_rows[ri][ci]
+                    if current != char:
+                        # AST overrides handle conflict via priority or 'n' logic
+                        if get_priority(char) >= get_priority(current) or char == "n":
+                            decomp_rows[ri][ci] = char
+                            applied_count += 1
+
+        if applied_count > 0:
+            u.grid_rows = [compress("".join(r)) for r in decomp_rows]
+
+        return applied_count
+
+    def _import_external_relationships(
+        self, config: ConfigManager, project_root: str, d_roots: Set[str]
+    ) -> None:
+        """
+        Imports established relationships from trackers NOT in the current batch.
+        Populates highest_dependency_cache to be used in consolidation.
+        """
+        from cline_utils.dependency_system.io.tracker_io import (
+            get_mini_tracker_path,
+            get_tracker_path,
+        )
+        from cline_utils.dependency_system.utils.tracker_utils import (
+            read_tracker_file_structured,
+        )
+
+        needed_home_trackers: Set[str] = set()
+        for u in self.pending_updates:
+            if u.tracker_type != "mini" or not u.module_path:
+                continue
+            for ki in u.key_info_list:
+                # If foreign to THIS tracker
+                if ki.parent_path != u.module_path and ki.norm_path != u.module_path:
+                    home_path = None
+                    if is_path_in_doc_roots(ki.norm_path, d_roots):
+                        home_path = get_tracker_path(project_root, "doc")
+                    elif ki.parent_path:
+                        home_path = get_mini_tracker_path(ki.parent_path)
+
+                    if home_path and os.path.exists(home_path):
+                        needed_home_trackers.add(home_path)
+
+        if not needed_home_trackers:
+            return
+
+        logger.debug(
+            f"Batch Collector: Importing relationships from {len(needed_home_trackers)} external home trackers..."
+        )
+
+        get_priority = config.get_char_priority
+        batch_output_files = {u.output_file for u in self.pending_updates}
+
+        for ht_path in needed_home_trackers:
+            if ht_path in batch_output_files:
+                continue  # Already have this data in cache from add()
+
+            try:
+                structured = read_tracker_file_structured(ht_path)
+                defs = structured.get("definitions_ordered", [])
+                rows = structured.get("grid_rows_ordered", [])
+                if not defs or not rows:
+                    continue
+
+                # KeyInfo objects from definitions
+                # (read_tracker_file_structured returns List[Tuple[key_str, path_str]])
+                # We need to resolve these to key_strings
+                for ri, (r_key, _) in enumerate(defs):
+                    if ri >= len(rows):
+                        break
+                    try:
+                        row_chars = list(decompress(rows[ri][1]))
+                    except:
+                        continue
+
+                    for ci, (c_key, _) in enumerate(defs):
+                        if ri == ci or ci >= len(row_chars):
+                            continue
+                        char = row_chars[ci]
+                        if char not in (PLACEHOLDER_CHAR, EMPTY_CHAR, DIAGONAL_CHAR):
+                            kp = (r_key, c_key)
+                            prio = get_priority(char)
+                            existing = self.highest_dependency_cache.get(kp)
+                            if existing is None or prio > get_priority(existing[0]):
+                                self.highest_dependency_cache[kp] = (char, {ht_path})
+                            elif prio == get_priority(existing[0]):
+                                existing[1].add(ht_path)
+            except Exception as e:
+                logger.warning(f"Error reading home tracker {ht_path}: {e}")
 
     def _create_backups(self) -> None:
         """Create temporary backups of existing tracker files."""
@@ -633,6 +1012,7 @@ def create_mini_tracker_update(
     ast_overrides_applied_count: int = 0,
     suggestion_applied_count: int = 0,
     structural_deps_applied_count: int = 0,
+    force_apply_suggestions: bool = False,
 ) -> TrackerUpdate:
     """
     Create a TrackerUpdate for a mini tracker.
@@ -651,6 +1031,7 @@ def create_mini_tracker_update(
         ast_overrides_applied_count: Count of AST overrides applied
         suggestion_applied_count: Count of suggestions applied
         structural_deps_applied_count: Count of structural dependencies applied
+        force_apply_suggestions: Whether to skip foreign key pruning
 
     Returns:
         TrackerUpdate object ready for batch collection
@@ -673,6 +1054,7 @@ def create_mini_tracker_update(
         ast_overrides_applied_count=ast_overrides_applied_count,
         suggestion_applied_count=suggestion_applied_count,
         structural_deps_applied_count=structural_deps_applied_count,
+        force_apply_suggestions=force_apply_suggestions,
     )
 
 
@@ -686,6 +1068,7 @@ def create_main_tracker_update(
     ast_overrides_applied_count: int = 0,
     suggestion_applied_count: int = 0,
     structural_deps_applied_count: int = 0,
+    force_apply_suggestions: bool = False,
 ) -> TrackerUpdate:
     """
     Create a TrackerUpdate for the main tracker.
@@ -712,6 +1095,7 @@ def create_main_tracker_update(
         ast_overrides_applied_count=ast_overrides_applied_count,
         suggestion_applied_count=suggestion_applied_count,
         structural_deps_applied_count=structural_deps_applied_count,
+        force_apply_suggestions=force_apply_suggestions,
     )
 
 
@@ -725,6 +1109,7 @@ def create_doc_tracker_update(
     ast_overrides_applied_count: int = 0,
     suggestion_applied_count: int = 0,
     structural_deps_applied_count: int = 0,
+    force_apply_suggestions: bool = False,
 ) -> TrackerUpdate:
     """
     Create a TrackerUpdate for the doc tracker.
@@ -751,4 +1136,5 @@ def create_doc_tracker_update(
         ast_overrides_applied_count=ast_overrides_applied_count,
         suggestion_applied_count=suggestion_applied_count,
         structural_deps_applied_count=structural_deps_applied_count,
+        force_apply_suggestions=force_apply_suggestions,
     )

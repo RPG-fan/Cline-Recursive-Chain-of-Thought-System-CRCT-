@@ -8,7 +8,6 @@ Handles path normalization, validation, and comparison.
 import fnmatch
 import logging
 import os
-import re
 from typing import Dict, List, Optional, Tuple
 
 PathMigrationInfo = Dict[str, Tuple[Optional[str], Optional[str]]]
@@ -30,27 +29,47 @@ def normalize_path(path: str) -> str:
     Returns:
         Normalized path
     """
+    if not path:
+        return ""
+    if not os.path.isabs(path):
+        path = os.path.abspath(path)  # Make absolute based on CWD
+    normalized = os.path.normpath(path).replace("\\", "/")
+    # Uppercase drive letter on Windows for file operation compatibility
+    if (
+        os.name == "nt"
+        and len(normalized) > 1
+        and normalized[1] == ":"
+        and normalized[0].isalpha()
+    ):
+        normalized = normalized[0].upper() + normalized[1:]
+    # Remove trailing slash unless it's the root directory
+    limit = 3 if os.name == "nt" and ":" in normalized else 1
+    if len(normalized) > limit and normalized.endswith("/"):
+        normalized = normalized.rstrip("/")
 
-    def _normalize_path(p: str) -> str:
-        if not p:
-            return ""
-        if not os.path.isabs(p):
-            p = os.path.abspath(p)  # Make absolute based on CWD
-        normalized = os.path.normpath(p).replace("\\", "/")
-        # Uppercase drive letter on Windows for file operation compatibility
-        if os.name == "nt" and re.match(r"^[a-zA-Z]:", normalized):
-            normalized = normalized[0].upper() + normalized[1:]
-        # Remove trailing slash unless it's the root directory
-        if len(normalized) > 1 and normalized.endswith("/"):
-            normalized = normalized.rstrip("/")
-        elif (
-            os.name == "nt" and len(normalized) > 3 and normalized.endswith("/")
-        ):  # Handle C:/ case
-            normalized = normalized.rstrip("/")
+    return normalized
 
-        return normalized
 
-    return _normalize_path(path)
+_FILE_TYPE_MAP = {
+    ".py": "py",
+    ".js": "js",
+    ".ts": "js",
+    ".jsx": "js",
+    ".tsx": "js",
+    ".md": "md",
+    ".rst": "md",
+    ".html": "html",
+    ".htm": "html",
+    ".css": "css",
+    ".svelte": "svelte",
+    ".sql": "sql",
+    ".csv": "csv",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".json": "json",
+    ".txt": "txt",
+    ".rs": "rs",
+}
 
 
 def get_file_type(file_path: str) -> str:
@@ -63,36 +82,8 @@ def get_file_type(file_path: str) -> str:
     Returns:
         The file type as a string (e.g., "py", "js", "md", "generic").
     """
-
-    def _get_file_type(fp: str) -> str:
-        _, ext = os.path.splitext(fp)
-        ext = ext.lower()
-        if ext == ".py":
-            return "py"
-        elif ext in (".js", ".ts", ".jsx", ".tsx"):
-            return "js"
-        elif ext in (".md", ".rst"):
-            return "md"
-        elif ext in (".html", ".htm"):
-            return "html"
-        elif ext == ".css":
-            return "css"
-        elif ext == ".svelte":
-            return "svelte"
-        elif ext == ".sql":
-            return "sql"
-        elif ext == ".csv":
-            return "csv"
-        elif ext in (".yaml", ".yml"):
-            return "yaml"
-        elif ext == ".json":
-            return "json"
-        elif ext == ".txt":
-            return "txt"
-        else:
-            return "generic"
-
-    return _get_file_type(file_path)
+    _, ext = os.path.splitext(file_path)
+    return _FILE_TYPE_MAP.get(ext.lower(), "generic")
 
 
 def resolve_relative_path(

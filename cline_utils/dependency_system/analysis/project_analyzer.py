@@ -7,7 +7,7 @@ import os
 import shutil
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
 from cline_utils.dependency_system.analysis import embedding_manager
 from cline_utils.dependency_system.analysis.dependency_analyzer import analyze_file
@@ -16,6 +16,7 @@ from cline_utils.dependency_system.analysis.dependency_suggester import (
 )
 from cline_utils.dependency_system.analysis.embedding_manager import generate_embeddings
 from cline_utils.dependency_system.core import key_manager
+from cline_utils.dependency_system.core.key_manager import KeyInfo
 from cline_utils.dependency_system.io import tracker_io
 from cline_utils.dependency_system.utils.batch_processor import (
     BatchProcessor,
@@ -51,7 +52,7 @@ from cline_utils.dependency_system.utils.tracker_utils import (
     get_key_global_instance_string,
 )
 from cline_utils.dependency_system.utils.visualize_dependencies import (
-    generate_mermaid_diagram,
+    generate_dependency_diagram,
     render_mermaid_to_image,
 )
 
@@ -177,7 +178,6 @@ def analyze_project(
     project_root = get_project_root()
     logger.info(f"Starting project analysis in directory: {project_root}")
 
-    analyzer_batch_processor = BatchProcessor()
     if force_analysis:
         logger.info("Force analysis requested. Clearing all caches.")
         clear_all_caches()
@@ -196,12 +196,6 @@ def analyze_project(
     }
     # --- Exclusion Setup ---
     excluded_dirs_rel = config.get_excluded_dirs()
-    excluded_paths_config = config.config.get(
-        "excluded_paths", []
-    )  # Get raw "excluded_paths" list from config
-    excluded_paths_rel = [
-        p for p in excluded_paths_config if not os.path.isabs(p)
-    ]  # Filter for relative
     all_excluded_paths_abs_set = set(config.get_excluded_paths())
     excluded_extensions = set(config.get_excluded_extensions())
     excluded_file_patterns_config = config.config.get("excluded_file_patterns", [])
@@ -307,9 +301,44 @@ def analyze_project(
         analysis_results["message"] = f"Migration map build error: {e}"
         return analysis_results
 
+    # --- Load Existing Dependency State (for Optimization) ---
+    logger.info("Loading existing dependency state for suggestion optimization...")
+    existing_dependency_state: Dict[Tuple[str, str], Tuple[str, Set[str]]] = {}
+    try:
+        # Load tracker paths from tracker_map.json
+        tracker_map_path = normalize_path(
+            os.path.join(
+                project_root,
+                "cline_utils",
+                "dependency_system",
+                "core",
+                "tracker_map.json",
+            )
+        )
+        if os.path.exists(tracker_map_path):
+            with open(tracker_map_path, "r", encoding="utf-8") as f:
+                tracker_paths = json.load(f)
+
+            if tracker_paths:
+                existing_dependency_state = aggregate_all_dependencies(
+                    set(tracker_paths),
+                    path_migration_info,
+                    path_to_key_info,
+                    show_progress=False,
+                )
+                logger.info(
+                    f"Loaded {len(existing_dependency_state)} existing dependency relationships from {len(tracker_paths)} trackers."
+                )
+        else:
+            logger.info("tracker_map.json not found. Optimization disabled.")
+    except Exception as e:
+        logger.warning(
+            f"Failed to load existing dependency state: {e}. Optimization disabled."
+        )
+
     # --- File Identification and Filtering ---
     logger.debug("Identifying files for analysis...")
-    files_to_analyze_abs = []
+    files_to_analyze_abs: List[str] = []
     for abs_root_dir in abs_all_roots:
         if not os.path.isdir(abs_root_dir):
             logger.warning(f"Configured root directory not found: {abs_root_dir}")
@@ -366,7 +395,7 @@ def analyze_project(
     logger.debug("Starting file analysis...")
     # Use process_items for potential parallelization
     # Pass force_analysis flag down to analyze_file if caching is implemented there
-    analysis_results_list = process_items(
+    analysis_results_list: List[Dict[str, Any]] = process_items(
         files_to_analyze_abs, analyze_file, force=force_analysis
     )
     file_analysis_results: Dict[str, Any] = {}
@@ -605,11 +634,13 @@ def analyze_project(
     def _suggest_wrapper(
         single_file_path: str,
         *,
-        path_to_key_info_map,
-        project_root_abs,
-        file_analysis_blob,
-        doc_similarity_threshold,
-        shared_scan_counter=None,
+        path_to_key_info_map: Dict[str, KeyInfo],
+        project_root_abs: str,
+        file_analysis_blob: Dict[str, Any],
+        doc_similarity_threshold: float,
+        shared_scan_counter: Any = None,
+        tracked_paths_globally: Optional[Set[str]] = None,
+        existing_state: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]] = None,
     ) -> Tuple[str, List[Tuple[str, str]], List[Dict[str, str]]]:
         # Returns (source_path, suggestions, ast_links)
 
@@ -621,6 +652,8 @@ def analyze_project(
                 file_analysis_blob,
                 doc_similarity_threshold,
                 shared_scan_counter=shared_scan_counter,
+                tracked_paths_globally=tracked_paths_globally,
+                existing_state=existing_state,  # Pass it down
             )
             return (single_file_path, suggs or [], ast_links or [])
         except Exception as e:
@@ -640,8 +673,13 @@ def analyze_project(
     # We don't need Manager() since we are using ThreadPoolExecutor (threads share memory)
     shared_scan_counter = multiprocessing.Value("i", 0)
 
+    # Pre-calculate tracked paths set to avoid O(N) reconstruction per file
+    tracked_paths_globally = set(path_to_key_info.keys())
+
     # Parallel process suggestion generation
-    suggestion_results = suggestion_batcher.process_items(
+    suggestion_results: List[
+        Optional[Tuple[str, List[Tuple[str, str]], List[Dict[str, str]]]]
+    ] = suggestion_batcher.process_items(
         analyzed_file_paths,
         _suggest_wrapper,
         path_to_key_info_map=path_to_key_info,
@@ -649,6 +687,8 @@ def analyze_project(
         file_analysis_blob=file_analysis_results,
         doc_similarity_threshold=doc_similarity_threshold,
         shared_scan_counter=shared_scan_counter,  # Pass shared counter
+        tracked_paths_globally=tracked_paths_globally,
+        existing_state=existing_dependency_state,  # Pass existing state
     )
     # Use configured threshold for doc_similarity
     doc_similarity_threshold = config.get_threshold("doc_similarity")
@@ -656,33 +696,35 @@ def analyze_project(
     # --- Store the length of the last printed progress line ---
     _last_progress_message_length = 0
     # Aggregate results and print progress using PhaseTracker
+    suggestion_total = 0
+    ast_link_total = 0
     with PhaseTracker(
         total=len(suggestion_results), phase_name="Dependency Suggestion"
     ) as tracker:
-        for i, (
-            src_path_processed,
-            suggestions_for_file,
-            ast_links_for_file,
-        ) in enumerate(suggestion_results):
+        for _, res_item in enumerate(suggestion_results):
+            if res_item is None:
+                continue
+            (
+                src_path_processed,
+                suggestions_for_file,
+                ast_links_for_file,
+            ) = res_item
             if suggestions_for_file:
                 all_path_based_suggestions[src_path_processed].extend(
                     suggestions_for_file
                 )
-                analysis_results["dependency_suggestion"]["suggestion_count"] += len(
-                    suggestions_for_file
-                )
+                suggestion_total += len(suggestions_for_file)
             if ast_links_for_file:
                 all_project_ast_links.extend(ast_links_for_file)
-                analysis_results["dependency_suggestion"]["ast_link_count"] += len(
-                    ast_links_for_file
-                )
+                ast_link_total += len(ast_links_for_file)
 
-            current_suggestion_count = analysis_results["dependency_suggestion"][
+            analysis_results["dependency_suggestion"][
                 "suggestion_count"
-            ]
-            current_ast_link_count = analysis_results["dependency_suggestion"][
-                "ast_link_count"
-            ]
+            ] = suggestion_total
+            analysis_results["dependency_suggestion"]["ast_link_count"] = ast_link_total
+
+            current_suggestion_count = suggestion_total
+            current_ast_link_count = ast_link_total
 
             tracker.update(
                 description=f"Found {current_suggestion_count} suggestions, {current_ast_link_count} AST links"
@@ -714,7 +756,7 @@ def analyze_project(
 
     # Consolidate duplicates in all_project_ast_links
     if all_project_ast_links:
-        consolidated_links_map = {}
+        consolidated_links_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
         for link in all_project_ast_links:
             key = (link["source_path"], link["target_path"])
             if key not in consolidated_links_map:
@@ -731,7 +773,7 @@ def analyze_project(
                 consolidated_links_map[key]["reasons"].add(reason)
 
         # Convert back to list and format reasons
-        consolidated_links = []
+        consolidated_links: List[Dict[str, Any]] = []
         for link_data in consolidated_links_map.values():
             # Sort reasons for deterministic output
             sorted_reasons = sorted(list(link_data["reasons"]))
@@ -808,7 +850,9 @@ def analyze_project(
         combine_suggestions_path_based_with_char_priority,
     )  # Needs import
 
-    combined_path_suggestions_for_conversion = defaultdict(list)
+    combined_path_suggestions_for_conversion: Dict[str, List[Tuple[str, str]]] = (
+        defaultdict(list)
+    )
     for source_path, path_sugg_list in all_path_based_suggestions.items():
         combined_path_suggestions_for_conversion[source_path] = (
             combine_suggestions_path_based_with_char_priority(
@@ -865,7 +909,7 @@ def analyze_project(
             )
             continue
 
-        processed_target_deps = []
+        processed_target_deps: List[Tuple[str, str]] = []
         for tgt_path, char_val in path_deps_list:
             tgt_ki = current_global_map.get(tgt_path)
             if not tgt_ki:
@@ -897,6 +941,66 @@ def analyze_project(
         f"Converted to {sum(len(v) for v in all_global_instance_suggestions.values())} KEY#global_instance formatted suggestions."
     )
 
+    # --- PRE-LOAD TRACKERS (Caching for atomic updates) ---
+    logger.info("Pre-loading trackers for performance optimization...")
+    tracker_cache: Dict[str, Dict[str, Any]] = {}
+    from cline_utils.dependency_system.utils.tracker_utils import (
+        read_tracker_file_structured,
+    )
+
+    # Get all tracker paths from tracker_map.json
+    try:
+        # Assuming tracker_map.json is in the same directory as key_manager
+        core_dir = os.path.dirname(os.path.abspath(key_manager.__file__))
+        tracker_map_path = os.path.join(core_dir, "tracker_map.json")
+        if os.path.exists(tracker_map_path):
+            with open(tracker_map_path, "r", encoding="utf-8") as f:
+                tracker_map = json.load(f)
+
+            # Flatten all paths from the map
+            all_tracker_paths: List[str] = []
+            if isinstance(tracker_map, list):
+                # Cast list to avoid 'Unknown' iteration type
+                all_tracker_paths = [str(p) for p in cast(List[Any], tracker_map)]
+            elif isinstance(tracker_map, dict):
+                # Cast to help Pyright with nested dict access
+                t_map_dict = cast(Dict[str, Any], tracker_map)
+                trackers_section = t_map_dict.get("trackers")
+                if isinstance(trackers_section, dict):
+                    # Cast trackers_section.values() to avoid 'Unknown' group type
+                    for group in cast(Dict[str, Any], trackers_section).values():
+                        if isinstance(group, dict):
+                            all_tracker_paths.extend(
+                                [str(v) for v in cast(Dict[str, Any], group).values()]
+                            )
+                        elif isinstance(group, list):
+                            all_tracker_paths.extend(
+                                [str(v) for v in cast(List[Any], group)]
+                            )
+
+            for t_path_entry in all_tracker_paths:
+                # If path is already absolute, use it; otherwise join with project_root
+                if os.path.isabs(t_path_entry):
+                    t_path_abs = normalize_path(t_path_entry)
+                else:
+                    t_path_abs = normalize_path(
+                        os.path.join(project_root, t_path_entry)
+                    )
+                if os.path.exists(t_path_abs):
+                    try:
+                        structured_data = read_tracker_file_structured(
+                            t_path_abs, include_raw_lines=True
+                        )
+                        if structured_data:
+                            tracker_cache[t_path_abs] = structured_data
+                    except Exception as e_preload:
+                        logger.warning(
+                            f"Failed to pre-load tracker '{t_path_abs}': {e_preload}"
+                        )
+        logger.info(f"Successfully cached {len(tracker_cache)} trackers.")
+    except Exception as e_map:
+        logger.error(f"Failed to read tracker_map.json for pre-loading: {e_map}")
+
     # --- Update Trackers ---
     logger.info("Updating trackers...")
     # Ensure suggestions always overwrite placeholders/empty in update phase
@@ -907,7 +1011,7 @@ def analyze_project(
     analysis_results["tracker_updates"]["main"] = "pending"
 
     # --- Update Mini Trackers FIRST ---
-    mini_tracker_paths_updated = (
+    mini_tracker_paths_updated: Set[str] = (
         set()
     )  # Keep track of updated module paths to avoid redundant processing if paths overlap
     potential_mini_tracker_dirs: List[key_manager.KeyInfo] = []
@@ -1000,6 +1104,7 @@ def analyze_project(
                         new_keys=newly_generated_keys,
                         force_apply_suggestions=False,
                         use_old_map_for_migration=has_old_map,
+                        tracker_cache=tracker_cache,
                     )
 
                     if prepared_data:
@@ -1018,6 +1123,7 @@ def analyze_project(
                             manual_foreign_pins=prepared_data.get(
                                 "manual_foreign_pins", []
                             ),
+                            force_apply_suggestions=False,
                         )
                         batch_collector.add(update)
                         analysis_results["tracker_updates"]["mini"][
@@ -1062,6 +1168,7 @@ def analyze_project(
                 new_keys=newly_generated_keys,
                 force_apply_suggestions=False,
                 use_old_map_for_migration=has_old_map,
+                tracker_cache=tracker_cache,
             )
 
             if prepared_data:
@@ -1072,6 +1179,7 @@ def analyze_project(
                     last_key_edit=prepared_data["last_key_edit"],
                     last_grid_edit=prepared_data["last_grid_edit"],
                     path_to_key_info=path_to_key_info,
+                    force_apply_suggestions=False,
                 )
                 batch_collector.add(update)
                 analysis_results["tracker_updates"]["doc"] = "pending"
@@ -1105,6 +1213,7 @@ def analyze_project(
             new_keys=newly_generated_keys,
             force_apply_suggestions=False,
             use_old_map_for_migration=has_old_map,
+            tracker_cache=tracker_cache,
         )
 
         if prepared_data:
@@ -1115,6 +1224,7 @@ def analyze_project(
                 last_key_edit=prepared_data["last_key_edit"],
                 last_grid_edit=prepared_data["last_grid_edit"],
                 path_to_key_info=path_to_key_info,
+                force_apply_suggestions=False,
             )
             batch_collector.add(update)
             analysis_results["tracker_updates"]["main"] = "pending"
@@ -1256,6 +1366,15 @@ def analyze_project(
     if auto_generate_enabled:
         logger.info("Starting automatic diagram generation...")
         analysis_results["auto_visualization"] = {"overview": "skipped", "modules": {}}
+        visualization_backend = config.config.get("visualization", {}).get(
+            "backend", "mermaid"
+        )
+        if visualization_backend not in {"mermaid", "native"}:
+            logger.warning(
+                "Unknown visualization backend '%s'; falling back to Mermaid.",
+                visualization_backend,
+            )
+            visualization_backend = "mermaid"
         memory_dir_rel_analyzer = config.get_path("memory_dir", "cline_docs")
         default_diagram_subdir = "dependency_diagrams"
         default_auto_diagram_dir_abs = normalize_path(
@@ -1331,39 +1450,39 @@ def analyze_project(
             ) as diagram_tracker:
                 diagram_tracker.update(description="Generating project overview")
                 logger.debug("Generating project overview diagram...")
-                overview_filename = "project_overview_dependencies.mermaid"
+                overview_ext = "svg" if visualization_backend == "native" else "mermaid"
+                overview_filename = f"project_overview_dependencies.{overview_ext}"
                 overview_path = os.path.join(
                     auto_diagram_output_dir_abs, overview_filename
                 )
-                # Pass path_migration_info to generate_mermaid_diagram
-                # render=False to defer rendering
-                overview_mermaid_code = generate_mermaid_diagram(
+                overview_diagram_code = generate_dependency_diagram(
                     focus_keys_list_input=[],
                     global_path_to_key_info_map=path_to_key_info,
                     path_migration_info=path_migration_info,
                     all_tracker_paths_list=list(current_tracker_paths),
                     config_manager_instance=config,
                     pre_aggregated_links=project_aggregated_links,
+                    backend=visualization_backend,
                     render=False,
                 )
                 if (
-                    overview_mermaid_code
-                    and "// No relevant data" not in overview_mermaid_code
-                    and not overview_mermaid_code.strip().startswith("Error:")
+                    overview_diagram_code
+                    and "No relevant data" not in overview_diagram_code
+                    and not overview_diagram_code.strip().startswith("Error:")
                 ):
                     with open(overview_path, "w", encoding="utf-8") as f:
-                        f.write(overview_mermaid_code)
+                        f.write(overview_diagram_code)
                     logger.debug(f"Project overview diagram saved to {overview_path}")
                     analysis_results["auto_visualization"]["overview"] = "success"
 
-                    # Queue for parallel rendering
-                    overview_svg_path = overview_path.replace(".mermaid", ".svg")
-                    diagram_render_tasks.append(
-                        (overview_mermaid_code, overview_svg_path)
-                    )
+                    if visualization_backend == "mermaid":
+                        overview_svg_path = overview_path.replace(".mermaid", ".svg")
+                        diagram_render_tasks.append(
+                            (overview_diagram_code, overview_svg_path)
+                        )
                 else:
                     logger.warning(
-                        f"Skipping save for project overview diagram (no data or failed generation). Error: {overview_mermaid_code if overview_mermaid_code and 'Error:' in overview_mermaid_code[:20] else 'No data'}"
+                        f"Skipping save for project overview diagram (no data or failed generation). Error: {overview_diagram_code if overview_diagram_code and 'Error:' in overview_diagram_code[:20] else 'No data'}"
                     )
                     analysis_results["auto_visualization"][
                         "overview"
@@ -1371,7 +1490,7 @@ def analyze_project(
                 diagram_tracker.update()
 
                 # --- Generate Per-Module Diagrams ---
-                module_keys_to_visualize = []
+                module_keys_to_visualize: List[str] = []
                 for key_info_obj_analyzer in path_to_key_info.values():
                     if key_info_obj_analyzer.is_directory:
                         is_top_level_module_dir_analyzer = any(
@@ -1395,31 +1514,34 @@ def analyze_project(
                         description=f"Generating module {module_key_str}"
                     )
                     logger.debug(f"Generating diagram for module: {module_key_str}...")
+                    module_ext = (
+                        "svg" if visualization_backend == "native" else "mermaid"
+                    )
                     module_diagram_filename = (
-                        f"module_{module_key_str}_dependencies.mermaid".replace(
+                        f"module_{module_key_str}_dependencies.{module_ext}".replace(
                             "/", "_"
                         ).replace("\\", "_")
                     )
                     module_diagram_path = os.path.join(
                         auto_diagram_output_dir_abs, module_diagram_filename
                     )
-                    # render=False to defer rendering
-                    module_mermaid_code = generate_mermaid_diagram(
+                    module_diagram_code = generate_dependency_diagram(
                         focus_keys_list_input=[module_key_str],
                         global_path_to_key_info_map=path_to_key_info,
                         path_migration_info=path_migration_info,
                         all_tracker_paths_list=list(current_tracker_paths),
                         config_manager_instance=config,
                         pre_aggregated_links=project_aggregated_links,
+                        backend=visualization_backend,
                         render=False,
                     )
                     if (
-                        module_mermaid_code
-                        and "// No relevant data" not in module_mermaid_code
-                        and "Error:" not in module_mermaid_code[:20]
+                        module_diagram_code
+                        and "No relevant data" not in module_diagram_code
+                        and "Error:" not in module_diagram_code[:20]
                     ):
                         with open(module_diagram_path, "w", encoding="utf-8") as f:
-                            f.write(module_mermaid_code)
+                            f.write(module_diagram_code)
                         logger.debug(
                             f"Module {module_key_str} diagram saved to {module_diagram_path}"
                         )
@@ -1427,16 +1549,16 @@ def analyze_project(
                             module_key_str
                         ] = "success"
 
-                        # Queue for parallel rendering
-                        module_svg_path = module_diagram_path.replace(
-                            ".mermaid", ".svg"
-                        )
-                        diagram_render_tasks.append(
-                            (module_mermaid_code, module_svg_path)
-                        )
+                        if visualization_backend == "mermaid":
+                            module_svg_path = module_diagram_path.replace(
+                                ".mermaid", ".svg"
+                            )
+                            diagram_render_tasks.append(
+                                (module_diagram_code, module_svg_path)
+                            )
                     else:
                         logger.warning(
-                            f"Skipping save for module {module_key_str} diagram (no data or failed generation). Error: {module_mermaid_code if module_mermaid_code and 'Error:' in module_mermaid_code[:20] else 'No data'}"
+                            f"Skipping save for module {module_key_str} diagram (no data or failed generation). Error: {module_diagram_code if module_diagram_code and 'Error:' in module_diagram_code[:20] else 'No data'}"
                         )
                         analysis_results["auto_visualization"]["modules"][
                             module_key_str

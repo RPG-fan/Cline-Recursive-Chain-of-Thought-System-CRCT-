@@ -160,6 +160,7 @@ DEFAULT_CONFIG = {
     "visualization": {
         "auto_generate_on_analyze": True,  # Enable auto-generation by default
         "auto_diagram_output_dir": None,  # Default to None, meaning derive from memory_dir
+        "backend": "mermaid",  # Use "native" to generate direct SVG diagrams
         # If user sets this (e.g., "my_diagrams"), it overrides the default derivation
     },
     "recovery": {
@@ -1066,7 +1067,7 @@ class ConfigManager:
             "use_streaming": self.get_performance_setting(
                 "use_streaming_analysis", True
             ),
-            "chunk_size": self.get_performance_setting("chunk_size", 8192),
+            "chunk_size": self.get_performance_setting("chunk_size", 12800),
             "batch_size": self.get_performance_setting("default_batch_size", 32),
             "embedding_batch_size": self.get_performance_setting(
                 "embedding_batch_size", 16

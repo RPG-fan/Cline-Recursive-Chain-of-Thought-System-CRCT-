@@ -204,9 +204,11 @@ def read_grid_from_lines(lines: List[str]) -> Tuple[List[str], List[Tuple[str, s
 # --- END OF PARSING HELPERS ---
 
 
-def _get_tracker_structured_cache_key(tracker_path: str) -> str:
+def _get_tracker_structured_cache_key(
+    tracker_path: str, include_raw_lines: bool = False
+) -> str:
     mtime = os.path.getmtime(tracker_path) if os.path.exists(tracker_path) else 0
-    return f"tracker_data_structured:{normalize_path(tracker_path)}:{mtime}"
+    return f"tracker_data_structured:{normalize_path(tracker_path)}:{mtime}:raw={include_raw_lines}"
 
 
 @cached(
@@ -214,7 +216,9 @@ def _get_tracker_structured_cache_key(tracker_path: str) -> str:
     key_func=_get_tracker_structured_cache_key,
     track_path_args=[0],
 )
-def read_tracker_file_structured(tracker_path: str) -> Dict[str, Any]:
+def read_tracker_file_structured(
+    tracker_path: str, include_raw_lines: bool = False
+) -> Dict[str, Any]:
     """
     Read a tracker file and parse its contents into list-based structures
     compatible with the new format (handles duplicate key strings).
@@ -235,6 +239,7 @@ def read_tracker_file_structured(tracker_path: str) -> Dict[str, Any]:
         "grid_rows_ordered": [],
         "last_key_edit": "Unknown",
         "last_grid_edit": "Unknown",
+        "raw_lines": [] if include_raw_lines else None,
     }
     if not os.path.exists(tracker_path):
         logger.debug(
@@ -293,6 +298,7 @@ def read_tracker_file_structured(tracker_path: str) -> Dict[str, Any]:
             "grid_rows_ordered": grid_rows,
             "last_key_edit": last_key_edit,
             "last_grid_edit": last_grid_edit,
+            "raw_lines": lines if include_raw_lines else None,
         }
     except Exception as e:
         logger.exception(f"Error reading structured tracker file {tracker_path}: {e}")
@@ -385,15 +391,15 @@ def get_global_map_cache_key_part(global_map: Dict[str, Any]) -> str:
 
 
 # --- MODIFIED AGGREGATION FUNCTION (Uses KEY#global_instance) ---
-_runtime_aggregation_cache: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]] = None
+runtime_aggregation_cache: Optional[Dict[Tuple[str, str], Tuple[str, Set[str]]]] = None
 
 
 def set_runtime_aggregation_cache(
     cache: Dict[Tuple[str, str], Tuple[str, Set[str]]],
 ) -> None:
     """Sets a runtime cache to avoid re-aggregating from disk."""
-    global _runtime_aggregation_cache
-    _runtime_aggregation_cache = cache
+    global runtime_aggregation_cache
+    runtime_aggregation_cache = cache
     logger.debug(
         f"TrackerUtils: Set runtime aggregation cache with {len(cache)} entries."
     )
@@ -401,27 +407,29 @@ def set_runtime_aggregation_cache(
 
 def clear_runtime_aggregation_cache() -> None:
     """Clears the runtime aggregation cache."""
-    global _runtime_aggregation_cache
-    _runtime_aggregation_cache = None
+    global runtime_aggregation_cache
+    runtime_aggregation_cache = None
     logger.debug("TrackerUtils: Cleared runtime aggregation cache.")
 
 
 def _get_aggregation_v2_cache_key(
-    paths: Set[str],
-    pmi: PathMigrationInfo,
-    cgptki: Dict[str, KeyInfo],
+    tracker_paths: Set[str],
+    path_migration_info: PathMigrationInfo,
+    current_global_path_to_key_info: Dict[str, KeyInfo],
     show_progress: bool = True,
 ) -> str:
-    paths_part = ":".join(sorted(list(paths)))
+    paths_part = ":".join(sorted(list(tracker_paths)))
 
     # Stable hash for PathMigrationInfo instead of builtin hash()
-    if pmi:
-        pmi_str = "".join(f"{k}{v[0]}{v[1]}" for k, v in sorted(pmi.items()))
+    if path_migration_info:
+        pmi_str = "".join(
+            f"{k}{v[0]}{v[1]}" for k, v in sorted(path_migration_info.items())
+        )
         pmi_part = hashlib.sha256(pmi_str.encode()).hexdigest()
     else:
         pmi_part = "empty"
 
-    cgptki_part = get_global_map_cache_key_part(cgptki)
+    cgptki_part = get_global_map_cache_key_part(current_global_path_to_key_info)
     return f"agg_v2_gi:{paths_part}:{pmi_part}:{cgptki_part}"
 
 
@@ -437,7 +445,7 @@ def _get_agg_file_deps(
 @cached(
     "aggregation_v2_gi",
     key_func=_get_aggregation_v2_cache_key,
-    ttl=0,  # No expiry, rely on mtime invalidation
+    ttl=2000,
     file_deps=_get_agg_file_deps,
     check_mtime=True,
 )
@@ -453,12 +461,12 @@ def aggregate_all_dependencies(
     Aggregates dependencies from tracker files, resolving paths to current global KeyInfo objects
     and then to their KEY#global_instance strings for instance-specific aggregation.
     """
-    global _runtime_aggregation_cache
-    if _runtime_aggregation_cache is not None:
+    global runtime_aggregation_cache
+    if runtime_aggregation_cache is not None:
         logger.debug(
-            f"TrackerUtils: Using runtime aggregation cache ({len(_runtime_aggregation_cache)} entries)."
+            f"TrackerUtils: Using runtime aggregation cache ({len(runtime_aggregation_cache)} entries)."
         )
-        return _runtime_aggregation_cache
+        return runtime_aggregation_cache
     aggregated_links: Dict[Tuple[str, str], Tuple[str, Set[str]]] = (
         {}
     )  # Key: (src_KEY#GI, tgt_KEY#GI)
@@ -675,6 +683,7 @@ def aggregate_all_dependencies(
     logger.debug(
         f"Aggregation complete. Found {len(aggregated_links)} unique KEY#global_instance directed links."
     )
+    set_runtime_aggregation_cache(aggregated_links)
     return aggregated_links
 
 
