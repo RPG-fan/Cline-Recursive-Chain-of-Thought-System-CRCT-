@@ -64,14 +64,20 @@ def main():
     # ---- pyright ----
     try:
         print("Running pyright for unused item analysis...")
+        # Validate project root
+        safe_project_root = os.path.abspath(os.path.normpath(project_root))
+        if not os.path.isdir(safe_project_root):
+            print(f"Error: Invalid project root directory: {project_root}")
+            return
+
         # Redirect output to PYRIGHT_OUTPUT in the current working directory or project root
-        pyright_output_path = os.path.join(project_root, PYRIGHT_OUTPUT)
+        pyright_output_path = os.path.join(safe_project_root, PYRIGHT_OUTPUT)
         with open(pyright_output_path, "w") as f:
             result = subprocess.run(
                 ["pyright", "--outputjson"],
                 stdout=f,
                 stderr=subprocess.STDOUT,
-                cwd=project_root,
+                cwd=safe_project_root,
             )
         if result.returncode == 0:
             print("Pyright analysis completed successfully.")

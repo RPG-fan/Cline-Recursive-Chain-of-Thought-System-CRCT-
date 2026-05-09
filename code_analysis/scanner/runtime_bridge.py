@@ -257,9 +257,15 @@ def load_runtime_data(project_root_path: str) -> Dict[str, Dict[str, Any]]:
 
 def maybe_run_runtime_inspector(project_root_path: str) -> None:
     """Best-effort: run the inspector if its output is missing."""
+    # Sanitize and validate the path to prevent arbitrary command execution or path traversal
+    safe_root = os.path.abspath(os.path.normpath(project_root_path))
+    if not os.path.isdir(safe_root):
+        print(f"[runtime] Error: Invalid project root path: {project_root_path}")
+        return
+
     if os.environ.get("CRCT_AUTO_RUNTIME") != "1":
         return
-    target = os.path.join(project_root_path, RUNTIME_SYMBOLS_PATH)
+    target = os.path.join(safe_root, RUNTIME_SYMBOLS_PATH)
     if os.path.exists(target):
         return
     print("[runtime] CRCT_AUTO_RUNTIME=1; invoking runtime_inspector...")
@@ -269,9 +275,9 @@ def maybe_run_runtime_inspector(project_root_path: str) -> None:
                 sys.executable,
                 "-m",
                 "cline_utils.dependency_system.analysis.runtime_inspector",
-                project_root_path,
+                safe_root,
             ],
-            cwd=project_root_path,
+            cwd=safe_root,
             check=False,
         )
     except Exception as e:
