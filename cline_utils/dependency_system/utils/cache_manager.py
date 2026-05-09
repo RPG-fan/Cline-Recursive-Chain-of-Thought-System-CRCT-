@@ -19,7 +19,7 @@ import weakref
 import atexit
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, cast
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar, cast
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +66,12 @@ class CacheMetrics:
     evictions: int = 0
     compression_saves: int = 0
     total_size_bytes: int = 0
-    access_count: Dict[str, int] = field(default_factory=dict)
-    last_access: Dict[str, float] = field(default_factory=dict)
+    access_count: Dict[str, int] = field(
+        default_factory=lambda: cast(Dict[str, int], {})
+    )
+    last_access: Dict[str, float] = field(
+        default_factory=lambda: cast(Dict[str, float], {})
+    )
 
     @property
     def hit_rate(self) -> float:
@@ -389,7 +393,7 @@ class Cache:
                 k for k in list(self.data.keys()) if compiled_pattern.match(k)
             ]
 
-            processed_for_invalidation = set()
+            processed_for_invalidation: Set[str] = set()
             queue_to_invalidate = list(keys_to_remove_initial)
 
             while queue_to_invalidate:
@@ -437,6 +441,11 @@ class CacheManager:
         self.caches: Dict[str, Cache] = {}
         self.persist = persist
         self._last_cleanup_time = 0.0  # Throttling for cleanup()
+        # Tracks caches loaded in aliased form that need de-aliasing on first access.
+        # De-aliasing is deferred because load_global_key_map() uses the @cached
+        # decorator, which references the module-level `cache_manager` singleton --
+        # that singleton is only assigned AFTER __init__ returns.
+        self._pending_dealias: Set[str] = set()
         if persist:
             os.makedirs(CACHE_DIR, exist_ok=True)
             self._migrate_json_caches()
@@ -514,6 +523,21 @@ class CacheManager:
         if cache_name not in self.caches or self.caches[cache_name].is_expired():
             self.caches[cache_name] = Cache(cache_name, ttl)
             logger.debug(f"Spun up new cache: {cache_name} with TTL {ttl}s")
+
+        # Apply deferred de-aliasing now that the module-level singleton exists.
+        if cache_name in self._pending_dealias:
+            self._pending_dealias.discard(cache_name)
+            cache = self.caches[cache_name]
+            raw_data = {k: v[0] for k, v in cache.data.items()}
+            dealiased = self._dealias_data(raw_data, cache_name)
+            # Rebuild cache with de-aliased data, preserving TTL/access metadata
+            new_cache = Cache(cache_name, ttl)
+            for k, v in dealiased.items():
+                new_cache.set(k, v, ttl=0)
+            new_cache.dependencies = cache.dependencies
+            new_cache.modified = False
+            self.caches[cache_name] = new_cache
+
         return self.caches[cache_name]
 
     def cleanup(self, force: bool = False) -> None:
@@ -685,41 +709,223 @@ class CacheManager:
         else:
             logger.debug("In-memory caches cleared.")
 
+    def _alias_data(self, data: Dict[str, Any], cache_name: str) -> Dict[str, Any]:
+        """Alias data before saving to disk to reduce size."""
+        if cache_name != "project_symbol_map_data":
+            return data
+
+        try:
+            from cline_utils.dependency_system.core.key_manager import (
+                load_global_key_map,
+            )
+
+            path_to_key_map = load_global_key_map()
+            if not path_to_key_map:
+                return data
+
+            aliased_data: Dict[str, Any] = {}
+            for cache_key, symbol_map in data.items():
+                if not isinstance(symbol_map, dict):
+                    aliased_data[cache_key] = symbol_map
+                    continue
+
+                symbol_map_dict = cast(Dict[str, Any], symbol_map)
+                aliased_symbol_map: Dict[str, Any] = {}
+                for path, file_data_raw in symbol_map_dict.items():
+                    path = cast(str, path)
+                    file_data = cast(Dict[str, Any], file_data_raw)
+                    key_info = path_to_key_map.get(path)
+                    if not key_info:
+                        aliased_symbol_map[path] = file_data
+                        continue
+
+                    file_key = key_info.key_string
+
+                    # Store file-level metadata (metadata + non-class/func symbols)
+                    file_meta: Dict[str, Any] = {
+                        k: v
+                        for k, v in file_data.items()
+                        if k not in ("classes", "functions")
+                    }
+                    aliased_symbol_map[file_key] = file_meta
+
+                    # Store classes
+                    classes = cast(List[Dict[str, Any]], file_data.get("classes", []))
+                    for cls in classes:
+                        if "name" in cls:
+                            cls_copy = cls.copy()
+                            cls_copy["_symbol_type"] = "class"
+                            aliased_symbol_map[f"{file_key}:{cls['name']}"] = cls_copy
+
+                    # Store functions
+                    functions = cast(
+                        List[Dict[str, Any]], file_data.get("functions", [])
+                    )
+                    for func in functions:
+                        if "name" in func:
+                            func_copy = func.copy()
+                            func_copy["_symbol_type"] = "function"
+                            aliased_symbol_map[f"{file_key}:{func['name']}"] = func_copy
+
+                aliased_data[cache_key] = aliased_symbol_map
+
+            logger.debug(f"Aliased '{cache_name}' for optimized storage.")
+            return aliased_data
+        except Exception as e:
+            logger.warning(f"Failed to alias '{cache_name}': {e}")
+            return data
+
+    def _dealias_data(self, data: Dict[str, Any], cache_name: str) -> Dict[str, Any]:
+        """De-alias data after loading from disk."""
+        if cache_name != "project_symbol_map_data":
+            return data
+
+        try:
+            from cline_utils.dependency_system.core.key_manager import (
+                load_global_key_map,
+                load_old_global_key_map,
+            )
+
+            # Load current map
+            path_to_key_map = load_global_key_map()
+
+            # Create reverse map: key -> path
+            key_to_path: Dict[str, str] = {}
+
+            # Load old map first (lower precedence)
+            old_path_to_key_map = load_old_global_key_map()
+            if old_path_to_key_map:
+                for path, info in old_path_to_key_map.items():
+                    key_to_path[info.key_string] = path
+
+            # Current map takes precedence
+            if path_to_key_map:
+                for path, info in path_to_key_map.items():
+                    key_to_path[info.key_string] = path
+
+            if not key_to_path:
+                return data
+
+            dealiased_data: Dict[str, Any] = {}
+            for cache_key, aliased_symbol_map_raw in data.items():
+                if not isinstance(aliased_symbol_map_raw, dict):
+                    dealiased_data[cache_key] = aliased_symbol_map_raw
+                    continue
+
+                aliased_symbol_map = cast(Dict[str, Any], aliased_symbol_map_raw)
+                full_symbol_map: Dict[str, Any] = {}
+                # First pass: identify file keys and initialize full structure
+                for key_raw in aliased_symbol_map.keys():
+                    key = cast(str, key_raw)
+                    if ":" not in key:
+                        path = key_to_path.get(key)
+                        if path:
+                            full_symbol_map[path] = cast(
+                                Dict[str, Any], aliased_symbol_map[key]
+                            ).copy()
+                            full_symbol_map[path]["classes"] = []
+                            full_symbol_map[path]["functions"] = []
+                        else:
+                            # Keep as is if not in key map (maybe already a full path)
+                            full_symbol_map[key] = aliased_symbol_map[key]
+
+                # Second pass: distribute symbols
+                for key_raw, symbol_data_raw in aliased_symbol_map.items():
+                    key = cast(str, key_raw)
+                    symbol_data = cast(Dict[str, Any], symbol_data_raw)
+                    if ":" in key:
+                        file_key, _ = key.split(":", 1)
+                        path = key_to_path.get(file_key)
+                        if path and path in full_symbol_map:
+                            symbol_type = symbol_data.pop("_symbol_type", None)
+                            target_file = cast(Dict[str, Any], full_symbol_map[path])
+                            if symbol_type == "class":
+                                cast(List[Any], target_file["classes"]).append(
+                                    symbol_data
+                                )
+                            elif symbol_type == "function":
+                                cast(List[Any], target_file["functions"]).append(
+                                    symbol_data
+                                )
+                            else:
+                                # Fallback heuristic
+                                if "methods" in symbol_data:
+                                    cast(List[Any], target_file["classes"]).append(
+                                        symbol_data
+                                    )
+                                else:
+                                    cast(List[Any], target_file["functions"]).append(
+                                        symbol_data
+                                    )
+
+                dealiased_data[cache_key] = full_symbol_map
+
+            logger.debug(f"De-aliased '{cache_name}' after loading.")
+            return dealiased_data
+        except Exception as e:
+            logger.warning(f"Failed to de-alias '{cache_name}': {e}")
+            return data
+
     def _save_cache(self, cache_name: str) -> None:
         if cache_name in self.caches:
             cache = self.caches[cache_name]
-            cache_file = os.path.join(CACHE_DIR, f"{cache_name}.pkl")
+
+            # Use .pkl.gz for compressed caches
+            extension = ".pkl.gz" if ENABLE_COMPRESSION else ".pkl"
+            cache_file = os.path.join(CACHE_DIR, f"{cache_name}{extension}")
+
             # Use UUID to ensure uniqueness across threads/processes
             temp_file = f"{cache_file}.{uuid.uuid4()}.tmp"
             try:
-                with open(temp_file, "wb") as f:
-                    # Ensure there's data to write
-                    if not cache.data:
-                        # If cache is empty, don't write an empty file, just ensure old one is gone
-                        if os.path.exists(cache_file):
+                # Ensure there's data to write
+                if not cache.data:
+                    # If cache is empty, don't write an empty file, just ensure old ones are gone
+                    for ext in (".pkl", ".pkl.gz"):
+                        p = os.path.join(CACHE_DIR, f"{cache_name}{ext}")
+                        if os.path.exists(p):
                             try:
-                                os.remove(cache_file)
+                                os.remove(p)
                             except OSError:
                                 pass
-                        cache.modified = False
-                        return
+                    cache.modified = False
+                    return
 
-                    current_cache_data_items = list(cache.data.items())
+                current_cache_data_items = list(cache.data.items())
 
-                    data = {
-                        "data": {
-                            k: v[0]
-                            for k, v in current_cache_data_items
-                            if v[2] is None or v[2] > time.time()
-                        },
-                        "dependencies": dict(cache.dependencies),
-                    }
-                    pickle.dump(data, f)
+                raw_data = {
+                    k: v[0]
+                    for k, v in current_cache_data_items
+                    if v[2] is None or v[2] > time.time()
+                }
+
+                # Alias data before saving
+                aliased_raw_data = self._alias_data(raw_data, cache_name)
+
+                persistence_data = {
+                    "data": aliased_raw_data,
+                    "dependencies": dict(cache.dependencies),
+                }
+
+                if ENABLE_COMPRESSION:
+                    with gzip.open(temp_file, "wb") as f:
+                        pickle.dump(persistence_data, f)
+                else:
+                    with open(temp_file, "wb") as f:
+                        pickle.dump(persistence_data, f)
 
                 # Atomic rename with retries for Windows file locking
                 max_retries = 3
                 for i in range(max_retries):
                     try:
+                        # If we are saving as .pkl.gz, remove old .pkl if it exists
+                        if ENABLE_COMPRESSION:
+                            old_pkl = os.path.join(CACHE_DIR, f"{cache_name}.pkl")
+                            if os.path.exists(old_pkl):
+                                try:
+                                    os.remove(old_pkl)
+                                except OSError:
+                                    pass
+
                         os.replace(temp_file, cache_file)
                         cache.modified = False  # Successfully saved
                         break
@@ -745,8 +951,9 @@ class CacheManager:
         if not os.path.exists(CACHE_DIR):
             return
         for cache_file in os.listdir(CACHE_DIR):
-            if cache_file.endswith(".pkl"):
-                cache_name = cache_file[:-4]
+            if cache_file.endswith(".pkl") or cache_file.endswith(".pkl.gz"):
+                is_compressed = cache_file.endswith(".pkl.gz")
+                cache_name = cache_file[:-7] if is_compressed else cache_file[:-4]
                 cache_path = os.path.join(CACHE_DIR, cache_file)
                 try:
                     if os.path.getsize(cache_path) == 0:
@@ -756,22 +963,40 @@ class CacheManager:
                         os.remove(cache_path)
                         continue
 
-                    with open(cache_path, "rb") as f:
-                        data = pickle.load(f)
-                        cache = Cache(cache_name)
-                        for key, value in data.get("data", {}).items():
-                            cache.set(key, value, ttl=0)
-                        cache.dependencies = data.get("dependencies", {})
-                        cache.modified = False  # Reset after loading/population
-                        self.caches[cache_name] = cache
-                    logger.debug(f"Loaded persistent cache: {cache_name}")
+                    if is_compressed:
+                        with gzip.open(cache_path, "rb") as f:
+                            persistence_data = pickle.load(f)
+                    else:
+                        with open(cache_path, "rb") as f:
+                            persistence_data = pickle.load(f)
+
+                    # Store raw (still-aliased) data. De-aliasing is deferred to
+                    # the first get_cache() call so that load_global_key_map() can
+                    # safely use the @cached decorator (which requires the module-level
+                    # `cache_manager` singleton to already be assigned).
+                    raw_data = persistence_data.get("data", {})
+
+                    cache = Cache(cache_name)
+                    for key, value in raw_data.items():
+                        cache.set(key, value, ttl=0)
+                    cache.dependencies = persistence_data.get("dependencies", {})
+                    cache.modified = False  # Reset after loading/population
+                    self.caches[cache_name] = cache
+
+                    # Mark for deferred de-aliasing if applicable
+                    if cache_name == "project_symbol_map_data":
+                        self._pending_dealias.add(cache_name)
+
+                    logger.debug(
+                        f"Loaded persistent cache: {cache_name} (compressed={is_compressed})"
+                    )
                 except Exception as e:
                     logger.error(
                         f"Failed to load cache {cache_name} from {cache_file}: {e}"
                     )
                     try:
                         os.remove(cache_path)
-                    except OSError as oe:
+                    except OSError:
                         pass
 
 

@@ -24,6 +24,7 @@ from cline_utils.dependency_system.utils.cache_manager import (
 )
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.path_utils import get_file_type
+from cline_utils.dependency_system.io.file_io import read_file_content_safely
 from cline_utils.dependency_system.utils.tracker_utils import (
     get_key_global_instance_string,
 )
@@ -76,20 +77,6 @@ def _get_symbol_map_path() -> str:
 
 
 # _OLD_PROJECT_SYMBOL_MAP_FILENAME_LOCAL = "project_symbol_map_old.json" # Not used by load, only by save
-
-
-def _get_read_file_deps(file_path: str, *args: Any, **kwargs: Any) -> list[str]:
-    return [file_path]
-
-
-@cached("file_content_reads", ttl=3600, file_deps=_get_read_file_deps, check_mtime=True)
-def _read_file_content_safely(file_path: str) -> str | None:
-    """Reads a file safely, returning None if an error occurs."""
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception:
-        return None
 
 
 def clear_caches():
@@ -2060,7 +2047,7 @@ def _generate_candidate_text_from_file_cached(target_norm_path: str) -> str:
 
     if target_is_doc:
         try:
-            content = _read_file_content_safely(target_norm_path)
+            content = read_file_content_safely(target_norm_path)
             if content is None:
                 raise Exception("File read failed")
             candidate_text = preprocess_doc_structure(content)
@@ -2069,7 +2056,7 @@ def _generate_candidate_text_from_file_cached(target_norm_path: str) -> str:
     else:
         # Fallback for non-code or untracked files
         try:
-            content = _read_file_content_safely(target_norm_path)
+            content = read_file_content_safely(target_norm_path)
             if content is None:
                 raise Exception("File read failed")
             # Limit raw content
@@ -2144,8 +2131,11 @@ def suggest_semantic_dependencies_path_based(
         )
         return []
 
+    # Load AST verified links and build map early for filtering
     ast_verified_links = _load_ast_verified_links(project_root)
     ast_map = _build_ast_map(file_path, ast_verified_links)
+
+    # Collect all candidates first for potential reranking
     candidates_with_similarity: List[Tuple[KeyInfo, float]] = []
 
     for target_ki in target_key_infos_list:
@@ -2283,6 +2273,9 @@ def suggest_semantic_dependencies_path_based(
                     filtered_candidates.append((target_ki, confidence))
 
             candidates_with_similarity = filtered_candidates
+            # logger.debug(
+            #     f"Pre-reranking filter: {len(candidates_with_similarity)} candidates remaining from original collection"
+            # )
 
             # Use shared counter if available (preferred for parallel execution)
             if shared_scan_counter is not None:
@@ -2366,7 +2359,6 @@ def suggest_semantic_dependencies_path_based(
                     logger.warning(f"Failed to log reranker scans: {e}")
 
             if len(top_candidates) > 1:
-
                 # Get the source text for reranking
                 try:
                     ext = os.path.splitext(file_path)[1].lower()
@@ -2385,7 +2377,7 @@ def suggest_semantic_dependencies_path_based(
                             )
                         else:
                             try:
-                                content = _read_file_content_safely(file_path)
+                                content = read_file_content_safely(file_path)
                                 if content is None:
                                     raise Exception("File read failed")
                                 query_text = preprocess_doc_structure(content)
@@ -2401,7 +2393,7 @@ def suggest_semantic_dependencies_path_based(
                     else:
                         # Fallback for untracked code or other files
                         try:
-                            content = _read_file_content_safely(file_path)
+                            content = read_file_content_safely(file_path)
                             if content is None:
                                 raise Exception("File read failed")
                             query_text = f"[FILE: {os.path.basename(file_path)}]\n{content[:12800]}"
@@ -2471,7 +2463,7 @@ def suggest_semantic_dependencies_path_based(
                             else:
                                 # Fallback for non-code or untracked files
                                 try:
-                                    content = _read_file_content_safely(
+                                    content = read_file_content_safely(
                                         target_ki.norm_path
                                     )
                                     if content is None:
@@ -2557,6 +2549,7 @@ def suggest_semantic_dependencies_path_based(
                                         (target_ki.norm_path, assigned_char_semantic)
                                     )
 
+                        # CORRECTED: After processing reranked results, DO NOT return.
                         # The function will now proceed to the enhancement step below.
 
         except ImportError as e:

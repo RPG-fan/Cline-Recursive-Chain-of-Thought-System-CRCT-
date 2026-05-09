@@ -117,10 +117,9 @@ def merge_runtime_and_ast(
     return merged_map
 
 
-def load_runtime_symbols(project_root: str = None) -> Dict[str, Dict[str, Any]]:
+def load_runtime_symbols(project_root: str) -> Dict[str, Dict[str, Any]]:
     """Load runtime_symbols.json from core directory."""
-    if project_root is None:
-        project_root = get_project_root()
+    project_root = get_project_root()
 
     runtime_path = os.path.join(
         project_root, "cline_utils", "dependency_system", "core", "runtime_symbols.json"

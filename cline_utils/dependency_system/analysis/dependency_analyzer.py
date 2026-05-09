@@ -7,6 +7,10 @@ Parses files to identify imports, function calls, and other dependency indicator
 
 import ast
 import logging
+from cline_utils.dependency_system.io.file_io import (
+    read_file_content_safely,
+    strip_auto_generated_blocks,
+)
 import os
 import re
 import sys
@@ -474,30 +478,23 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
             "with_contexts_used": [],
             "literal_assignments": [],  # Initialize explicitly for type safety
         }
-        try:
-            with open(norm_file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-        except FileNotFoundError:
-            return {
-                "error": "File disappeared during analysis",
-                "file_path": norm_file_path,
-            }
-        except UnicodeDecodeError as e:
-            logger.warning(
-                f"Encoding error reading {norm_file_path} as UTF-8: {e}. File might be non-text or use different encoding."
-            )
-            return {
-                "error": "Encoding error",
-                "details": str(e),
-                "file_path": norm_file_path,
-            }
-        except Exception as e:
-            logger.error(f"Error reading file {norm_file_path}: {e}", exc_info=True)
-            return {
-                "error": "File read error",
-                "details": str(e),
-                "file_path": norm_file_path,
-            }
+        content = read_file_content_safely(norm_file_path)
+        if content is None:
+            if not os.path.exists(norm_file_path):
+                return {
+                    "error": "File disappeared during analysis",
+                    "file_path": norm_file_path,
+                }
+            else:
+                return {
+                    "error": "File read error",
+                    "details": "Could not read file (possibly encoding or permission issue).",
+                    "file_path": norm_file_path,
+                }
+
+        # Stabilize content before analysis by stripping [AUTO] blocks.
+        # This ensures that symbols discovered and SES strings generated later are stable.
+        content = strip_auto_generated_blocks(content, norm_file_path)
 
         if file_type == "py":
             _analyze_python_file(norm_file_path, content, analysis_result)

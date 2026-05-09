@@ -8,6 +8,7 @@ Processes command-line arguments and delegates to appropriate handlers.
 import argparse
 import json
 import logging
+from cline_utils.dependency_system.io.file_io import read_file_content_safely
 import os
 import subprocess
 import sys
@@ -256,8 +257,9 @@ def handle_determine_dependency(args: argparse.Namespace) -> int:
             )
             source_basename = f"{os.path.basename(source_path)} (SES)"
         else:
-            with open(source_path, "r", encoding="utf-8") as f:
-                source_content = f.read()
+            source_content = read_file_content_safely(source_path)
+            if source_content is None:
+                raise Exception(f"Failed to read source file: {source_path}")
             source_basename = os.path.basename(source_path)
 
         # Use SES for target if available
@@ -267,8 +269,9 @@ def handle_determine_dependency(args: argparse.Namespace) -> int:
             )
             target_basename = f"{os.path.basename(target_path)} (SES)"
         else:
-            with open(target_path, "r", encoding="utf-8") as f:
-                target_content = f.read()
+            target_content = read_file_content_safely(target_path)
+            if target_content is None:
+                raise Exception(f"Failed to read target file: {target_path}")
             target_basename = os.path.basename(target_path)
 
     except Exception as e:
@@ -1852,10 +1855,12 @@ def _prepare_pair(
 
     # File reads
     try:
-        with open(srcpath, "r", encoding="utf-8", errors="ignore") as f:
-            srccontent = f.read()
-        with open(tgtpath, "r", encoding="utf-8", errors="ignore") as f:
-            tgtcontent = f.read()
+        srccontent = read_file_content_safely(srcpath)
+        if srccontent is None:
+            raise Exception("Failed to read src")
+        tgtcontent = read_file_content_safely(tgtpath)
+        if tgtcontent is None:
+            raise Exception("Failed to read tgt")
     except Exception as e:
         return PreparedPair(
             srckey=srckey,
@@ -2183,7 +2188,7 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
             except Exception:
                 continue
 
-    # Apply results globally
+    # Apply all algorithmic/shortcut suggestions globally
     if global_suggestions:
         print(
             f"\n--- Resolving {algo_processed_count} directory placeholders and {shortcut_processed_count} shortcuts algorithmically ---"

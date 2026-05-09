@@ -16,6 +16,11 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
 import numpy as np
+from cline_utils.dependency_system.io.file_io import (
+    read_file_content_safely,
+    calculate_content_hash,
+    strip_auto_generated_blocks,
+)
 import torch
 
 # from llama_cpp import Llama
@@ -263,6 +268,14 @@ def _download_qwen3_model(model_path: str) -> bool:
 
     logger.info(f"Downloading Qwen3 model from {model_url} to {model_path}")
 
+    if (
+        not model_url.strip().startswith(("http://", "https://"))
+        or "\n" in model_url
+        or "\r" in model_url
+    ):
+        logger.error(f"Invalid URL or scheme for model download: {model_url}")
+        return False
+
     try:
         # Download with progress reporting
         with urllib.request.urlopen(model_url) as response:
@@ -398,7 +411,7 @@ def _get_tokenizer() -> Optional[Any]:
 
             _tokenizer_instance = cast(
                 Any,
-                AutoTokenizer.from_pretrained(local_model_path, trust_remote_code=True),  # type: ignore
+                AutoTokenizer.from_pretrained(local_model_path),  # type: ignore
             )
             return _tokenizer_instance
     except Exception as e:
@@ -648,9 +661,8 @@ def generate_symbol_essence_string(
     parts: List[str] = []
 
     # 1. Header
-    mod_time = os.path.getmtime(file_path) if os.path.exists(file_path) else 0
     parts.append(
-        f"[FILE: {rel_path} | TYPE: {symbol_data.get('file_type', 'unknown')} | MOD: {mod_time}]"
+        f"[FILE: {rel_path} | TYPE: {symbol_data.get('file_type', 'unknown')}]"
     )
 
     # --- Size-Adaptive Logic ---
@@ -660,11 +672,11 @@ def generate_symbol_essence_string(
 
     # Try to load content if not already loaded or if we need to count tokens
     if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-        except Exception:
-            pass
+        raw_content = read_file_content_safely(file_path)
+        if raw_content is not None:
+            content = strip_auto_generated_blocks(raw_content, file_path)
+        else:
+            content = ""
 
     if full_tokens is None and content:
         # Look up in metadata.json first
@@ -2043,6 +2055,14 @@ RERANKER_FILES = [
 
 def _download_file(url: str, path: str, description: str) -> bool:
     """Generic file download with progress reporting."""
+    if (
+        not url.strip().startswith(("http://", "https://"))
+        or "\n" in url
+        or "\r" in url
+    ):
+        logger.error(f"Invalid URL or scheme for file download: {url}")
+        return False
+
     try:
         logger.info(f"Downloading {description} from {url} to {path}")
         with urllib.request.urlopen(url) as response:
@@ -2153,7 +2173,6 @@ def _load_reranker_model():
                 Any,
                 AutoTokenizer.from_pretrained(  # type: ignore
                     model_name_or_path,
-                    trust_remote_code=True,
                     padding_side="left",  # Left padding for generation/classification to align last token
                 ),
             )
@@ -2186,18 +2205,17 @@ def _load_reranker_model():
                         model_name_or_path,
                         dtype=torch.float16,  # Use 'dtype' instead of 'torch_dtype'
                         attn_implementation="flash_attention_2",
-                        trust_remote_code=True,
                     )
                 else:
                     _reranker_model = AutoModelForCausalLM.from_pretrained(  # type: ignore
-                        model_name_or_path, trust_remote_code=True
+                        model_name_or_path
                     )
             except Exception as e:
                 logger.warning(
                     f"Optimization failed, falling back to standard load: {e}"
                 )
                 _reranker_model = AutoModelForCausalLM.from_pretrained(  # type: ignore
-                    model_name_or_path, trust_remote_code=True
+                    model_name_or_path
                 )
 
                 # Only move non-quantized models manually
@@ -2635,14 +2653,17 @@ def _get_text_content_for_embedding(
         )
 
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
+        content = read_file_content_safely(file_path)
+        if content is None:
+            raise Exception("Failed to read file")
 
         if is_doc:
             return preprocess_doc_structure(content)
 
         rel_path = os.path.relpath(file_path, project_root)
-        return f"[FILE: {rel_path}]\n{content[:32000]}"
+        # Strip transient [AUTO] comments before raw embedding
+        stable_content = strip_auto_generated_blocks(content, file_path)
+        return f"[FILE: {rel_path}]\n{stable_content[:32000]}"
     except Exception as e:
         logger.error(f"Failed to read {file_path}: {e}")
         return ""
@@ -2739,7 +2760,33 @@ def generate_embeddings(
                 src_mtime = os.path.getmtime(key_info.norm_path)
                 emb_mtime = os.path.getmtime(embedding_path)
                 if src_mtime > emb_mtime:
-                    should_process = True
+                    # mtime changed, but maybe it's just [AUTO] comments.
+                    # Perform "Deep Check" using stored content_hash.
+                    m_item = existing_metadata.get(
+                        key_info.key_string
+                    ) or existing_metadata_by_path.get(key_info.norm_path)
+                    stored_hash = m_item.get("content_hash") if m_item else None
+
+                    if stored_hash:
+                        raw_content = read_file_content_safely(key_info.norm_path)
+                        if raw_content:
+                            current_hash = calculate_content_hash(
+                                raw_content, key_info.norm_path
+                            )
+
+                            if current_hash == stored_hash:
+                                # Content is same! Touch .npy to align mtime and skip.
+                                logger.debug(
+                                    f"Skipping {os.path.basename(key_info.norm_path)} due to hash match."
+                                )
+                                os.utime(embedding_path, None)
+                                should_process = False
+                            else:
+                                should_process = True
+                        else:
+                            should_process = True
+                    else:
+                        should_process = True
             except OSError:
                 should_process = True
 
@@ -2810,8 +2857,8 @@ def generate_embeddings(
             # Count Full Context tokens (for raw file content)
             full_token_count = 0
 
-            with open(file_path, "r", encoding="utf-8") as f:
-                full_content = f.read()
+            full_content = read_file_content_safely(file_path)
+            if full_content:
                 full_token_count = _count_tokens(full_content, tokenizer)
 
             final_token_counts[key_info.key_string] = {
@@ -2951,14 +2998,26 @@ def generate_embeddings(
                         )
                         ses_tokens = _count_tokens(text, tokenizer)
                         # Try to get full too
-                        with open(key_info.norm_path, "r", encoding="utf-8") as f:
-                            full_tokens = _count_tokens(f.read(), tokenizer)
+                        full_content = read_file_content_safely(key_info.norm_path)
+                        if full_content is not None:
+                            full_tokens = _count_tokens(full_content, tokenizer)
+                        else:
+                            full_tokens = ses_tokens
                     except Exception:
                         full_tokens = ses_tokens
+
+                # Calculate stable hash for the metadata
+                content_hash = ""
+                raw_for_hash = read_file_content_safely(key_info.norm_path)
+                if raw_for_hash:
+                    content_hash = calculate_content_hash(
+                        raw_for_hash, key_info.norm_path
+                    )
 
                 new_metadata["keys"][key_info.key_string] = {
                     "path": key_info.norm_path,
                     "mtime": os.path.getmtime(key_info.norm_path),
+                    "content_hash": content_hash,
                     "ses_tokens": ses_tokens,
                     "full_tokens": full_tokens,
                 }
