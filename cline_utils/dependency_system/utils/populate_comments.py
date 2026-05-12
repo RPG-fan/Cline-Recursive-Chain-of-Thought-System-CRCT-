@@ -244,7 +244,7 @@ def _is_commentable(file_path: str) -> bool:
 
 _PROSE_FIELDS = ("ROLE", "LAYER")
 _FILL_FIELD_RE = re.compile(
-    r"^([#/\-]{1,2}|<!--)\s+(" + "|".join(_PROSE_FIELDS) + r"):\s*(.+)$"
+    r"^([#/\-]{1,2}|<!--)?\s*(" + "|".join(_PROSE_FIELDS) + r"):\s*(.+)$"
 )
 
 
@@ -373,7 +373,7 @@ def build_station_header(
     - ROLE, LAYER are restored from preserved_prose if available,
       otherwise a [FILL: ...] placeholder is emitted.
     """
-    p = f"{prefix} "
+    p = f"{prefix} " if prefix != "<!--" else ""
 
     start_marker, end_marker = get_station_markers(prefix)
 
@@ -568,16 +568,26 @@ def process_file(
     src_lines = new_source.splitlines(keepends=True)
     insert_idx = 0
 
-    # Insert after module docstring if present
-    if src_lines and src_lines[0].startswith(('"""', "'''")):
-        quote = src_lines[0][:3]
-        if src_lines[0].strip().endswith(quote) and len(src_lines[0].strip()) > 3:
-            insert_idx = 1
-        else:
-            for i in range(1, min(50, len(src_lines))):
-                if src_lines[i].strip().endswith(quote):
-                    insert_idx = i + 1
-                    break
+    # 1.1 Placement logic: Tags take precedence, then docstrings
+    tags_end_marker = "---TAGS_END---"
+    tags_found = False
+    for i, line in enumerate(src_lines):
+        if tags_end_marker in line:
+            insert_idx = i + 1
+            tags_found = True
+            break
+
+    if not tags_found:
+        # Insert after module docstring if present
+        if src_lines and src_lines[0].startswith(('"""', "'''")):
+            quote = src_lines[0][:3]
+            if src_lines[0].strip().endswith(quote) and len(src_lines[0].strip()) > 3:
+                insert_idx = 1
+            else:
+                for i in range(1, min(50, len(src_lines))):
+                    if src_lines[i].strip().endswith(quote):
+                        insert_idx = i + 1
+                        break
 
     src_lines.insert(insert_idx, header)
     new_source = "".join(src_lines)
