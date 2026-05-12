@@ -1495,20 +1495,95 @@ def handle_show_placeholders(args: argparse.Namespace) -> int:
     """
     Handle the show-placeholders command.
     Finds and displays all unverified dependencies ('p', 's', 'S').
+
+    When --tracker is provided: shows detailed per-key breakdown for that tracker.
+    When --tracker is omitted: shows aggregate summary across all trackers from tracker_map.json.
     """
-    tracker_path = normalize_path(args.tracker)
     focus_key = args.key
     dep_char_filter = args.dep_char
-
-    if not os.path.exists(tracker_path):
-        print(f"Error: Tracker file not found: {tracker_path}", file=sys.stderr)
-        return 1
 
     chars_to_check: Tuple[str, ...]
     if dep_char_filter:
         chars_to_check = (dep_char_filter,)
     else:
         chars_to_check = ("p", "s", "S")
+
+    # --- Bare mode: no --tracker provided, show aggregate summary across all trackers ---
+    if args.tracker is None:
+        from cline_utils.dependency_system.core.key_manager import (
+            load_tracker_map,
+        )
+
+        all_trackers = load_tracker_map()
+        if not all_trackers:
+            print(
+                "Error: No tracker map found. Run 'analyze-project' first.",
+                file=sys.stderr,
+            )
+            return 1
+
+        results: List[Tuple[str, int, int, int]] = (
+            []
+        )  # (tracker_rel_path, p_count, s_count, S_count)
+        total_p = total_s = total_S = 0
+
+        for t_path in all_trackers:
+            if not os.path.exists(t_path):
+                continue
+            try:
+                with open(t_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                key_def_pairs = read_key_definitions_from_lines(lines)
+                _grid_headers, grid_rows_data = read_grid_from_lines(lines)
+                if not key_def_pairs or not grid_rows_data:
+                    continue
+            except Exception:
+                continue
+
+            p_cnt = s_cnt = S_cnt = 0
+            for _, (row_label, compressed_row) in enumerate(grid_rows_data):
+                if focus_key and row_label != focus_key:
+                    continue
+                try:
+                    decompressed = decompress(compressed_row)
+                    if len(decompressed) != len(key_def_pairs):
+                        continue
+                    for char in decompressed:
+                        if char in chars_to_check:
+                            if char == "p":
+                                p_cnt += 1
+                            elif char == "s":
+                                s_cnt += 1
+                            elif char == "S":
+                                S_cnt += 1
+                except Exception:
+                    continue
+
+            if p_cnt or s_cnt or S_cnt:
+                # Use relative path for cleaner output
+                rel_path = os.path.relpath(t_path, get_project_root())
+                results.append((rel_path, p_cnt, s_cnt, S_cnt))
+                total_p += p_cnt
+                total_s += s_cnt
+                total_S += S_cnt
+
+        if not results:
+            print(f"No unverified dependencies {chars_to_check} found in any tracker.")
+            return 0
+
+        for rel_path, p_cnt, s_cnt, S_cnt in results:
+            print(f"{rel_path} - p:{p_cnt} | s:{s_cnt} | S:{S_cnt}")
+        print("---")
+        total_all = total_p + total_s + total_S
+        print(f"Total Unresolved dependencies: {total_all}")
+        return 0
+
+    # --- Detailed mode: --tracker provided ---
+    tracker_path = normalize_path(args.tracker)
+
+    if not os.path.exists(tracker_path):
+        print(f"Error: Tracker file not found: {tracker_path}", file=sys.stderr)
+        return 1
 
     # --- Load Global Map for Path Resolution ---
     project_root = get_project_root()
@@ -1952,14 +2027,17 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
         doc_trackers: List[str] = []
         mini_trackers: List[str] = []
+        main_trackers: List[str] = []
         for t in all_trackers:
             basename = os.path.basename(t)
             if "doc_tracker.md" in basename:
                 doc_trackers.append(t)
             elif basename.endswith("_module.md"):
                 mini_trackers.append(t)
+            elif "module_relationship_tracker.md" in basename:
+                main_trackers.append(t)
 
-        trackers_to_scan = doc_trackers + mini_trackers
+        trackers_to_scan = doc_trackers + mini_trackers + main_trackers
         dep_chars = ("p", "S", "s") if dep_char == "p" else (dep_char,)
     else:
         tracker_path: str = str(normalize_path(args.tracker))
@@ -2005,7 +2083,9 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
     import time
 
-    # --- Global Algorithmic Resolution ---
+    # ---------------------------------------------------------
+    # GLOBAL PHASE 1 & 2: Algorithmic Resolution across ALL trackers
+    # ---------------------------------------------------------
     global_suggestions: DefaultDict[str, DefaultDict[str, List[Tuple[str, str]]]] = (
         defaultdict(lambda: defaultdict(list))
     )
@@ -2292,7 +2372,9 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
             f"Global Algorithmic/Shortcut phase complete in {time.time()-algo_start_time:.2f}s"
         )
 
-    # --- LLM Resolution Phase ---
+    # ---------------------------------------------------------
+    # PHASE 3: LLM Resolution (Per-Tracker)
+    # ---------------------------------------------------------
     selected_tracker: Optional[str] = None
     llm_tasks: List[Tuple[str, str, str, str]] = []
     tracker_type = ""
@@ -2636,10 +2718,12 @@ def main():
     # --- Show Placeholders Command (ENHANCED) ---
     show_placeholders_parser = subparsers.add_parser(
         "show-placeholders",
-        help="Show unverified dependencies ('p', 's', 'S') in a tracker",
+        help="Show unverified dependencies ('p', 's', 'S') in a tracker. Without --tracker, shows summary across all trackers.",
     )
     show_placeholders_parser.add_argument(
-        "--tracker", required=True, help="Path to the tracker file (.md)"
+        "--tracker",
+        required=False,
+        help="Path to the tracker file (.md). If omitted, shows aggregate summary across all trackers from tracker_map.json.",
     )
     show_placeholders_parser.add_argument(
         "--key",
