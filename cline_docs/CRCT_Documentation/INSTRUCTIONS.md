@@ -33,7 +33,7 @@ These instructions provide a guide to setting up and using the Cline Recursive C
 
 4. **Configure Cline**:
    - Open the Cline extension settings.
-   - Paste the contents of `cline_docs/prompts/core_prompt(put this in Custom Instructions).md` into the "Custom Instructions" field.
+   - Paste the contents of `.clinerules/core_prompt(put this in Custom Instructions).md` into the "Custom Instructions" field.
 
 ---
 
@@ -55,7 +55,7 @@ These instructions provide a guide to setting up and using the Cline Recursive C
      - Generates Symbol Essence Strings (SES) and embeddings.
 
 3. **Verify Setup**:
-   - Check `cline_docs/` for new files (e.g., `dependency_tracker.md`).
+   - Check `cline_docs/` for new files (e.g., `doc_tracker.md`).
    - Ensure `[CODE_ROOT_DIRECTORIES]` in `.clinerules` lists `src/` (edit manually if needed).
 
 ---
@@ -131,13 +131,17 @@ These instructions provide a guide to setting up and using the Cline Recursive C
 
    - **Project Analysis**:
      - The LLM will use `analyze-project` command to fully analyze the project, generate **contextual keys**, update dependency trackers (main, doc, and mini-trackers), and generate embeddings. This command is central to maintaining up-to-date dependency information and should be run in the Set-up/Maintenance phase and after significant code changes.
+   - **Key/Placeholder Inspection**:
+     - The LLM will use `show-keys --tracker <tracker_file>` to view definitions and identify keys needing verification.
+     - The LLM will use `show-placeholders [--tracker <tracker_file>]` to list 'p', 's', and 'S' dependencies. If `--tracker` is omitted, provides a project-wide aggregate summary of all unverified dependencies.
+     - The LLM will use `visualize-dependencies [--key <key1> <key2> ...]` to generate Mermaid or SVG diagrams. Multi-key focus is supported for complex relationship analysis.
    - **Dependency Inspection**:
      - The LLM will utilize the `show-dependencies --key <key>` command to inspect dependencies for a specific **contextual key**. Replace `<key>` with the desired file or module key. This command aggregates dependency information from all trackers and provides a comprehensive view of inbound and outbound dependencies, significantly simplifying dependency analysis.
    - **Manual Dependency Management**:
      - The LLM will use `add-dependency --tracker <tracker_file> --source-key <key> --target-key <key1> [<key2>...] --dep-type <char>` to manually set dependency relationships in tracker files. This is useful for correcting or verifying suggested dependencies and for marking verified relationships. **Ensure you are using contextual keys when using this command.**
        *(Note: --target-key accepts multiple keys. The specified `--dep-type` is applied to *all* targets.)*
        *(Recommendation: Specify no more than five target keys at once for clarity.)*
-     - The LLM will use `remove-key --tracker <tracker_file> --key <key>` to remove a key and its associated data from a tracker file, typically used when files are deleted or refactored. **Ensure you are using contextual keys when using this command.**
+     - The LLM will use `remove-key <tracker_file> <key>` to remove a key and its associated data from a tracker file, typically used when files are deleted or refactored. **Ensure you are using contextual keys when using this command.**
 
    **Dependency Characters for Manual Management:**
 
@@ -182,20 +186,20 @@ These instructions provide a guide to setting up and using the Cline Recursive C
 
    **Suggestion Priority:** When different analysis methods (e.g., explicit import vs. semantic similarity) suggest conflicting dependencies between the same two files, CRCT uses a priority system to decide which dependency character (`<`, `>`, `x`, `d`, `S`, `s`, `p`) to record. The approximate priority order (highest first) is: `x` (mutual), `<`/`>` (direct structural/import), `d` (documentation link), `S` (strong semantic), `s` (weak semantic), `n`/`p`/`o` (no/placeholder/self). Explicit dependencies generally override semantic ones.
 
-3.  **Mandatory Update Protocol (MUP)**:
-    - CRCT employs a Mandatory Update Protocol (MUP) to ensure system state consistency. The LLM will perform a full MUP regularly (every 5 turns) to update `activeContext.md`, `changelog.md`, and `.clinerules`, and to clean up completed tasks. **The MUP is crucial for maintaining system integrity and should not be skipped.**
-    - If the LLM does not perform this step within a reasonable number of turns, prompt it to follow the MUP protocol. Remember that the context window is limited and LLMs quickly lose track of what the have and haven't done as the context window grows. *Be very wary of LLM hallucinations and mis-steps, especially in context sizes above 100k*
+ 3.  **Mandatory Update Protocol (MUP)**:
+     - CRCT employs a Mandatory Update Protocol (MUP) to ensure system state consistency. The LLM will perform a full MUP regularly (every 5 turns) to update `activeContext.md`, `changelog.md`, and `.clinerules`, and to clean up completed tasks. **The MUP is crucial for maintaining system integrity and should not be skipped.**
+     - If the LLM does not perform this step within a reasonable number of turns, prompt it to follow the MUP protocol. Remember that the context window is limited and LLMs quickly lose track of what the have and haven't done as the context window grows. *Be very wary of LLM hallucinations and mis-steps, especially in context sizes above 100k*
 
-4. **Configuration**:
-   - **`.clinerules.config.json`**: Configure system settings in this file.
-     - `embedding_device`:  Set the embedding device (`cpu`, `cuda`, `mps`) to optimize performance based on your hardware.
-     - `excluded_file_patterns`: Define file exclusion patterns (glob patterns) to customize project analysis and exclude specific files or directories from dependency tracking.
-   - *Note: Other settings like specific path exclusions (`excluded_paths`) and system directory locations (`memory_dir`, `embeddings_dir`, `backups_dir`, etc.) are also configurable in `.clinerules.config.json`. Refer to the file or defaults for more details.*
-   - **`.clinerules`**:  Manage core system settings directly in the `.clinerules` file.
-     - `current_phase`: Set the current operational phase of CRCT.
-     - `[CODE_ROOT_DIRECTORIES]`: Define directories considered as code roots for project analysis. **Modify this section to specify directories containing source code that should be analyzed for dependencies.**
-     - `[DOC_DIRECTORIES]`: Define directories considered as documentation roots. **Modify this section to specify directories containing project documentation that should be tracked.**
-     - `[LEARNING_JOURNAL]`: Review the learning journal for insights into system operations and best practices.
+ 4. **Configuration**:
+    - **`.clinerules.config.json`**: Configure system settings in this file.
+      - `embedding_device`:  Set the embedding device (`cpu`, `cuda`, `mps`) to optimize performance based on your hardware.
+      - `excluded_file_patterns`: Define file exclusion patterns (glob patterns) to customize project analysis and exclude specific files or directories from dependency tracking.
+    - *Note: Other settings like specific path exclusions (`excluded_paths`) and system directory locations (`memory_dir`, `embeddings_dir`, `backups_dir`, etc.) are also configurable in `.clinerules.config.json`. Refer to the file or defaults for more details.*
+    - **`.clinerules`**:  Manage core system settings directly in the `.clinerules` file.
+      - `current_phase`: Set the current operational phase of CRCT.
+      - `[CODE_ROOT_DIRECTORIES]`: Define directories considered as code roots for project analysis. **Modify this section to specify directories containing source code that should be analyzed for dependencies.**
+      - `[DOC_DIRECTORIES]`: Define directories considered as documentation roots. **Modify this section to specify directories containing project documentation that should be tracked.**
+      - `[LEARNING_JOURNAL]`: Review the learning journal for insights into system operations and best practices.
 
 ---
 
@@ -217,7 +221,7 @@ HDTA helps maintain a clear and organized project documentation structure, facil
 
 ## Troubleshooting
 
-- **Initialization Issues**: If the system fails to initialize, ensure that the core prompt is correctly loaded into the Cline extension and that all prerequisites are met. **Double-check that you have copied the content of `cline_docs/prompts/core_prompt(put this in Custom Instructions).md` into the Cline custom instructions field.**
+- **Initialization Issues**: If the system fails to initialize, ensure that the core prompt is correctly loaded into the Cline extension and that all prerequisites are met. **Double-check that you have copied the content of `.clinerules/core_prompt(put this in Custom Instructions).md` into the Cline custom instructions field.**
 - **Dependency Tracking Problems**: If you encounter issues with dependency tracking, use `analyze-project` to refresh the trackers and embeddings. Check `.clinerules` for correct configuration of code and documentation roots. **Ensure that the `[CODE_ROOT_DIRECTORIES]` and `[DOC_DIRECTORIES]` sections in `.clinerules` are correctly populated.**
   - You may need to manually delete the module_relationship_tracker and doc_tracker in cline_docs.
   - For mini-trackers I suggest manually deleting the content between the mini-tracker start and end markers. *IMPORTANT: do not remove the mini-tracker start and end markers, this will cause the entire file content to be overwritten, losing any information previously recorded.*

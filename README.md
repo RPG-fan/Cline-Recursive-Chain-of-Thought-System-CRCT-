@@ -154,7 +154,7 @@ Welcome to the **Cline Recursive Chain-of-Thought System (CRCT)**, a framework d
 
 3. **Set Up Cline or RooCode Extension**:
    - Open the project in VS Code with the Cline or RooCode extension installed.
-   - Copy `cline_docs/prompts/core_prompt(put this in Custom Instructions).md` into the Cline Custom Instructions field. (new process to be updated)
+   - Copy `.clinerules/core_prompt(put this in Custom Instructions).md` into the Cline Custom Instructions field.
 
 4. **Start the System**:
    - Type `Start.` in the Cline input to initialize the system.
@@ -168,7 +168,15 @@ Welcome to the **Cline Recursive Chain-of-Thought System (CRCT)**, a framework d
 
 ```
 Cline-Recursive-Chain-of-Thought-System-CRCT-/
-│   .clinerules/
+│   .clinerules/                  # System prompts and phase plugins
+│   │    core_prompt(put this in Custom Instructions).md
+│   │    setup_maintenance_plugin.md
+│   │    strategy_dispatcher_plugin.md
+│   │    strategy_worker_plugin.md
+│   │    execution_plugin.md
+│   │    cleanup_consolidation_plugin.md
+│   │    setup_worker.md
+│   │    default-rules.md
 │   .clinerules.config.json       # Configuration for dependency system
 │   .gitignore
 │   LICENSE
@@ -194,14 +202,6 @@ Cline-Recursive-Chain-of-Thought-System-CRCT-/
 │   │    REPORTING_SYSTEM.md      # Modular reporting guide
 │   │    ...
 │   ├──dependency_diagrams/       # Auto-generated diagrams
-│   ├──prompts/                   # System prompts and plugins
-│   │    core_prompt(put this in Custom Instructions).md
-│   │    cleanup_consolidation_plugin.md
-│   │    execution_plugin.md
-│   │    setup_maintenance_plugin.md
-│   │    setup_worker.md
-│   │    strategy_dispatcher_plugin.md
-│   │    strategy_worker_plugin.md
 │   ├──templates/                 # Templates for HDTA documents
 │   │    dispatcher_area_log_template.md
 │   │    hdta_review_progress_template.md

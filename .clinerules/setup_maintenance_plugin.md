@@ -83,6 +83,7 @@
 
 **Objective**: Ensure trackers accurately reflect project dependencies by systematically resolving placeholders ('p') and verifying suggestions ('s', 'S'), followed by an explicit code-to-documentation cross-referencing step. **This process MUST follow a specific order:**
 
+0. **Project-Wide Dependency Overview** (Aggregate check)
 1. `doc_tracker.md` (Placeholder/Suggestion Resolution)
 2. All Mini-Trackers (`*_module.md`) (Placeholder/Suggestion Resolution)
 3. `module_relationship_tracker.md` (Placeholder/Suggestion Resolution)
@@ -104,7 +105,7 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
 2. **`new_task`**
 3. **`resolve-placeholders`** (fallback when delegation tools are unavailable or failing)
 4. **Manual verification by the primary instance** (last resort only if all above options fail)
-*All delegated verification tasks must instruct the worker/subagent that its first action is to load and follow `cline_docs/prompts/setup_worker.md`.*
+*All delegated verification tasks must instruct the worker/subagent that its first action is to load and follow `.clinerules/setup_worker.md`.*
 *Neutrality requirement for delegated instructions is mandatory: delegated prompts must not suggest, bias, or imply an expected dependency type or expected existence/non-existence of a dependency.*
 
 ***CRITICAL EMPHASIS***: *It is critical that the documentation is **Exhaustively** cross-referenced against the code. The code cannot be completed properly if the docs that define it are not listed as a dependency. The following verification stages, especially Stage 4, are designed to achieve this.*
@@ -115,6 +116,7 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
 
 1. **Run Project Analysis (Initial & Updates)**:
     * Use `analyze-project` to automatically generate/update keys, analyze files, suggest dependencies ('p', 's', 'S'), and update *all* trackers (`module_relationship_tracker.md`, `doc_tracker.md`, and mini-trackers). This command creates trackers if they don't exist and populates/updates the grid based on current code/docs and configuration.
+    * **Verification of `system_manifest.md`**: After analysis, ensure `system_manifest.md` accurately lists all modules found. If `analyze-project` created new mini-trackers in directories not listed in the manifest, add them to the manifest. You will find a complete tracker list at `cline_utils/dependency_system/core/tracker_map.json` after running `analyze-project`. 
 
     ```bash
     python -m cline_utils.dependency_system.dependency_processor analyze-project
@@ -123,7 +125,15 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
     * *(Optional: Add `--force-analysis` or `--force-embeddings` if needed, e.g., if configuration changed or cache seems stale)*.
     * **Review logs (`debug.txt`, `suggestions.log`)** for analysis details and suggested changes, but prioritize the verification workflow below. State: "Ran analyze-project. Reviewing logs and proceeding with ordered verification."
 
-2. **Stage 1: Verify `doc_tracker.md`**:
+2. **Stage 0: Project-Wide Dependency Overview**:
+    * Run the bare `show-placeholders` command to query `tracker_map.json` and gauge the total verification debt across the project before processing individual trackers.
+    
+    ```bash
+    python -m cline_utils.dependency_system.dependency_processor show-placeholders
+    ```
+    * State: "Performed project-wide dependency overview. Proceeding to individual tracker verification."
+
+3. **Stage 1: Verify `doc_tracker.md`**:
     * **A. Identify Keys Needing Verification**:
         * Run `show-keys` for `doc_tracker.md`:
 
@@ -146,7 +156,7 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
             * **Get Context**: Run `show-placeholders` targeting the current tracker and key. This command specifically lists the 'p', 's', and 'S' relationships for the given key *within this tracker*, providing a targeted list for verification.
 
             ```bash
-            python -m cline_utils.dependency_system.dependency_processor show-placeholders --tracker <path_to_doc_tracker.md> --key <key_string>
+            python -m cline_utils.dependency_system.dependency_processor show-placeholders --tracker <path_to_doc_tracker.md> --key <key_string> --dep-char <char>
             ```
 
             * **Determine Verification Approach**: Assess the number of target files to verify for this key.
@@ -171,7 +181,7 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
                     Path: {source_file_path}
 
                     Task Objective
-                    Determine the dependency relationship between the source file and each target file listed below using the criteria from cline_docs/prompts/setup_worker.md.
+                    Determine the dependency relationship between the source file and each target file listed below using the criteria from .clinerules/setup_worker.md.
 
                     Dependency Criteria (from setup_maintenance_plugin.md)
                     < (Row Requires Column): Row relies on Column for context, logic, or operation
@@ -184,7 +194,7 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
                     [List target keys and paths for this chunk]
 
                     Instructions
-                    0. MANDATORY FIRST ACTION: Load and follow cline_docs/prompts/setup_worker.md before doing any dependency analysis.
+                    0. MANDATORY FIRST ACTION: Load and follow .clinerules/setup_worker.md before doing any dependency analysis.
                     1. Read the source file: {source_file_path}
                     2. For each target file above:
                        a. Read the target file
@@ -200,7 +210,7 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
                        [Repeat for each target file]
 
                     Important Notes
-                    - Apply the full relationship criteria from cline_docs/prompts/setup_worker.md.
+                    - Apply the full relationship criteria from .clinerules/setup_worker.md.
                     - Do not skip the required checks for relational and contextual necessity.
                     
                     Expected Output
@@ -241,7 +251,7 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
             * **Verify Keys**: Iterate through keys needing checks. Use `show-placeholders` to get a targeted list of unverified dependencies *within this mini-tracker*.
 
             ```bash
-            python -m cline_utils.dependency_system.dependency_processor show-placeholders --tracker <mini_tracker_path> --key <key_string>
+            python -m cline_utils.dependency_system.dependency_processor show-placeholders --tracker <mini_tracker_path> --key <key_string> --dep-char <char>
             ```
 
             * **Determine Verification Approach**: Use the delegation-first workflow defined in Stage 1, Step 2.B (including tool priority, fallback chain, and neutrality constraints).
@@ -300,7 +310,7 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
         * **Delegated Verification**:
             * Delegate determination of essential documentation links using neutral, evidence-first instructions.
             * Review returned reasoning and apply accepted links bi-directionally with `add-dependency`.
-            * Add Code -> Doc and Doc -> Code links using the appropriate tracker targets.
+            * Add Code -> Doc and Doc -> Code links using the appropriate tracker targets. **Note**: Adding these `d` links automatically updates tracking in `final_review_checklist.md` and triggers `populate_comments.py` to inject `[AUTO] CONNECTION_MAP` comments near class/function definitions in the source files.
         * Repeat for all relevant documentation keys for the current `code_key_string`.
     * **C. Repeat for All Code Keys**: Continue Step 5.B until all relevant code keys have been reviewed against the documentation corpus.
     * **MUP**: Perform MUP. Update `last_action`. State: "Completed Code-Documentation Cross-Reference."
@@ -459,7 +469,7 @@ graph TD
 2. **Task Structure**:
    * **Source File Information**: Include source key and source path.
    * **Task Objective**: State the verification objective without bias.
-   * **Worker Bootstrap**: Require that the first action is loading `cline_docs/prompts/setup_worker.md`.
+   * **Worker Bootstrap**: Require that the first action is loading `.clinerules/setup_worker.md`.
    * **Dependency Criteria**: Include the full dependency definitions from this plugin.
    * **Target List**: Provide the complete list of target keys and paths for the chunk
    * **Instructions**: Provide step-by-step instructions for the task
@@ -477,14 +487,14 @@ graph TD
    ```markdown
    Dependency Verification Task for Key {key_string}
    
-   **MANDATORY FIRST ACTION**: Load and follow `cline_docs/prompts/setup_worker.md`.
+   **MANDATORY FIRST ACTION**: Load and follow `.clinerules/setup_worker.md`.
 
    Source File
    Key: {key_string}
    Path: {source_file_path}
 
    Task Objective
-   Determine the dependency relationship between the source file and each target file listed below using the criteria from  `cline_docs/prompts/setup_worker.md`.
+   Determine the dependency relationship between the source file and each target file listed below using the criteria from  `.clinerules/setup_worker.md`.
 
    Target Files to Verify (Group {group_number})
    [List target keys and paths for this chunk]

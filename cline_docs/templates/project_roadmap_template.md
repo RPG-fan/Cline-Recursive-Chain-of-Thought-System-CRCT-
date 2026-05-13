@@ -45,6 +45,20 @@ graph TD
 <!-- High-level notes relevant to the entire project's execution or long-term strategy. -->
 *   {Placeholder: Note 1}
 
+## 6. Current Strategy Cycle: [Cycle ID]
+<!-- This section is updated by the Dispatcher at the end of each Strategy Phase. -->
+**Goals Addressed**: [Summary of cycle goals]
+
+### Unified Execution Sequence
+<!-- 
+Ordered list of Execution_* task files for the current cycle.
+The Execution instance will follow this list strictly.
+-->
+- [ ] `tasks/path/to/Execution_Task_1.md`
+- [ ] `tasks/path/to/Execution_Task_2.md`
+
+---
+
 <!-- 
 Instructions for Strategy Phase (Dispatcher Step 8 - Updating this Roadmap):
 - When a strategy cycle completes planning for specific areas:

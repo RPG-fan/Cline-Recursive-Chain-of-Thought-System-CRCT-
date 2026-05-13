@@ -1,6 +1,6 @@
 # Welcome to the Cline Recursive Chain-of-Thought System (CRCT)
 
-This outlines the fundamental principles, required files, workflow structure, and essential procedures that govern CRCT, the overarching framework within which all phases of operation function. Specific instructions and detailed procedures are provided in phase-specific plugin files in `cline_docs/prompts`.
+This outlines the fundamental principles, required files, workflow structure, and essential procedures that govern CRCT, the overarching framework within which all phases of operation function. Specific instructions and detailed procedures are provided in phase-specific plugin files in `.clinerules/`.
 
 **Important Clarifications:** The CRCT system operates in distinct *phases* (Set-up/Maintenance, Strategy, Execution, Cleanup/Consolidation), controlled **exclusively** by the `next_phase` setting in `.clinerules`. "Plan Mode" or any other "Mode" is independent of this system's *phases*. Plugin loading is *always* dictated by `next_phase`.
 
@@ -17,9 +17,10 @@ The dependencies in tracker grids (e.g., `pso4p`) are listed in a *compressed* f
 **At initialization the LLM MUST perform the following steps, IN THIS ORDER:**
     1. **Read `.clinerules/default-rules.md`**: Determine `current_phase`, `last_action`, and `next_phase`. Note: `.clinerules` is now a directory; the authoritative rules live in `.clinerules/default-rules.md`. Legacy fallbacks may exist, but all tooling should prefer `default-rules.md`.
     *Note: the `next_action` field may not be relevant if you have just been initialized, defer to `activeContext.md` to determine your next steps. If you see references to "MUP" in any context related to your next actions/steps in `.clinerules` or `activeContext.md` ignore that action/step-it is a relic left over from the last session and not your concern.*
-    2. **Load Plugin**: Based on `next_phase` indicated in `.clinerules`, load the corresponding plugin from `cline_docs/prompts/`. **YOU MUST LOAD THE PLUGIN INSTRUCTIONS. DO NOT PROCEED WITHOUT DOING SO.**
+    2. **Load Plugin**: Based on `next_phase` indicated in `.clinerules/default-rules.md`, load the corresponding plugin from `.clinerules/`. **YOU MUST LOAD THE PLUGIN INSTRUCTIONS. DO NOT PROCEED WITHOUT DOING SO.**
     3. **Read Core Files**: Read the specific files listed in Section II below. Do not re-read these if already loaded in the current session.
-    4. **Activate Environment**: Ensure the virtual environment is active before executing commands (or create, if one does not exist).
+    4. **Activate Environment**: Ensure the virtual environment is active before executing commands (Windows: `.\.venv\Scripts\Activate.ps1`, then run as `.\.venv\Scripts\python.exe -m ...`). Create if one does not exist.
+      - May not follow exact ".venv" naming convention, check to see if a venv exists in the root directory.
     **FAILURE TO COMPLETE THESE INITIALIZATION STEPS WILL RESULT IN ERRORS AND INVALID SYSTEM BEHAVIOR.**
 
 ## Guidelines for File Modification Tool Usage
@@ -97,7 +98,7 @@ Before proposing the use of any file modification tool, and **especially before 
 *Before generating **any** code, you **must** first load `execution_plugin.md`*
 
 **Explicit Dependency Tracking (CRITICAL FOUNDATION)**: Maintain comprehensive dependency records in `module_relationship_tracker.md`, `doc_tracker.md`, and mini-trackers.
-* Dependency analysis using `show-keys` and `show-dependencies` commands is **MANDATORY** before any planning or action in Strategy and Execution phases.
+* Dependency analysis using `show-keys`, `show-placeholders`, and `show-dependencies` commands is **MANDATORY** before any planning or action in Strategy and Execution phases.
 **UPDATED CLARIFICATION on keys for these commands**
   * When using these commands, if a base key string (e.g., "2A") refers to multiple items globally, you may need to specify the global instance (e.g., "2A#1", "2A#2"). The system will guide you if ambiguity exists.
 
@@ -115,6 +116,7 @@ These files form the project foundation. ***At initialization, you MUST read the
 * `changelog.md`
 * `userProfile.md`
 * `progress.md`
+* `final_review_checklist.md`
 
 **IMPORTANT: Do NOT attempt to read the content of `module_relationship_tracker.md`, `doc_tracker.md` directly.** Their existence should be verified by filename if needed, but their content (keys and dependencies) **MUST** be accessed *only* through `dependency_processor.py` commands, primarily `show-keys`, `show-dependencies`, and the specialized `show-placeholders` command. This conserves context tokens and ensures correct parsing.
 
@@ -127,9 +129,10 @@ If a required file (from the list below) is missing, handle its creation as spec
 | `activeContext.md`    | Tracks current state, decisions, priorities                | `{memory_dir}/`| Create manually with placeholder (e.g., `# Active Context`)                                                                                    |
 | `module_relationship_tracker.md`| Records module-level dependencies                         | `{memory_dir}/`| **DO NOT CREATE MANUALLY.** Use `python -m cline_utils.dependency_system.dependency_processor analyze-project` (Set-up/Maintenance phase) |
 | `changelog.md`        | Logs significant codebase changes                          | `{memory_dir}/`| Create manually with placeholder (e.g., `# Changelog`)                                                                                         |
-| `doc_tracker.md`      | Records documentation dependencies                         | `{doc_dir}/`   | **DO NOT CREATE MANUALLY.** Use `python -m cline_utils.dependency_system.dependency_processor analyze-project` (Set-up/Maintenance phase) |
+| `doc_tracker.md`      | Records documentation dependencies                         | `{memory_dir}/`| **DO NOT CREATE MANUALLY.** Use `python -m cline_utils.dependency_system.dependency_processor analyze-project` (Set-up/Maintenance phase) |
 | `userProfile.md`      | Stores user preferences and interaction patterns           | `{memory_dir}/`| Create manually with placeholder (e.g., `# User Profile`)                                                                                  |
 | `progress.md`         | High-level project checklist                               | `{memory_dir}/`| Create manually with placeholder (e.g., `# Project Progress`)                                                                              |
+| `final_review_checklist.md`| Tracks documentation coverage and unverified dependencies | Project root   | Create manually with placeholder (e.g., `# Final Review Checklist`)                                                                         |
 
 *Notes*:
 * `{memory_dir}` (e.g., `cline_docs/`) is for operational memory; `{doc_dir}` (e.g., `docs/`) is for project documentation. These paths are configurable via `.clinerules.config.json` and stored in `.clinerules`. A "module" is a top-level directory within the project code root(s).
@@ -163,7 +166,7 @@ next_phase: "Set-up/Maintenance"
 
 ## III. Recursive Chain-of-Thought Loop & Plugin Workflow
 
-**Workflow Entry Point & Plugin Loading:** Begin each CRCT session by reading `.clinerules/default-rules.md` (in the project root under the `.clinerules` directory) to determine `current_phase` and `last_action`. **Based on `next_phase`, load corresponding plugin from `cline_docs/prompts/`.** For example, if `.clinerules/default-rules.md` indicates `next_phase: Strategy`, load `strategy_dispatcher_plugin.md` *in conjunction with these Custom instructions*.
+**Workflow Entry Point & Plugin Loading:** Begin each CRCT session by reading `.clinerules/default-rules.md` (in the project root under the `.clinerules` directory) to determine `current_phase` and `last_action`. **Based on `next_phase`, load corresponding plugin from `.clinerules/`.** For example, if `.clinerules/default-rules.md` indicates `next_phase: Strategy`, load `strategy_dispatcher_plugin.md` *in conjunction with these Custom instructions*.
 
 **CRITICAL REMINDER**: Before any planning or action, especially in Strategy and Execution phases, you **MUST** analyze dependencies using `show-keys` and `show-dependencies` commands to understand existing relationships. **Failure to do so is a CRITICAL FAILURE**, as the CRCT system depends on this knowledge to generate accurate plans and avoid catastrophic missteps. Dependency checking is your first line of defense against project failure.
 
@@ -331,21 +334,21 @@ The MUP must be followed immediately after any state-changing action:
 
 ## VIII. Dependency Processor Command Overview
 
-Located in `cline_utils/`. **All commands are executed via `python -m cline_utils.dependency_system.dependency_processor <command> [args...]`.** Most commands return a status message upon completion.
+Located in `cline_utils/`. **All commands are executed via `.\.venv\Scripts\python.exe -m cline_utils.dependency_system.dependency_processor <command> [args...]`.** Most commands return a status message upon completion.
 
 **IMPORTANT: To ensure data consistency, conserve context window tokens, and leverage built-in parsing logic, ALWAYS use the `show-keys`, `show-dependencies`, and `show-placeholders` commands to retrieve key definitions and dependency information from tracker files (`*_tracker.md`, `*_module.md`). Avoid using `read_file` on tracker files for this purpose.** Direct reading can lead to parsing errors and consumes excessive context.
 
 **Core Commands for CRCT Workflow:**
 
-1. **`analyze-project [<project_root>] [--output <json_path>] [--force-embeddings] [--force-analysis]`**:
+1. **`analyze-project [<project_root>] [--output <json_path>] [--force-embeddings] [--force-analysis] [--force-validate]`**:
     * **Purpose**: The primary command for maintaining trackers. Analyzes the project, updates/generates keys, creates/updates tracker files (`module_relationship_tracker.md`, `doc_tracker.md`, mini-trackers), generates embeddings, and suggests dependencies ('p', 's', 'S'). Run this during Set-up/Maintenance and after significant code changes. Creates trackers if missing.
     * **Example**:
 
     ```python
-     `python -m cline_utils.dependency_system.dependency_processor analyze-project`
+     `.\.venv\Scripts\python.exe -m cline_utils.dependency_system.dependency_processor analyze-project`
     ```
 
-    * **Flags**: `--force-analysis` bypasses caches; `--force-embeddings` forces embedding recalculation.
+    * **Flags**: `--force-analysis` bypasses caches; `--force-embeddings` forces embedding recalculation; `--force-validate` forces a fresh resource validation check.
     * **Errors**: Check `debug.txt`, `suggestions.log`. Common issues: incorrect paths in config, file permissions, embedding model issues.
 
 2. **`show-dependencies --key <key>`**:
@@ -353,7 +356,7 @@ Located in `cline_utils/`. **All commands are executed via `python -m cline_util
     * **Example**:
 
     ```python
-     `python -m cline_utils.dependency_system.dependency_processor show-dependencies --key 3Ba2#1`
+     `.\.venv\Scripts\python.exe -m cline_utils.dependency_system.dependency_processor show-dependencies --key 3Ba2#1`
     ```
 
     * **IMPORTANT**: The key used with `show-dependencies` is the *row*. The output keys listed are the *column* keys that have a dependency with the *row* key you provided to the `show-dependencies` command.
@@ -366,7 +369,7 @@ Located in `cline_utils/`. **All commands are executed via `python -m cline_util
     **Example**:
 
     ```python
-    python -m cline_utils.dependency_system.dependency_processor add-dependency --tracker cline_docs/module_relationship_tracker.md --source-key 2Aa --target-key 1Bd 1Be --dep-type ">"
+    `.\.venv\Scripts\python.exe -m cline_utils.dependency_system.dependency_processor add-dependency --tracker cline_docs/module_relationship_tracker.md --source-key 2Aa --target-key 1Bd --dep-type ">"`
      ```
 
     *(Note: This command applies the *single* `--dep-type` to *all* specified target keys relative to the source key.)*
@@ -414,16 +417,17 @@ Located in `cline_utils/`. **All commands are executed via `python -m cline_util
         --- End of Key Definitions ---
         ```
 
-6. **`show-placeholders --tracker <tracker_file> [--key <key>] [--dep-char <char>]`**:
-    * **Purpose**: Provides a targeted view of unverified dependencies ('p', 's', 'S') for keys within a *single specified tracker*. This is the **primary tool** used during the Set-up/Maintenance verification workflow to get a clear list of what needs to be investigated for a given key.
+ 6. **`show-placeholders [--tracker <tracker_file>] [--key <key>] [--dep-char <char>]`**:
+    * **Purpose**: Provides a view of unverified dependencies ('p', 's', 'S').
+        * **Aggregate View (Project-Wide)**: Running *without* the `--tracker` argument queries the global `tracker_map.json` to provide an aggregate summary of all unverified dependencies across the entire project. This is highly efficient for gauging total verification debt.
+        * **Targeted View (Single Tracker)**: Specifying the `--tracker` provides a detailed list for keys within that specific file. This is the primary tool used during the Set-up/Maintenance verification workflow.
     * **Arguments**:
-        * `--tracker`: The tracker file to inspect.
+        * `--tracker` (optional): The tracker file to inspect. If omitted, performs a project-wide aggregate check.
         * `--key` (optional): Focuses the output on a single source key (row).
-        * `--dep-char` (optional): Filters the output to show only a specific character (e.g., 'p'). By default, it shows 'p', 's', and 'S'.
+        * `--dep-char` (optional): Filters the output to show only a specific character (e.g., 'p', 's', 'S'). By default, it shows all three.
     * **Example**:
-
-    ```python
-     `python -m cline_utils.dependency_system.dependency_processor show-placeholders --tracker cline_docs/doc_tracker.md --key 1A2`
+    ```bash
+    python -m cline_utils.dependency_system.dependency_processor show-placeholders --tracker cline_docs/doc_tracker.md --key 1A2 --dep-char p
     ```
 
     * **Output Example**:
@@ -431,34 +435,51 @@ Located in `cline_utils/`. **All commands are executed via `python -m cline_util
         ```
         Unverified dependencies ('p', 's', 'S') in doc_tracker.md:
 
-        --- Key: 1A2 ---
-          p: 2B1#2 3C4
-          s: 4D1
+        --- Key: 1A2 (Path: docs/setup.md) [Tokens: 450] ---
+          p:
+            - 2B1#2 (Path: docs/api/users.md) [Tokens: 800]
+            - 3C4 (Path: docs/utils/helpers.md) [Tokens: 300]
+          s:
+            - 4D1 (Path: docs/arch.md) [Tokens: 1200]
         ```
+
+        **Note on In-Code Comments (`populate_comments.py`)**: Commands that modify trackers (like `analyze-project` and `add-dependency`) automatically trigger `populate_comments.py`. This script injects or updates `[AUTO] STATION_HEADER` (listing the file's key) and `[AUTO] CONNECTION_MAP` (listing verified dependencies) comments near class or function definitions in source files. These comments provide immediate, in-file contextual awareness of the file's place in the CRCT system.
 
     **Configuration & Utility Commands:**
 
-7. **`update-config <key_path> <value>`**:
-    * **Purpose**: Updates a specific setting in the `.clinerules.config.json` file (which stores detailed configuration for the dependency system). Primarily used during setup or for tuning.
-    * **Example**: `python -m cline_utils.dependency_system.dependency_processor update-config thresholds.code_similarity 0.8`
-    * **Example**: `python -m cline_utils.dependency_system.dependency_processor update-config models.doc_model_name all-MiniLM-L6-v2`
-    * **Keys**: `paths.doc_dir`, `paths.code_root_dirs`, `models.doc_model_name`, `models.code_model_name`, `thresholds.doc_similarity`, `thresholds.code_similarity`, `compute.embedding_device`, etc.
+7. **`visualize-dependencies [--key [<key1> <key2> ...]] [--output <output_path>] [--backend <mermaid|native>] [--format <mermaid|svg>]`**:
+    * **Purpose**: Generates a Mermaid or SVG visualization of dependencies. Use for complex refactors or onboarding. If `--key` is omitted, generates a full project overview.
+    * **Example**: `.\.venv\Scripts\python.exe -m cline_utils.dependency_system.dependency_processor visualize-dependencies --key 2A1 3B2 --output cline_docs/dependency_diagrams/focus_view.md`
 
-8. **`reset-config`**:
-    * **Purpose**: Resets all settings in `.clinerules.config.json` to their default values. Use with caution.
-    * **Example**: `python -m cline_utils.dependency_system.dependency_processor reset-config`
+8. **`resolve-placeholders [--tracker <tracker_file>] [--key <key>] [--limit <n>] [--dep-char <char>] [--model <path>]`**:
+    * **Purpose**: Automatically attempt to resolve unverified dependencies (usually 'p') using Local LLM reasoning in batches. Use `--limit` to control the number of resolutions per pass (default 200). Use `--dep-char` to focus on specific types (e.g., 's' for semantic).
 
-9. **`merge-trackers <primary_tracker> <secondary_tracker> [--output <output_path>]`**: Merges two tracker files. (Advanced use).
-10. **`export-tracker <tracker_file> [--format <json|csv|dot>] [--output <output_path>]`**: Exports tracker data. (Useful for visualization/external analysis).
-11. **`clear-caches`**: Clears internal caches used by the dependency system (embeddings, analysis results). Useful for debugging or forcing re-computation.
+9. **`determine-dependency --source-key <key> --target-key <key> [--model <path>]`**:
+    * **Purpose**: Uses Local LLM reasoning to determine the relationship between two specific keys.
+
+10. **`analyze-file <file_path> [--output <json_path>]`**:
+    * **Purpose**: Performs a deep analysis of a single file and outputs its symbol map and identified dependencies in JSON format. Useful for debugging specific file parsing issues.
+
+11. **`merge-trackers <primary_tracker> <secondary_tracker> [--output <output_path>]`**:
+    * **Purpose**: Merges two tracker files. (Advanced use).
+
+12. **`export-tracker <tracker_file> [--format <json|csv|dot|md>] [--output <output_path>]`**:
+    * **Purpose**: Exports tracker data for external analysis or conversion.
+
+13. **`clear-caches`**:
+    * **Purpose**: Clears internal caches (embeddings, analysis results, resource validation). Use for troubleshooting if the system seems stuck on stale data.
+
+14. **`update-config <key_path> <value>` / `reset-config`**:
+    * **Purpose**: Manage system configuration in `.clinerules.config.json`.
+
 
 ## IX. Plugin Usage Guidance
 
 **Always check `.clinerules/default-rules.md` for `next_phase` and load the corresponding plugin.**
-* **Set-up/Maintenance**: Initial setup, adding modules/docs, periodic maintenance and dependency verification (`cline_docs/prompts/setup_maintenance_plugin.md`).
-* **Strategy**: Orchestrated by a **Dispatcher** (`cline_docs/prompts/strategy_dispatcher_plugin.md`) which delegates detailed area planning to **Worker** instances (`cline_docs/prompts/strategy_worker_plugin.md`). Focuses on task decomposition, HDTA planning, and dependency-driven sequencing.
-* **Execution**: Task execution based on plans, code/file modifications (`cline_docs/prompts/execution_plugin.md`).
-* **Cleanup/Consolidation**: Post-execution organization, changelog grooming, temporary file cleanup (`cline_docs/prompts/cleanup_consolidation_plugin.md`).
+* **Set-up/Maintenance**: Initial setup, adding modules/docs, periodic maintenance and dependency verification (`.clinerules/setup_maintenance_plugin.md`).
+* **Strategy**: Orchestrated by a **Dispatcher** (`.clinerules/strategy_dispatcher_plugin.md`) which delegates detailed area planning to **Worker** instances (`.clinerules/strategy_worker_plugin.md`). Focuses on task decomposition, HDTA planning, and dependency-driven sequencing.
+* **Execution**: Task execution based on plans, code/file modifications (`.clinerules/execution_plugin.md`).
+* **Cleanup/Consolidation**: Post-execution organization, changelog grooming, temporary file cleanup (`.clinerules/cleanup_consolidation_plugin.md`).
 
 ## X. Identifying Code Root Directories
 
@@ -542,6 +563,6 @@ To ensure system state consistency and accurate tracking, the LLM **MUST** perfo
 
 ## XIV. Conclusion
 
-The CRCT framework manages complex tasks via recursive decomposition and persistent state across distinct phases: Set-up/Maintenance, Strategy, Execution, and Cleanup/Consolidation. Adhere to this core prompt and the phase-specific plugin instructions loaded from `cline_docs/prompts/` for effective task management. Always prioritize understanding dependencies and maintaining accurate state through the MUP.
+The CRCT framework manages complex tasks via recursive decomposition and persistent state across distinct phases: Set-up/Maintenance, Strategy, Execution, and Cleanup/Consolidation. Adhere to this core prompt and the phase-specific plugin instructions loaded from `.clinerules/` for effective task management. Always prioritize understanding dependencies and maintaining accurate state through the MUP.
 
 **Adhere to the "Don't Repeat Yourself" (DRY) and Separation of Concerns principles.**

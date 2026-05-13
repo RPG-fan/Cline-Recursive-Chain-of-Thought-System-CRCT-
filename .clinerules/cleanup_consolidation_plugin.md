@@ -119,7 +119,7 @@
         *   **Purpose**: To ensure all high-level tracking documents are up-to-date, and that incomplete items from older versions are not lost. This review covers all files identified in step 1a (excluding HDTA templates), processed in batches to prevent context overload.
         *   **Procedure**:
             i. **Batch Creation**:
-                - **Action**: Divide the comprehensive list of Strategic Tracking documents (from step 1a, e.g., `*roadmap*.md`, `*checklist*.md`, `*review_progress*.md`) into batches, with each batch containing **no more than 10 files**. If the total number of files is not evenly divisible by 10, the final batch may contain fewer than 10 files.
+                - **Action**: Divide the comprehensive list of Strategic Tracking documents (from step 1a, e.g., `*roadmap*.md`, `*checklist*.md`, `*review_progress*.md`, and explicitly `final_review_checklist.md`) into batches, with each batch containing **no more than 10 files**. If the total number of files is not evenly divisible by 10, the final batch may contain fewer than 10 files.
                 - **Action**: Maintain a record of which files have been processed to ensure no files are missed or processed twice.
             ii. **Process Each Batch (Standalone Processing)**:
                 - **Action**: For each batch of up to 10 Strategic Tracking documents, **fully process the batch as a standalone task** before proceeding to the next batch. This means completing all reading, consolidation, updating, and extraction actions for all files in the batch with no inter-batch dependencies for these actions.
