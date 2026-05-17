@@ -2702,12 +2702,9 @@ def handle_normalize_docs(args: argparse.Namespace) -> int:
        to transparency_registry.json, leaving the physical file completely clean.
     """
     from cline_utils.dependency_system.io.normalize_docs import (
-        normalize_single_file,
+        normalize_docs_batch,
         load_transparency_registry,
-        REQUIRED_MARKERS,
-    )
-    from cline_utils.dependency_system.io.transparency_manager import (
-        get_transparency_manager,
+        find_normalization_candidates,
     )
     from cline_utils.dependency_system.analysis.local_llm_processor import (
         LocalLLMProcessor,
@@ -2727,61 +2724,16 @@ def handle_normalize_docs(args: argparse.Namespace) -> int:
     )
 
     # Find candidate files
-    candidates: list[str] = []
-    if args.file:
-        full_path = os.path.abspath(args.file)
-        if os.path.isfile(full_path):
-            candidates.append(full_path)
-        else:
-            print(f"Error: Specified file not found: {args.file}")
-            return 1
-    else:
-        for doc_dir in doc_dirs:
-            if not os.path.isdir(doc_dir):
-                continue
-            for root, _, files in os.walk(doc_dir):
-                for file in sorted(files):
-                    if file.endswith(".md"):
-                        filepath = os.path.normpath(os.path.join(root, file))
-                        filepath_lower = filepath.lower()
-
-                        # Skip if registered
-                        if filepath_lower in registered_files:
-                            continue
-
-                        # Check compliance and placeholders
-                        with open(filepath, "r", encoding="utf-8") as f:
-                            content = f.read()
-
-                        # If the tagging system is already present, skip to avoid re-processing converted files
-                        if "---TAGS_START---" in content:
-                            continue
-
-                        # We always normalize files that have placeholders or are missing markers.
-                        missing_markers = [
-                            m for m in REQUIRED_MARKERS if m not in content
-                        ]
-                        has_placeholders = "[FILL:" in content
-                        has_links_in_details = False
-
-                        # Check if "Documentation Links" or other reference headers exist under details
-                        if "## Details" in content:
-                            details_section = content.split("## Details")[1].split(
-                                "## References"
-                            )[0]
-                            if any(
-                                hdr in details_section
-                                for hdr in [
-                                    "Documentation Links",
-                                    "Links",
-                                    "See Also",
-                                    "Related Files",
-                                ]
-                            ):
-                                has_links_in_details = True
-
-                        if missing_markers or has_placeholders or has_links_in_details:
-                            candidates.append(filepath)
+    try:
+        candidates = find_normalization_candidates(
+            project_root=project_root,
+            doc_dirs=doc_dirs,
+            registered_files=registered_files,
+            file_path_arg=args.file,
+        )
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        return 1
 
     total_candidates = len(candidates)
     logger.info(
@@ -2791,14 +2743,6 @@ def handle_normalize_docs(args: argparse.Namespace) -> int:
     if total_candidates == 0:
         print("All files are fully compliant and resolved!")
         return 0
-
-    # Limit scope info
-    if args.dry_run:
-        print("\n=== DRY RUN MODE: Will process up to 2 candidates ===")
-        limit = min(2, total_candidates)
-    else:
-        limit = args.limit
-        print(f"\nWill process up to {limit} successfully normalized candidate files.")
 
     # Initialize Local LLM
     model_path = (
@@ -2812,42 +2756,17 @@ def handle_normalize_docs(args: argparse.Namespace) -> int:
 
     logger.info(f"Initializing local LLM from {model_path}...")
     processor = LocalLLMProcessor(model_path=model_path)
-    manager = get_transparency_manager()
 
-    processed_count = 0
-
-    for filepath in candidates:
-        # Check limit constraints
-        if processed_count >= limit:
-            break
-
-        rel_path = os.path.relpath(filepath, project_root)
-        print(f"\n[{processed_count+1}/{limit}] Processing: {rel_path}")
-
-        # Step 1: Normalize
-        success = normalize_single_file(
-            filepath=filepath,
-            processor=processor,
-            project_root=project_root,
-            dry_run=args.dry_run,
-        )
-
-        if success:
-            processed_count += 1
-            if not args.dry_run:
-                # Step 2: Virtualize (remove physical markers and relocate to registry)
-                print(
-                    f"Relocating compliance markers for {rel_path} to transparency registry..."
-                )
-                if manager.remove_markers(filepath):
-                    print(
-                        f"Successfully virtualized metadata for {rel_path} to registry."
-                    )
-                else:
-                    print(f"Warning: Failed to virtualize metadata for {rel_path}.")
+    # Use the reusable batch normalization function
+    normalize_docs_batch(
+        candidates=candidates,
+        processor=processor,
+        project_root=project_root,
+        limit=args.limit,
+        dry_run=args.dry_run,
+    )
 
     processor.close()
-    print(f"\nDone! Successfully processed and virtualized {processed_count} files.")
     return 0
 
 
