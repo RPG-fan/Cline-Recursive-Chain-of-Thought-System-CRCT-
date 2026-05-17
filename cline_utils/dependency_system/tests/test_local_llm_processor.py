@@ -1,43 +1,49 @@
+import pytest
+from typing import Any
 from cline_utils.dependency_system.analysis import local_llm_processor as llm_mod
 
 
-class _FakeConfigManager:
-    def __init__(self):
-        self.config = {}
-
-    def get_embedding_setting(self, setting_name, default=None):
-        if setting_name == "qwen3_context_length":
-            return 32768
-        if setting_name == "qwen3_gpu_layers":
-            return 5
-        return default
-
-
 class _FakeLlama:
-    created = []
+    created: list[dict[str, int]] = []
 
-    def __init__(self, model_path, n_ctx, n_gpu_layers, verbose):
+    def __init__(
+        self,
+        model_path: str,
+        n_ctx: int,
+        n_gpu_layers: int,
+        verbose: bool,
+        **kwargs: Any
+    ) -> None:
+        super().__init__()
         self.model_path = model_path
         self.n_ctx = n_ctx
         self.n_gpu_layers = n_gpu_layers
         self.verbose = verbose
         _FakeLlama.created.append({"n_ctx": n_ctx, "n_gpu_layers": n_gpu_layers})
 
-    def tokenize(self, payload):
+    def tokenize(self, payload: bytes) -> list[int]:
         text = payload.decode("utf-8", errors="ignore")
         return [1] * max(1, len(text) // 4)
 
-    def __call__(self, prompt, max_tokens, stop, echo):
-        return {"choices": [{"text": "d"}]}
+    def __call__(
+        self,
+        prompt: str,
+        max_tokens: int,
+        stop: list[str] | None,
+        echo: bool,
+        **kwargs: Any
+    ) -> dict[str, list[dict[str, str]]]:
+        return {"choices": [{"text": "a.py b.py -> n\nReasoning: No relationship."}]}
 
 
-def test_token_based_context_sizing_avoids_unneeded_32768_reload(monkeypatch):
+def test_token_based_context_sizing_avoids_unneeded_32768_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _FakeLlama.created.clear()
-    monkeypatch.setattr(llm_mod, "ConfigManager", _FakeConfigManager)
     monkeypatch.setattr(llm_mod, "Llama", _FakeLlama)
 
     processor = llm_mod.LocalLLMProcessor(model_path="models/fake.gguf")
-    result = processor.determine_dependency(
+    result, _ = processor.determine_dependency(
         source_content="source",
         target_content="target",
         source_basename="source.md",
@@ -48,23 +54,24 @@ def test_token_based_context_sizing_avoids_unneeded_32768_reload(monkeypatch):
     )
     processor.close()
 
-    assert result == "d"
+    assert result == "n"
     assert _FakeLlama.created
     assert max(entry["n_ctx"] for entry in _FakeLlama.created) <= 16384
 
 
-def test_local_llm_uses_configured_gpu_layers(monkeypatch):
+def test_local_llm_calculates_gpu_layers_dynamically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _FakeLlama.created.clear()
 
-    class _ConfiguredLayers(_FakeConfigManager):
-        def get_embedding_setting(self, setting_name, default=None):
-            if setting_name == "qwen3_context_length":
-                return 16384
-            if setting_name == "qwen3_gpu_layers":
-                return 11
-            return default
+    class FakeResourceValidator:
+        def validate_gpu(self) -> dict[str, Any]:
+            return {"gpu_available": True, "vram_available_mb": 4000.0}  # 4GB VRAM
 
-    monkeypatch.setattr(llm_mod, "ConfigManager", _ConfiguredLayers)
+        def wait_for_vram_release(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    monkeypatch.setattr(llm_mod, "ResourceValidator", FakeResourceValidator)
     monkeypatch.setattr(llm_mod, "Llama", _FakeLlama)
 
     processor = llm_mod.LocalLLMProcessor(model_path="models/fake.gguf")
@@ -79,5 +86,8 @@ def test_local_llm_uses_configured_gpu_layers(monkeypatch):
     )
     processor.close()
 
-    assert _FakeLlama.created
-    assert all(entry["n_gpu_layers"] == 11 for entry in _FakeLlama.created)
+    assert len(_FakeLlama.created) >= 2
+    # The first load is the tokenizer-only load with n_gpu_layers=0
+    assert _FakeLlama.created[0]["n_gpu_layers"] == 0
+    # The second load is the inference load which dynamically calculated layers > 0
+    assert _FakeLlama.created[1]["n_gpu_layers"] > 0
