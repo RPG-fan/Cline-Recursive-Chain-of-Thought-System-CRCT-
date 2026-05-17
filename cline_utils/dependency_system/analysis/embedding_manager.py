@@ -13,13 +13,17 @@ import sys
 import textwrap
 import threading
 import urllib.request
-from typing import Any, Dict, List, Optional, Set, Tuple, cast
+from typing import Any, Dict, List, Optional, Set, Tuple, Sequence, cast
 
 import numpy as np
 from cline_utils.dependency_system.io.file_io import (
     read_file_content_safely,
-    calculate_content_hash,
     strip_auto_generated_blocks,
+)
+from cline_utils.dependency_system.utils.calculate_hash import calculate_content_hash
+from cline_utils.dependency_system.io.transparency_manager import (
+    extract_connection_map_metadata,
+    read_file_transparently,
 )
 import torch
 
@@ -553,29 +557,6 @@ def _unload_model():
             torch.cuda.empty_cache()
 
 
-def _encode_text(text: str, model_config: Dict[str, Any]) -> np.ndarray:
-    """Encode text using the appropriate model type with normalization."""
-    model = _load_model()
-
-    if model is None:
-        raise RuntimeError("Model not loaded properly")
-
-    if model_config["type"] == "gguf":
-        # GGUF model encoding (logging already suppressed via callback)
-        embedding = model.embed(text)
-        if embedding is None:
-            raise RuntimeError("GGUF model returned None")
-        arr = np.array(embedding, dtype=np.float32)
-    else:
-        arr = model.encode(text, show_progress_bar=True, convert_to_numpy=True)
-        arr = np.array(arr, dtype=np.float32)
-
-    norm = np.linalg.norm(arr)
-    if norm > 0:
-        arr = arr / norm
-    return arr
-
-
 # --- SES (Symbol Essence String) Logic ---
 def _load_project_symbol_map() -> Dict[str, Dict[str, Any]]:
     """Loads the project_symbol_map.json."""
@@ -669,14 +650,33 @@ def generate_symbol_essence_string(
     # Check for token count to decide whether to use full content or summarized SES
     full_tokens = symbol_data.get("full_tokens")
     content = ""
+    transparency_metadata = None
 
     # Try to load content if not already loaded or if we need to count tokens
     if os.path.exists(file_path):
-        raw_content = read_file_content_safely(file_path)
+        raw_content, transparency_metadata = read_file_transparently(file_path)
         if raw_content is not None:
             content = strip_auto_generated_blocks(raw_content, file_path)
         else:
             content = ""
+
+    connection_maps = extract_connection_map_metadata(content, transparency_metadata)
+    if connection_maps:
+        parts.append("CONNECTION_MAPS:")
+        for record in connection_maps[:200]:
+            target_line = record.get("target_line")
+            target_line_text = str(target_line) if target_line is not None else "?"
+            source_line = record.get("source_line")
+            source_line_text = str(source_line) if source_line is not None else "?"
+            parts.append(
+                "  "
+                f"{record.get('source_symbol', 'unknown')}:{source_line_text} -> "
+                f"{record.get('target_key', '?')}("
+                f"{record.get('target_symbol', 'file')}:{target_line_text}) "
+                f"{{{record.get('dep_char', '?')}}}"
+            )
+        if len(connection_maps) > 200:
+            parts.append("  ... (truncated)")
 
     if full_tokens is None and content:
         # Look up in metadata.json first
@@ -743,10 +743,8 @@ def generate_symbol_essence_string(
         )
 
         top_decorators: Dict[str, int] = {}
-        for d in cast(List[Any], symbol_data.get("decorators_used", [])):
-            if not isinstance(d, dict):
-                continue
-            d_name = cast(str, d.get("name", "")).strip()
+        for d in cast(List[Dict[str, Any]], symbol_data.get("decorators_used", [])):
+            d_name = str(d.get("name", "")).strip()
             if d_name:
                 top_decorators[d_name] = top_decorators.get(d_name, 0) + 1
         if top_decorators:
@@ -759,12 +757,10 @@ def generate_symbol_essence_string(
             parts.append(f"PY_TOP_DECORATORS: {decorator_summary}")
 
         top_exceptions: Dict[str, int] = {}
-        for ex in cast(List[Any], symbol_data.get("exceptions_handled", [])):
-            if not isinstance(ex, dict):
-                continue
-            ex_name = cast(str, ex.get("type_name_str", "")).strip()
-            if ex_name:
-                top_exceptions[ex_name] = top_exceptions.get(ex_name, 0) + 1
+        for exc in cast(List[Dict[str, Any]], symbol_data.get("exceptions_raised", [])):
+            exc_name = str(exc.get("type_name_str", "")).strip()
+            if exc_name:
+                top_exceptions[exc_name] = top_exceptions.get(exc_name, 0) + 1
         if top_exceptions:
             exception_summary = ", ".join(
                 f"{k} x{v}" if v > 1 else k
@@ -775,32 +771,32 @@ def generate_symbol_essence_string(
             parts.append(f"PY_TOP_EXCEPTIONS: {exception_summary}")
 
         top_type_refs: Dict[str, int] = {}
-        for t in cast(List[Any], symbol_data.get("type_references", [])):
-            if not isinstance(t, dict):
-                continue
-            t_name = cast(str, t.get("type_name_str", "")).strip()
+        for t in cast(List[Dict[str, Any]], symbol_data.get("type_references", [])):
+            t_name = str(t.get("type_name_str", "")).strip()
             if t_name:
                 top_type_refs[t_name] = top_type_refs.get(t_name, 0) + 1
         if top_type_refs:
             type_ref_summary = ", ".join(
                 f"{k} x{v}" if v > 1 else k
                 for k, v in sorted(
-                    top_type_refs.items(), key=lambda kv: (-kv[1], kv[0])
+                    top_type_refs.items(),
+                    key=lambda kv: (-kv[1], kv[0]),
                 )[:100]
             )
             parts.append(f"PY_TOP_TYPES: {type_ref_summary}")
 
-    # 3. Classes (with Runtime Enhancements)
-    classes = symbol_data.get("classes", [])
+    classes = cast(List[Dict[str, Any]], symbol_data.get("classes", []))
     if classes:
-        for c in cast(List[Any], classes):
-            if not isinstance(c, dict):
-                continue
-            c_name = cast(str, c.get("name", "unknown"))
-            c_doc = (c.get("docstring") or "").strip()
+        for c in classes:
+            c_name = str(c.get("name", "unknown")).strip()
+            c_doc = str(c.get("docstring") or "").strip()
             if len(c_doc) > 500:
                 c_doc = c_doc[:500] + "..."
-            parts.append(f"CLASS: {c_name}")
+            if c_doc:
+                parts.append(f"CLASS: {c_name}")
+                parts.append(f"  DOC: {c_doc}")
+            else:
+                parts.append(f"CLASS: {c_name}")
 
             # Add inheritance info (runtime)
             inheritance = c.get("inheritance", {})
@@ -820,11 +816,10 @@ def generate_symbol_essence_string(
             methods = c.get("methods", [])
             if methods:
                 method_names: List[str] = []
-                for m_item in cast(List[Any], methods):
-                    if isinstance(m_item, dict):
-                        m_name = cast(str, m_item.get("name", "")).strip()
-                        if m_name:
-                            method_names.append(m_name)
+                for m_item in methods:
+                    m_name = str(m_item.get("name", "")).strip()
+                    if m_name:
+                        method_names.append(m_name)
                 if method_names:
                     shown_names = method_names[:500]
                     suffix = ", ..." if len(method_names) > 500 else ""
@@ -833,10 +828,8 @@ def generate_symbol_essence_string(
                 max_method_details = (
                     100 if (full_tokens and full_tokens > 20000) else 500
                 )
-                for m in cast(List[Any], methods)[:max_method_details]:
-                    if not isinstance(m, dict):
-                        continue
-                    m_name = m["name"]
+                for m in methods[:max_method_details]:
+                    m_name = str(m.get("name", "unknown"))
 
                     # Prefer runtime signature over params
                     m_sig = m.get("signature")
@@ -934,9 +927,8 @@ def generate_symbol_essence_string(
     functions = symbol_data.get("functions", [])
     if functions:
         parts.append("FUNCTIONS:")
-        for f in cast(List[Any], functions)[:1000]:
-            if not isinstance(f, dict):
-                continue
+        functions_list = cast(List[Dict[str, Any]], functions)
+        for f in functions_list[:1000]:
             name = f["name"]
 
             # Prefer runtime signature
@@ -1011,9 +1003,8 @@ def generate_symbol_essence_string(
     calls = symbol_data.get("calls", [])
     if calls:
         call_counts: Dict[str, int] = {}
-        for c in cast(List[Any], calls):
-            if not isinstance(c, dict):
-                continue
+        calls_list = cast(List[Dict[str, Any]], calls)
+        for c in calls_list:
             target = str(c.get("target_name") or "").strip()
             source = str(c.get("potential_source") or "").strip()
 
@@ -1074,11 +1065,10 @@ def generate_symbol_essence_string(
     if exports:
         parts.append("EXPORTS:")
         seen_exports: Set[str] = set()
-        for e in cast(List[Any], exports):
-            if not isinstance(e, dict):
-                continue
-            e_name = cast(str, e.get("name", e.get("default", "unknown"))).strip()
-            e_from = cast(str, e.get("from", "")).strip()
+        exports_list = cast(List[Dict[str, Any]], exports)
+        for e in exports_list:
+            e_name = str(e.get("name") or e.get("default") or "unknown").strip()
+            e_from = str(e.get("from") or "").strip()
             if not e_name:
                 continue
             line = f"{e_name} <- {e_from}" if e_from else e_name
@@ -1093,11 +1083,9 @@ def generate_symbol_essence_string(
     if lit_assigns:
         parts.append("LITERAL_ASSIGNMENTS:")
         seen_assigns: Set[str] = set()
-        for a in cast(List[Any], lit_assigns):
-            if not isinstance(a, dict):
-                continue
-            a_name = cast(str, a.get("name", "unknown")).strip()
-            a_val = cast(str, a.get("value", "")).replace("\n", " ").strip()
+        for a in lit_assigns:
+            a_name = str(a.get("name", "unknown")).strip()
+            a_val = str(a.get("value", "")).replace("\n", " ").strip()
             if not a_val:
                 continue
             if len(a_val) > 500:
@@ -1114,10 +1102,8 @@ def generate_symbol_essence_string(
         globals_defined = symbol_data.get("globals_defined", [])
         if globals_defined:
             g_names: List[str] = []
-            for g in cast(List[Any], globals_defined):
-                if not isinstance(g, dict):
-                    continue
-                g_name = cast(str, g.get("name", "")).strip()
+            for g in globals_defined:
+                g_name = str(g.get("name", "")).strip()
                 if g_name:
                     g_names.append(g_name)
             if g_names:
@@ -1126,10 +1112,8 @@ def generate_symbol_essence_string(
         decorators_used = symbol_data.get("decorators_used", [])
         if decorators_used:
             d_names: List[str] = []
-            for d in cast(List[Any], decorators_used):
-                if not isinstance(d, dict):
-                    continue
-                d_name = cast(str, d.get("name", "")).strip()
+            for d in cast(List[Dict[str, Any]], decorators_used):
+                d_name = str(d.get("name", "")).strip()
                 if d_name:
                     d_names.append(d_name)
             if d_names:
@@ -1138,10 +1122,8 @@ def generate_symbol_essence_string(
         exceptions_handled = symbol_data.get("exceptions_handled", [])
         if exceptions_handled:
             ex_names: List[str] = []
-            for ex in cast(List[Any], exceptions_handled):
-                if not isinstance(ex, dict):
-                    continue
-                ex_name = cast(str, ex.get("type_name_str", "")).strip()
+            for ex in cast(List[Dict[str, Any]], exceptions_handled):
+                ex_name = str(ex.get("type_name_str", "")).strip()
                 if ex_name:
                     ex_names.append(ex_name)
             if ex_names:
@@ -1150,10 +1132,8 @@ def generate_symbol_essence_string(
         with_contexts_used = symbol_data.get("with_contexts_used", [])
         if with_contexts_used:
             with_entries: List[str] = []
-            for w in cast(List[Any], with_contexts_used):
-                if not isinstance(w, dict):
-                    continue
-                context_expr = cast(str, w.get("context_expr_str", "")).strip()
+            for w in cast(List[Dict[str, Any]], with_contexts_used):
+                context_expr = str(w.get("context_expr_str", "")).strip()
                 if context_expr:
                     if len(context_expr) > 500:
                         context_expr = context_expr[:500] + "..."
@@ -1164,11 +1144,9 @@ def generate_symbol_essence_string(
         inheritance = symbol_data.get("inheritance", [])
         if inheritance:
             pairs: Set[str] = set()
-            for h in cast(List[Any], inheritance):
-                if not isinstance(h, dict):
-                    continue
-                cls = cast(str, h.get("class_name", "")).strip()
-                base = cast(str, h.get("base_class_name", "")).strip()
+            for h in cast(List[Dict[str, Any]], inheritance):
+                cls = str(h.get("class_name", "")).strip()
+                base = str(h.get("base_class_name", "")).strip()
                 if cls and base:
                     pairs.add(f"{cls} -> {base}")
             if pairs:
@@ -1179,10 +1157,8 @@ def generate_symbol_essence_string(
         type_references = symbol_data.get("type_references", [])
         if type_references:
             type_counts: Dict[str, int] = {}
-            for t in cast(List[Any], type_references):
-                if not isinstance(t, dict):
-                    continue
-                t_name = cast(str, t.get("type_name_str", "")).strip()
+            for t in cast(List[Dict[str, Any]], type_references):
+                t_name = str(t.get("type_name_str", "")).strip()
                 if not t_name:
                     continue
                 type_counts[t_name] = type_counts.get(t_name, 0) + 1
@@ -1199,11 +1175,9 @@ def generate_symbol_essence_string(
         attribute_accesses = symbol_data.get("attribute_accesses", [])
         if attribute_accesses:
             access_counts: Dict[str, int] = {}
-            for a in cast(List[Any], attribute_accesses):
-                if not isinstance(a, dict):
-                    continue
-                target = cast(str, a.get("target_name", "")).strip()
-                source = cast(str, a.get("potential_source", "")).strip()
+            for a in cast(List[Dict[str, Any]], attribute_accesses):
+                target = str(a.get("target_name", "")).strip()
+                source = str(a.get("potential_source", "")).strip()
                 if source and target:
                     access_key = f"{source}.{target}"
                 else:
@@ -1483,12 +1457,10 @@ def generate_symbol_essence_string(
             parts.append(f'  "{l}"')
 
     # JS/TS Body Essence (from enhanced analyzer)
-    for f in cast(List[Any], symbol_data.get("functions", [])):
-        if not isinstance(f, dict):
-            continue
+    for f in cast(List[Dict[str, Any]], symbol_data.get("functions", [])):
         if "body_essence" in f:
-            f_name = cast(str, f.get("name", "unknown"))
-            body_essence = cast(str, f.get("body_essence", "")).strip()
+            f_name = str(f.get("name", "unknown"))
+            body_essence = str(f.get("body_essence", "")).strip()
             if body_essence:
                 parts.append(f"  BODY ({f_name}):")
                 parts.append(f"    {body_essence}")
@@ -1514,16 +1486,14 @@ def generate_symbol_essence_string(
             parts.append("DEFINITIONS:")
             seen_defs: Set[Tuple[str, str]] = set()
             added_defs = 0
-            for defn in cast(List[Any], definitions):
-                if not isinstance(defn, dict):
-                    continue
+            for defn in cast(List[Dict[str, Any]], definitions):
                 type_name = (
-                    cast(str, defn.get("type", "unknown"))
+                    str(defn.get("type", "unknown"))
                     .replace("_statement", "")
                     .replace("create.", "CREATE ")
                     .upper()
                 )
-                summary = cast(str, defn.get("summary", "")).strip()
+                summary = str(defn.get("summary", "")).strip()
                 if len(summary) > 2500:
                     summary = summary[:2500] + "..."
 
@@ -1555,10 +1525,8 @@ def generate_symbol_essence_string(
             # De-duplicate inserts by table and column-map
             unique_inserts: List[Dict[str, Any]] = []
             seen_inserts: Set[Tuple[str, str]] = set()
-            for i in cast(List[Any], inserts):
-                if not isinstance(i, dict):
-                    continue
-                table = i.get("table", "unknown")
+            for i in cast(List[Dict[str, Any]], inserts):
+                table = str(i.get("table", "unknown"))
                 columns = json.dumps(i.get("columns", {}), sort_keys=True)
                 key = (table, columns)
                 if key not in seen_inserts:
@@ -1577,23 +1545,19 @@ def generate_symbol_essence_string(
         columns = symbol_data.get("columns", [])
         if columns:
             parts.append("COLUMNS:")
-            for col in cast(List[Any], columns)[:500]:
-                if not isinstance(col, dict):
-                    continue
+            for col in columns[:500]:
                 parts.append(f"  {col.get('name')} ({col.get('type')})")
-            if len(cast(List[Dict[str, Any]], columns)) > 500:
+            if len(columns) > 500:
                 parts.append("  ... (truncated)")
 
         relationships = symbol_data.get("relationships", [])
         if relationships:
             parts.append("RELATIONSHIPS:")
-            for rel in cast(List[Any], relationships)[:1000]:
-                if not isinstance(rel, dict):
-                    continue
+            for rel in cast(List[Dict[str, Any]], relationships)[:1000]:
                 parts.append(
                     f"  {rel.get('source_col')} -> {rel.get('target_table')}({rel.get('target_col')})"
                 )
-                _track_sql_operation(cast(str, rel.get("target_table", "")), "fk_ref")
+                _track_sql_operation(str(rel.get("target_table", "")), "fk_ref")
             if len(cast(List[Dict[str, Any]], relationships)) > 1000:
                 parts.append("  ... (truncated)")
 
@@ -1721,10 +1685,8 @@ def generate_symbol_essence_string(
 
         if code_blocks:
             lang_counts: Dict[str, int] = {}
-            for cb in cast(List[Any], code_blocks):
-                if not isinstance(cb, dict):
-                    continue
-                lang = cast(str, cb.get("language", "text")).strip().lower() or "text"
+            for cb in cast(List[Dict[str, Any]], code_blocks):
+                lang = str(cb.get("language", "text")).strip().lower() or "text"
                 lang_counts[lang] = lang_counts.get(lang, 0) + 1
             if lang_counts:
                 lang_summary = ", ".join(
@@ -1737,11 +1699,9 @@ def generate_symbol_essence_string(
 
             parts.append("CODE_SIGNATURES:")
             seen_signatures: Set[str] = set()
-            for cb in cast(List[Any], code_blocks):
-                if not isinstance(cb, dict):
-                    continue
-                lang = cast(str, cb.get("language", "text")).strip().lower() or "text"
-                cb_content = cast(str, cb.get("content", "")).strip()
+            for cb in cast(List[Dict[str, Any]], code_blocks):
+                lang = str(cb.get("language", "text")).strip().lower() or "text"
+                cb_content = str(cb.get("content", "")).strip()
                 if not cb_content:
                     continue
 
@@ -1794,13 +1754,17 @@ def generate_symbol_essence_string(
                     break
 
         # Essence extraction for docs > 8k (handled at top)
-        essence = preprocess_doc_structure(content) if content else ""
+        essence = (
+            preprocess_doc_structure(content, transparency_metadata) if content else ""
+        )
         if essence:
             parts.append(f"ESSENCE:\n{essence}")
 
     # 5. Generic Fallback (Crucial for unanalyzed file types or symbols-sparse files)
     current_ses_len = len("\n".join(parts))
-    if content and current_ses_len < 3500 and len(content) > current_ses_len:
+    # For documentation files, we usually want the content preview even if we have some metadata,
+    # as long as we haven't already included the full content or reached a large size.
+    if content and current_ses_len < 5000:
         parts.append("CONTENT_PREVIEW:")
         snippet = content[:3500].strip()
         parts.append(
@@ -1815,10 +1779,12 @@ def generate_symbol_essence_string(
     return result
 
 
-def parse_structured_doc(content: str) -> str:
+def parse_structured_doc(
+    content: str, transparency_metadata: Optional[Dict[str, Any]] = None
+) -> str:
     """
-    Parses a structured documentation file (using ---SECTION_START---/---SECTION_END--- markers)
-    and extracts the essence for SES generation.
+    Parses a structured documentation file (using ---SECTION_START---/---SECTION_END--- markers
+    or a transparency metadata layer) and extracts the essence for SES generation.
 
     Extraction rules:
     - TAGS: Full inclusion (tags + related_tags)
@@ -1830,7 +1796,7 @@ def parse_structured_doc(content: str) -> str:
     parts: List[str] = []
 
     # Extract TAGS section (full)
-    tags_match = _extract_section(content, "TAGS")
+    tags_match = _extract_section(content, "TAGS", transparency_metadata)
     if tags_match:
         for line in tags_match.strip().split("\n"):
             line = line.strip()
@@ -1838,7 +1804,7 @@ def parse_structured_doc(content: str) -> str:
                 parts.append(f"TAG: {line}")
 
     # Extract CONTEXT section (full)
-    context_match = _extract_section(content, "CONTEXT")
+    context_match = _extract_section(content, "CONTEXT", transparency_metadata)
     if context_match:
         for line in context_match.strip().split("\n"):
             line = line.strip()
@@ -1846,7 +1812,7 @@ def parse_structured_doc(content: str) -> str:
                 parts.append(line)
 
     # Extract OVERVIEW section (headers and first bit of content)
-    overview_match = _extract_section(content, "OVERVIEW")
+    overview_match = _extract_section(content, "OVERVIEW", transparency_metadata)
     if overview_match:
         o_lines = [l.strip() for l in overview_match.strip().split("\n") if l.strip()]
         for i, line in enumerate(o_lines):
@@ -1858,7 +1824,7 @@ def parse_structured_doc(content: str) -> str:
                     parts.append(f"  {snippet}")
 
     # Extract DETAILS section (sub-headers and first bit)
-    details_match = _extract_section(content, "DETAILS")
+    details_match = _extract_section(content, "DETAILS", transparency_metadata)
     if details_match:
         d_lines = [l.strip() for l in details_match.strip().split("\n") if l.strip()]
         for i, line in enumerate(d_lines):
@@ -1869,7 +1835,7 @@ def parse_structured_doc(content: str) -> str:
                     parts.append(f"  {snippet}")
 
     # Extract REFERENCES section (full)
-    refs_match = _extract_section(content, "REFERENCES")
+    refs_match = _extract_section(content, "REFERENCES", transparency_metadata)
     if refs_match:
         for line in refs_match.strip().split("\n"):
             line = line.strip()
@@ -1879,11 +1845,40 @@ def parse_structured_doc(content: str) -> str:
     return "\n".join(parts)
 
 
-def _extract_section(content: str, section_name: str) -> Optional[str]:
+def _extract_section(
+    content: str,
+    section_name: str,
+    transparency_metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
     """
     Extracts the content between ---SECTION_NAME_START--- and ---SECTION_NAME_END--- markers.
+    If transparency_metadata is provided, it uses the mapped line numbers.
     Returns None if markers are not found.
     """
+    # 1. Try Transparency Metadata first
+    if transparency_metadata:
+        sections = cast(Dict[str, Any], transparency_metadata.get("sections", {}))
+        if section_name in sections:
+            mapping = sections[section_name]
+
+            # A. Check for virtual content (e.g., TAGS that were removed from file)
+            if isinstance(mapping, dict) and "content" in mapping:
+                return cast(str, mapping["content"])
+
+            # B. Check for line range mapping
+            if (
+                isinstance(mapping, (list, tuple))
+                and len(cast(Sequence[Any], mapping)) == 2
+            ):
+                mapping_seq = cast(Sequence[Any], mapping)
+                start_line: int = int(mapping_seq[0])
+                end_line: int = int(mapping_seq[1])
+                lines = content.splitlines()
+                if 1 <= start_line <= len(lines) and 1 <= end_line <= len(lines):
+                    # Line numbers in registry are 1-indexed
+                    return "\n".join(lines[start_line - 1 : end_line])
+
+    # 2. Fallback to physical markers
     start_marker = f"---{section_name}_START---"
     end_marker = f"---{section_name}_END---"
 
@@ -1899,17 +1894,21 @@ def _extract_section(content: str, section_name: str) -> Optional[str]:
     return content[start_idx:end_idx]
 
 
-def preprocess_doc_structure(content: str) -> str:
+def preprocess_doc_structure(
+    content: str, transparency_metadata: Optional[Dict[str, Any]] = None
+) -> str:
     """
     Preprocesses documentation for embedding/reranking to extract its essence.
 
-    If the document follows the structured template (has ---TAGS_START--- marker),
-    uses parse_structured_doc for precise extraction.
+    If the document follows the structured template (has ---TAGS_START--- marker
+    or a transparency metadata layer), uses parse_structured_doc for precise extraction.
     Otherwise, falls back to header + first-paragraph extraction.
     """
-    # Check for structured doc markers
-    if "---TAGS_START---" in content:
-        return parse_structured_doc(content)
+    # Check for structured doc markers or transparency metadata
+    if "---TAGS_START---" in content or (
+        transparency_metadata and transparency_metadata.get("sections")
+    ):
+        return parse_structured_doc(content, transparency_metadata)
 
     # Fallback: extract headers/snippets and transcript-style turns
     lines = [l.strip() for l in content.split("\n") if l.strip()]
@@ -2605,7 +2604,9 @@ def rerank_candidates_with_qwen3(
                 batch_scores_tensor = torch.nn.functional.log_softmax(
                     batch_scores_tensor, dim=1
                 )
-                scores = batch_scores_tensor[:, 1].exp().tolist()
+                tensor_slice = batch_scores_tensor[:, 1].exp()
+                # Use Any cast to silence tolist() unknown return type error
+                scores = cast(List[float], cast(Any, tensor_slice).tolist())
 
                 # Collect scores with original indices
                 for item, score in zip(batch_items, scores):
@@ -2710,10 +2711,9 @@ def generate_embeddings(
             with open(metadata_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 metadata_version = str(data.get("version", ""))
-                existing_metadata = data.get("keys", {})
-                for m_value in cast(Dict[str, Any], existing_metadata).values():
-                    if not isinstance(m_value, dict):
-                        continue
+                existing_metadata = cast(Dict[str, Any], data.get("keys", {}))
+                for m_v in existing_metadata.values():
+                    m_value = cast(Dict[str, Any], m_v)
                     path_value = m_value.get("path")
                     if not isinstance(path_value, str) or not path_value:
                         continue
@@ -2762,10 +2762,18 @@ def generate_embeddings(
                 if src_mtime > emb_mtime:
                     # mtime changed, but maybe it's just [AUTO] comments.
                     # Perform "Deep Check" using stored content_hash.
-                    m_item = existing_metadata.get(
-                        key_info.key_string
-                    ) or existing_metadata_by_path.get(key_info.norm_path)
-                    stored_hash = m_item.get("content_hash") if m_item else None
+                    m_item = cast(
+                        Optional[Dict[str, Any]],
+                        (
+                            existing_metadata.get(key_info.key_string)
+                            or existing_metadata_by_path.get(key_info.norm_path)
+                        ),
+                    )
+                    stored_hash = (
+                        str(m_item.get("content_hash"))
+                        if m_item and m_item.get("content_hash")
+                        else None
+                    )
 
                     if stored_hash:
                         raw_content = read_file_content_safely(key_info.norm_path)
@@ -2935,9 +2943,8 @@ def generate_embeddings(
     # If we have existing metadata, carry it over by stable file path.
     # This prevents token drift when key instance suffixes (#n) are reassigned.
     if existing_metadata:
-        for v in cast(Dict[str, Any], existing_metadata).values():
-            if not isinstance(v, dict):
-                continue
+        existing_items = cast(Dict[str, Dict[str, Any]], existing_metadata)
+        for v in existing_items.values():
             m_path = v.get("path")
             if not isinstance(m_path, str) or not m_path:
                 continue
@@ -3192,9 +3199,16 @@ def calculate_similarity(
 # --- File Validation Helper ---
 
 
+def _get_is_valid_cache_key(fp: str) -> str:
+    """Generates cache key for file validation."""
+    config_path = ConfigManager().config_path
+    mtime = os.path.getmtime(config_path) if os.path.exists(config_path) else 0
+    return f"is_valid:{normalize_path(fp)}:{mtime}"
+
+
 @cached(
     "file_validation",
-    key_func=lambda file_path: f"is_valid:{normalize_path(str(file_path))}:{os.path.getmtime(ConfigManager().config_path) if os.path.exists(ConfigManager().config_path) else 0}",
+    key_func=_get_is_valid_cache_key,
     track_path_args=[0],
 )
 def _is_valid_file(file_path: str) -> bool:
@@ -3228,17 +3242,3 @@ def _is_valid_file(file_path: str) -> bool:
         return True
     except Exception:
         return False
-
-
-# --- CLI Placeholders ---
-# def register_parser(subparsers):
-#    parser = subparsers.add_parser("generate-embeddings", help="Generate embeddings")
-#    parser.add_argument("project_paths", nargs="+")
-#    parser.add_argument("--force", action="store_true")
-#    parser.set_defaults(func=command_handler)
-
-# def command_handler(args):
-#     logger.error("Direct CLI usage deprecated. Use project_analyzer.")
-#     return 1
-
-# EoF

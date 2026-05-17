@@ -37,7 +37,7 @@ import re
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, cast
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, cast
 
 from cline_utils.dependency_system.core.dependency_grid import (
     DIAGONAL_CHAR,
@@ -95,8 +95,50 @@ COMMENT_PREFIXES: Dict[str, str] = {
 # Diagonal ("o") and empty/placeholder states are excluded.
 _SKIP_CHARS: Set[str] = {DIAGONAL_CHAR, EMPTY_CHAR, PLACEHOLDER_CHAR, "n"}
 
+_LOW_VALUE_SYMBOL_NAMES: Set[str] = {
+    "__class__",
+    "__init__",
+    "bool",
+    "bytes",
+    "dict",
+    "float",
+    "int",
+    "len",
+    "list",
+    "logger",
+    "logging",
+    "object",
+    "print",
+    "set",
+    "str",
+    "super",
+    "tuple",
+}
+
 
 # ── Symbol-level relevance helpers ─────────────────────────────────────────────
+
+
+class TargetSymbol(NamedTuple):
+    """A target symbol that can be surfaced in a CONNECTION_MAP rail."""
+
+    name: str
+    line: Optional[int]
+
+
+TargetSymbolIndex = Dict[str, List[TargetSymbol]]
+TargetSymbolsByKey = Dict[str, Optional[List[TargetSymbol]]]
+
+
+class SymbolReferences(NamedTuple):
+    """References grouped by usefulness for CONNECTION_MAP precision."""
+
+    actionable: Set[str]
+    ambient: Set[str]
+
+    @property
+    def all(self) -> Set[str]:
+        return self.actionable | self.ambient
 
 
 def _extract_names(data: Any, keys: Optional[List[str]] = None) -> Set[str]:
@@ -137,7 +179,7 @@ def _extract_names(data: Any, keys: Optional[List[str]] = None) -> Set[str]:
 
 def _collect_symbol_references(
     item: Dict[str, Any], symbol_type: str
-) -> Optional[Set[str]]:
+) -> Optional[SymbolReferences]:
     """
     Collect all external name references from a function or class symbol entry.
 
@@ -145,49 +187,282 @@ def _collect_symbol_references(
     skip filtering).  Returns an empty set if scope data exists but the
     symbol genuinely references nothing external.
     """
-    has_scope_data = "scope_references" in item
+    has_scope_data = any(
+        key in item
+        for key in (
+            "scope_references",
+            "attribute_accesses",
+            "closure_dependencies",
+            "type_references",
+            "inheritance",
+        )
+    )
 
     if symbol_type == "class":
         for method in cast(List[Dict[str, Any]], item.get("methods", [])):
-            if method and "scope_references" in method:
+            if method and any(
+                key in method
+                for key in (
+                    "scope_references",
+                    "attribute_accesses",
+                    "closure_dependencies",
+                    "type_references",
+                )
+            ):
                 has_scope_data = True
                 break
 
     if not has_scope_data:
         return None  # Inconclusive — no runtime scope data available
 
-    refs: Set[str] = set()
+    actionable: Set[str] = set()
+    ambient: Set[str] = set()
 
     scope = cast(Dict[str, Any], item.get("scope_references", {}))
     if scope:
-        refs.update(_extract_names(scope.get("globals", [])))
-        refs.update(_extract_names(scope.get("nonlocals", [])))
+        ambient.update(_extract_names(scope.get("globals", [])))
+        actionable.update(_extract_names(scope.get("nonlocals", [])))
 
-    refs.update(_extract_names(item.get("attribute_accesses", [])))
-    refs.update(_extract_names(item.get("closure_dependencies", [])))
+    actionable.update(_extract_names(item.get("attribute_accesses", [])))
+    actionable.update(_extract_names(item.get("closure_dependencies", [])))
+    actionable.update(_extract_names(item.get("type_references", [])))
 
-    # For classes: aggregate references from inheritance and methods
+    inheritance = item.get("inheritance", {})
+    if isinstance(inheritance, dict):
+        d_inh = cast(Dict[Any, Any], inheritance)
+        actionable.update(_extract_names(d_inh.get("bases", [])))
+        actionable.update(_extract_names(d_inh.get("mro", [])))
+    elif isinstance(inheritance, list):
+        actionable.update(_extract_names(inheritance))
+
+    # For classes: aggregate references from methods
     if symbol_type == "class":
-        inheritance = item.get("inheritance", {})
-        if isinstance(inheritance, dict):
-            # Runtime format: {"bases": ["Base1", "Base2"]}
-            d_inh = cast(Dict[Any, Any], inheritance)
-            refs.update(_extract_names(d_inh.get("bases", [])))
-        elif isinstance(inheritance, list):
-            # AST format: [{"class_name": "MyClass", "base_class_name": "Base1"}]
-            refs.update(_extract_names(inheritance))
-
         for method in cast(List[Dict[str, Any]], item.get("methods", [])):
             if not method:
                 continue
             m_scope = cast(Dict[str, Any], method.get("scope_references", {}))
             if m_scope:
-                refs.update(_extract_names(m_scope.get("globals", [])))
-                refs.update(_extract_names(m_scope.get("nonlocals", [])))
-            refs.update(_extract_names(method.get("attribute_accesses", [])))
-            refs.update(_extract_names(method.get("closure_dependencies", [])))
+                ambient.update(_extract_names(m_scope.get("globals", [])))
+                actionable.update(_extract_names(m_scope.get("nonlocals", [])))
+            actionable.update(_extract_names(method.get("attribute_accesses", [])))
+            actionable.update(_extract_names(method.get("closure_dependencies", [])))
+            actionable.update(_extract_names(method.get("type_references", [])))
 
-    return refs
+    return SymbolReferences(
+        actionable=_filter_low_value_names(actionable),
+        ambient=_filter_low_value_names(ambient),
+    )
+
+
+def _filter_low_value_names(names: Set[str]) -> Set[str]:
+    """Drop generic names that add code weight without useful dependency signal."""
+    filtered: Set[str] = set()
+    for name in names:
+        clean = str(name).strip()
+        if not clean:
+            continue
+        tail = clean.rsplit(".", 1)[-1]
+        if tail in _LOW_VALUE_SYMBOL_NAMES:
+            continue
+        filtered.add(clean)
+    return filtered
+
+
+def _coerce_line(value: Any) -> Optional[int]:
+    """Return a 1-indexed line number from known symbol-map line shapes."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, list):
+        try:
+            line = int(cast(Any, value[0]))
+            return line if line > 0 else None
+        except (ValueError, TypeError, IndexError):
+            return None
+    try:
+        line = int(value)
+        return line if line > 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _get_symbol_line(item: Dict[str, Any]) -> Optional[int]:
+    """Extract a symbol start line from direct or source_context metadata."""
+    direct = _coerce_line(item.get("line"))
+    if direct is not None:
+        return direct
+    source_context = item.get("source_context")
+    if isinstance(source_context, dict):
+        d_context = cast(Dict[Any, Any], source_context)
+        line_range = d_context.get("line_range")
+        line = _coerce_line(line_range)
+        if line is not None:
+            return line
+    return None
+
+
+def _display_symbol_name(name: str) -> str:
+    """Keep generated rail labels parseable while preserving readable names."""
+    clean = str(name).strip()
+    for old, new in (
+        ("|", "/"),
+        ("(", "["),
+        (")", "]"),
+        ("{", "["),
+        ("}", "]"),
+        (",", ";"),
+    ):
+        clean = clean.replace(old, new)
+    return clean or "file"
+
+
+def _reference_variants(name: str) -> Set[str]:
+    """Return reference spellings useful for matching dotted references."""
+    raw = str(name).strip()
+    if not raw:
+        return set()
+    variants = {raw}
+    for sep in (".", ":"):
+        if sep in raw:
+            tail = raw.rsplit(sep, 1)[-1]
+            if tail:
+                variants.add(tail)
+    return variants
+
+
+def _add_target_symbol(
+    index: TargetSymbolIndex, name: Any, line: Optional[int]
+) -> None:
+    clean_name = str(name).strip()
+    if not clean_name:
+        return
+    symbol = TargetSymbol(_display_symbol_name(clean_name), line)
+    for variant in _reference_variants(clean_name):
+        bucket = index.setdefault(variant, [])
+        if symbol not in bucket:
+            bucket.append(symbol)
+
+
+def _collect_export_symbols(data: Any, index: TargetSymbolIndex) -> None:
+    """Add explicit exports to a target index, handling list and dict formats."""
+    if isinstance(data, dict):
+        for key, value in cast(Dict[Any, Any], data).items():
+            line = _get_symbol_line(value) if isinstance(value, dict) else None
+            _add_target_symbol(index, key, line)
+    elif isinstance(data, list):
+        for item in cast(List[Any], data):
+            if isinstance(item, str):
+                _add_target_symbol(index, item, None)
+            elif isinstance(item, dict):
+                d_item = cast(Dict[Any, Any], item)
+                name = (
+                    d_item.get("name")
+                    or d_item.get("target_name")
+                    or d_item.get("class_name")
+                )
+                if name is not None:
+                    _add_target_symbol(index, name, _get_symbol_line(d_item))
+
+
+def _build_target_symbol_index(
+    file_symbol_data: Optional[Dict[str, Any]],
+) -> Optional[TargetSymbolIndex]:
+    """
+    Build a precise target-symbol index from a project_symbol_map file entry.
+
+    The returned index is keyed by reference spellings and stores display-ready
+    symbol names plus source lines.  None means no symbol data exists for the
+    target file; an empty dict means data exists but no symbols were indexable.
+    """
+    if not file_symbol_data:
+        return None
+
+    index: TargetSymbolIndex = {}
+
+    for func in cast(List[Any], file_symbol_data.get("functions", [])):
+        if isinstance(func, dict):
+            d_func = cast(Dict[str, Any], func)
+            _add_target_symbol(index, d_func.get("name", ""), _get_symbol_line(d_func))
+
+    for cls in cast(List[Any], file_symbol_data.get("classes", [])):
+        if not isinstance(cls, dict):
+            continue
+        d_cls = cast(Dict[str, Any], cls)
+        _add_target_symbol(index, d_cls.get("name", ""), _get_symbol_line(d_cls))
+        for method in cast(List[Any], d_cls.get("methods", [])):
+            if isinstance(method, dict):
+                d_method = cast(Dict[str, Any], method)
+                _add_target_symbol(
+                    index, d_method.get("name", ""), _get_symbol_line(d_method)
+                )
+
+    for glob in cast(List[Any], file_symbol_data.get("globals_defined", [])):
+        if isinstance(glob, dict):
+            d_glob = cast(Dict[str, Any], glob)
+            _add_target_symbol(index, d_glob.get("name", ""), _get_symbol_line(d_glob))
+        else:
+            _add_target_symbol(index, glob, None)
+
+    _collect_export_symbols(file_symbol_data.get("exports", []), index)
+
+    for symbols in index.values():
+        symbols.sort(key=lambda s: (s.name, s.line if s.line is not None else 10**9))
+
+    return index
+
+
+def _resolve_target_symbols(
+    symbol_refs: Set[str], target_index: Optional[TargetSymbolIndex]
+) -> Optional[List[TargetSymbol]]:
+    """
+    Resolve source references to concrete target symbols.
+
+    Returns None when target precision is unavailable, an empty list when the
+    target has symbol data but no referenced symbols match.
+    """
+    if target_index is None:
+        return None
+
+    matches: List[TargetSymbol] = []
+    seen: Set[Tuple[str, Optional[int]]] = set()
+    for ref in sorted(symbol_refs):
+        for variant in _reference_variants(ref):
+            for symbol in target_index.get(variant, []):
+                marker = (symbol.name, symbol.line)
+                if marker not in seen:
+                    seen.add(marker)
+                    matches.append(symbol)
+
+    matches.sort(key=lambda s: (s.name, s.line if s.line is not None else 10**9))
+    return matches
+
+
+def _resolve_relevant_target_symbols(
+    symbol_refs: SymbolReferences, target_index: Optional[TargetSymbolIndex]
+) -> Optional[List[TargetSymbol]]:
+    """
+    Resolve target symbols, requiring actionable references for precise matches.
+
+    Ambient globals are intentionally ignored for map inclusion. This filters
+    noisy relationships like cross-file `logger` globals while preserving calls,
+    attributes, type references, inheritance, and closure references.
+    """
+    if target_index is None:
+        return None
+    refs_to_match = symbol_refs.actionable or symbol_refs.ambient
+    if not refs_to_match:
+        return []
+    return _resolve_target_symbols(refs_to_match, target_index)
+
+
+def _format_target_symbols(symbols: Optional[List[TargetSymbol]]) -> str:
+    if not symbols:
+        return "file:?"
+    return "|".join(
+        f"{symbol.name}:{symbol.line if symbol.line is not None else '?'}"
+        for symbol in symbols
+    )
 
 
 def _collect_file_exports(file_symbol_data: Dict[str, Any]) -> Set[str]:
@@ -345,16 +620,7 @@ def find_definition_line(
 
 def get_item_line(item: Dict[str, Any]) -> int:
     """Safely extract the 1-indexed start line from a symbol-map entry."""
-    val = item.get("line", 0)
-    if isinstance(val, list):
-        try:
-            return int(cast(Any, val[0]))
-        except (ValueError, TypeError, IndexError):
-            return 0
-    try:
-        return int(val)
-    except (ValueError, TypeError):
-        return 0
+    return _get_symbol_line(item) or 0
 
 
 # ── Station Header builder ─────────────────────────────────────────────────────
@@ -407,12 +673,14 @@ def build_connection_map(
     grid_row: str,
     prefix: str,
     relevant_keys: Optional[Set[str]] = None,
+    target_symbols_by_key: Optional[TargetSymbolsByKey] = None,
 ) -> str:
     """
     Build a single-line CONNECTION_MAP comment for one symbol.
 
     Uses the tracker-native grid row for the file that owns symbol_name.
-    Rail format: "KEY1<char>, KEY2<char>, ..." or "none".
+    Rail format: "KEY1(symbol:Line) {char}, KEY2(file:?) {char}, ...".
+    Returns an empty string when no actionable entries survive filtering.
     Sorted by key string for stable, deterministic output.
 
     Args:
@@ -423,30 +691,80 @@ def build_connection_map(
         prefix:        Comment prefix for this file's language.
         relevant_keys: If provided, only include target keys in this set.
                        None means include all (no filtering).
+        target_symbols_by_key: Optional mapping of target key to matched target
+                       symbols. Missing/None values fall back to file:?.
     """
     decompressed = decompress(grid_row)
-    entries: List[Tuple[str, str]] = []
+    entries: List[Tuple[str, str, str]] = []
 
     for col_idx, dep_char in enumerate(decompressed):
         if dep_char in _SKIP_CHARS:
             continue
         if col_idx >= len(key_info_list):
             break
-        tgt_key = key_info_list[col_idx].key_string
+        tgt_ki = key_info_list[col_idx]
+        if tgt_ki.is_directory:
+            continue
+        tgt_key = tgt_ki.key_string
         if tgt_key != source_key:  # skip self (should already be DIAGONAL_CHAR)
             if relevant_keys is not None and tgt_key not in relevant_keys:
                 continue
-            entries.append((tgt_key, dep_char))
+            target_symbols = (
+                target_symbols_by_key.get(tgt_key)
+                if target_symbols_by_key is not None
+                else None
+            )
+            target_label = _format_target_symbols(target_symbols)
+            entries.append((tgt_key, target_label, dep_char))
 
-    if entries:
-        entries.sort(key=lambda x: x[0])
-        rail = ", ".join(f"{k}{c}" for k, c in entries)
-    else:
-        rail = "none"
+    if not entries:
+        return ""
+
+    entries.sort(key=lambda x: x[0])
+    rail = ", ".join(f"{k}({target}) {{{c}}}" for k, target, c in entries)
 
     p = f"{prefix} " if prefix and not prefix.endswith(" ") else prefix
     suffix = " -->" if prefix == "<!--" else ""
     return f"{p}--- CONNECTION_MAP: {rail} --- {symbol_name} {AUTO_TAG}{suffix}"
+
+
+def _with_line_indent(line: str, text: str) -> str:
+    """Prefix a generated comment with the indentation of a definition line."""
+    indent_match = re.match(r"\s*", line)
+    indent = indent_match.group(0) if indent_match else ""
+    return f"{indent}{text}"
+
+
+def _iter_connection_map_items(
+    functions: List[Dict[str, Any]], classes: List[Dict[str, Any]]
+) -> List[Tuple[Dict[str, Any], str]]:
+    """
+    Return top-level symbols plus class methods that should receive maps.
+
+    Runtime symbol maps store many Python methods inside their owning class, so
+    treating only top-level functions/classes skips useful nested method maps.
+    """
+    items: List[Tuple[Dict[str, Any], str]] = []
+    seen: Set[Tuple[str, int, str]] = set()
+
+    def add_item(item: Dict[str, Any], symbol_type: str) -> None:
+        name = str(item.get("name", "")).strip()
+        line = get_item_line(item)
+        marker = (name, line, symbol_type)
+        if name and line and marker not in seen:
+            seen.add(marker)
+            items.append((item, symbol_type))
+
+    for func in functions:
+        add_item(func, "function")
+
+    for cls in classes:
+        add_item(cls, "class")
+        for method in cast(List[Any], cls.get("methods", [])):
+            if isinstance(method, dict):
+                add_item(cast(Dict[str, Any], method), "function")
+
+    return items
 
 
 # ── File write ─────────────────────────────────────────────────────────────────
@@ -520,6 +838,7 @@ def process_file(
         "maps_updated": 0,
         "skipped": False,
         "error": None,
+        "generated_connection_maps": [],
     }
 
     if not _is_commentable(str(file_path)):
@@ -597,7 +916,7 @@ def process_file(
     # ── 2. Connection Maps ─────────────────────────────────────────────────
     functions = cast(List[Dict[str, Any]], symbol_data.get("functions", []))
     classes = cast(List[Dict[str, Any]], symbol_data.get("classes", []))
-    items = [(f, "function") for f in functions] + [(c, "class") for c in classes]
+    items = _iter_connection_map_items(functions, classes)
 
     # Reverse order so insertions don't shift subsequent line indices
     items.sort(key=lambda x: get_item_line(x[0]), reverse=True)
@@ -606,21 +925,21 @@ def process_file(
     maps_updated = 0
     conn_marker = "--- CONNECTION_MAP:"
 
-    # Pre-compute target file exports for per-symbol relevance filtering.
+    # Pre-compute target file symbol indexes for per-symbol relevance filtering.
     # Keyed by norm_path so lookup is shared across symbols in this file.
-    _target_exports_cache: Dict[str, Optional[Set[str]]] = {}
+    _target_symbol_index_cache: Dict[str, Optional[TargetSymbolIndex]] = {}
     if full_symbol_map:
         decompressed_full = decompress(grid_row)
         for col_idx, dep_char in enumerate(decompressed_full):
             if dep_char in _SKIP_CHARS or col_idx >= len(key_info_list):
                 continue
             tgt_ki = key_info_list[col_idx]
-            if tgt_ki.key_string == source_key:
+            if tgt_ki.is_directory or tgt_ki.key_string == source_key:
                 continue
-            if tgt_ki.norm_path not in _target_exports_cache:
+            if tgt_ki.norm_path not in _target_symbol_index_cache:
                 tgt_data = full_symbol_map.get(tgt_ki.norm_path)
-                _target_exports_cache[tgt_ki.norm_path] = (
-                    _collect_file_exports(tgt_data) if tgt_data else None
+                _target_symbol_index_cache[tgt_ki.norm_path] = (
+                    _build_target_symbol_index(tgt_data) if tgt_data else None
                 )
 
     for item, symbol_type in items:
@@ -645,6 +964,7 @@ def process_file(
 
         # Step B: determine which keys are relevant to THIS symbol
         relevant_keys: Optional[Set[str]] = None
+        target_symbols_by_key: TargetSymbolsByKey = {}
         if full_symbol_map:
             symbol_refs = _collect_symbol_references(item, symbol_type)
             if symbol_refs is not None:
@@ -655,14 +975,19 @@ def process_file(
                     if dep_char in _SKIP_CHARS or col_idx >= len(key_info_list):
                         continue
                     tgt_ki = key_info_list[col_idx]
-                    if tgt_ki.key_string == source_key:
+                    if tgt_ki.is_directory or tgt_ki.key_string == source_key:
                         continue
-                    tgt_exports = _target_exports_cache.get(tgt_ki.norm_path)
-                    if tgt_exports is None:
+                    target_index = _target_symbol_index_cache.get(tgt_ki.norm_path)
+                    target_symbols = _resolve_relevant_target_symbols(
+                        symbol_refs, target_index
+                    )
+                    if target_symbols is None:
                         # No symbol data for target → conservatively include
                         relevant_keys.add(tgt_ki.key_string)
-                    elif symbol_refs & tgt_exports:
+                        target_symbols_by_key[tgt_ki.key_string] = None
+                    elif target_symbols:
                         relevant_keys.add(tgt_ki.key_string)
+                        target_symbols_by_key[tgt_ki.key_string] = target_symbols
                 if verbose:
                     total_deps = (
                         sum(1 for c in decompress(grid_row) if c not in _SKIP_CHARS) - 1
@@ -683,9 +1008,14 @@ def process_file(
             grid_row,
             prefix,
             relevant_keys=relevant_keys,
+            target_symbols_by_key=target_symbols_by_key,
         )
+        if not conn_map:
+            continue
         src_lines = new_source.splitlines(keepends=True)
         def_idx = find_definition_line(src_lines, name, symbol_type, hint_line, ext)
+        conn_map = _with_line_indent(src_lines[def_idx], conn_map)
+        cast(List[str], result["generated_connection_maps"]).append(conn_map)
 
         src_lines.insert(def_idx, conn_map + "\n")
         new_source = "".join(src_lines)

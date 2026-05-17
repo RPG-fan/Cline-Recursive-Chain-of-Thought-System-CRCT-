@@ -5,6 +5,21 @@ All notable changes to the Cline Recursive Chain-of-Thought System (CRCT) will b
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.5.0] - 2026-05-17
+
+### Added
+- **Precise Symbol-Level Connection Maps**: Connection maps now track precise target symbols and 1-indexed definition lines rather than just file-level mappings, formatted as `KEY(symbol:line) {char}`.
+- **Low-Value Signal Filtration**: Implemented filtering using `_LOW_VALUE_SYMBOL_NAMES` to exclude generic standard built-ins and logger names, focusing maps on actionable business logic dependencies.
+- **Comprehensive Unit Testing**: Added `test_precise_connection_maps.py` with 10 robust test cases covering parsing, symbol resolving, filtering, virtualization, and dry-run code paths.
+
+### Changed
+- **Comment Virtualization**: Upgraded `TransparencyManager` to extract, parse, and store connection maps inside `transparency_registry.json`, stripping physical comments on disk to keep working trees perfectly clean.
+- **Embedding Integration**: Integrated the transparency layer with `embedding_manager.py` to transparently load stripped code contents and append virtual connection maps to the Symbol Essence Strings (SES) to enrich embedding search quality.
+- **Centralized Hash Computation**: Moved all content hash calculations into `cline_utils/dependency_system/utils/calculate_hash.py` to prevent cyclic imports.
+- **Refactored Caching Patterns**: Replaced inline lambda key functions inside decorators with stable named function key generators.
+
+---
+
 ## [8.4.0] - 2026-05-08
 
 ### Added

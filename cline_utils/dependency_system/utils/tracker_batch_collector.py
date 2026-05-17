@@ -320,6 +320,9 @@ class TrackerBatchCollector:
                 populate_comments_for_batch,
                 report_batch_results,
             )
+            from cline_utils.dependency_system.io.transparency_manager import (
+                get_transparency_manager,
+            )
             from cline_utils.dependency_system.utils.cache_manager import (
                 get_project_root_cached,
             )
@@ -339,6 +342,19 @@ class TrackerBatchCollector:
             )
             if results:
                 report_batch_results(results, dry_run=False)
+                manager = get_transparency_manager()
+                virtualized = 0
+                for result in results:
+                    path = result.get("path") if isinstance(result, dict) else None
+                    if path and manager.virtualize_connection_maps(
+                        path, clear_if_absent=True
+                    ):
+                        virtualized += 1
+                if virtualized:
+                    logger.info(
+                        "Virtualized CONNECTION_MAP comments for "
+                        f"{virtualized} populated file(s)"
+                    )
 
         except ImportError as e:
             logger.debug(f"populate_comments hook skipped: {e}")

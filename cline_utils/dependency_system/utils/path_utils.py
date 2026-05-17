@@ -14,10 +14,6 @@ PathMigrationInfo = Dict[str, Tuple[Optional[str], Optional[str]]]
 
 logger = logging.getLogger(__name__)
 
-# <<< *** REMOVED outdated constants *** >>>
-# HIERARCHICAL_KEY_PATTERN = r'^\d+[A-Z][a-z0-9]*$' # Removed
-# KEY_PATTERN = r'\d+|\D+' # Removed
-
 
 def normalize_path(path: str) -> str:
     """

@@ -1,5 +1,4 @@
 import os
-import hashlib
 from typing import Any, Dict, Optional
 from cline_utils.dependency_system.utils.cache_manager import cached
 
@@ -36,7 +35,9 @@ def read_file_content_safely(file_path: str) -> Optional[str]:
         return None
 
 
-def strip_auto_generated_blocks(content: str, file_path: str, preserve_lines: bool = True) -> str:
+def strip_auto_generated_blocks(
+    content: str, file_path: str, preserve_lines: bool = True
+) -> str:
     """
     Remove STATION_HEADER and CONNECTION_MAP blocks tagged with [AUTO].
     This stabilizes file content for hashing/embedding.
@@ -69,51 +70,25 @@ def strip_auto_generated_blocks(content: str, file_path: str, preserve_lines: bo
         if start_marker in line:
             in_station_block = True
             if preserve_lines:
-                new_lines.append("\n") # Preserve line number
+                new_lines.append("\n")  # Preserve line number
             continue
         if end_marker in line:
             in_station_block = False
             if preserve_lines:
-                new_lines.append("\n") # Preserve line number
+                new_lines.append("\n")  # Preserve line number
             continue
         if in_station_block:
             if preserve_lines:
-                new_lines.append("\n") # Preserve line number
+                new_lines.append("\n")  # Preserve line number
             continue
 
         # 2. Strip any comment line containing [AUTO]
         trimmed = line.lstrip()
         if trimmed.startswith(prefix) and AUTO_TAG in line:
             if preserve_lines:
-                new_lines.append("\n") # Preserve line number
+                new_lines.append("\n")  # Preserve line number
             continue
 
         new_lines.append(line)
 
     return "".join(new_lines)
-
-
-def calculate_content_hash(content: str, file_path: Optional[str] = None) -> str:
-    """
-    Calculates a stable SHA-256 hash for the given content.
-    If file_path is provided, it strips [AUTO] blocks COMPLETELY (no preserve_lines)
-    to ensure the hash is stable even when auto-docs are added/removed.
-
-    Args:
-        content: Content to hash
-        file_path: Optional path to the file to enable [AUTO] stripping.
-
-    Returns:
-        Hex digest of the hash
-    """
-    if not content:
-        return hashlib.sha256(b"").hexdigest()
-
-    # Stabilize for hashing by stripping [AUTO] blocks COMPLETELY
-    if file_path:
-        content = strip_auto_generated_blocks(content, file_path, preserve_lines=False)
-
-    # Normalize line endings to LF for cross-platform hash stability
-    content = content.replace("\r\n", "\n").strip()
-
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()

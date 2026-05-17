@@ -685,6 +685,3 @@ def aggregate_all_dependencies(
     )
     set_runtime_aggregation_cache(aggregated_links)
     return aggregated_links
-
-
-# --- End of tracker_utils.py ---

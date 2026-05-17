@@ -3146,6 +3146,9 @@ def main():
                     populate_comments_for_batch,
                     report_batch_results,
                 )
+                from cline_utils.dependency_system.io.transparency_manager import (
+                    get_transparency_manager,
+                )
                 from cline_utils.dependency_system.analysis.dependency_suggester import (
                     load_project_symbol_map,
                 )
@@ -3167,6 +3170,21 @@ def main():
                     )
                     if results:
                         report_batch_results(results, dry_run=False)
+                        manager = get_transparency_manager()
+                        virtualized = 0
+                        for result in results:
+                            path = (
+                                result.get("path") if isinstance(result, dict) else None
+                            )
+                            if path and manager.virtualize_connection_maps(
+                                path, clear_if_absent=True
+                            ):
+                                virtualized += 1
+                        if virtualized:
+                            logger.info(
+                                "Virtualized CONNECTION_MAP comments for "
+                                f"{virtualized} populated file(s)"
+                            )
                 except Exception as e:
                     logger.error(f"Error in final populate_comments hook: {e}")
                 args.accumulated_tracker_updates.clear()
