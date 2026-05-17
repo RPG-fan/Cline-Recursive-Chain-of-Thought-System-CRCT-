@@ -2366,7 +2366,9 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
         # Commit all algorithmic updates at once, passing accumulated_updates
         global_collector.commit_all(
             skip_populate_hook=True,
-            accumulated_updates=cast(List[Any], args.accumulated_tracker_updates),
+            accumulated_updates=cast(
+                List[Any], getattr(args, "accumulated_tracker_updates", [])
+            ),
         )
         logger.info(
             f"Global Algorithmic/Shortcut phase complete in {time.time()-algo_start_time:.2f}s"
@@ -2399,7 +2401,7 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
         if not key_def_pairs or not grid_rows_data:
             continue
 
-        found_llm_tasks = []
+        found_llm_tasks: List[Tuple[str, str, str, str]] = []
         for row_idx, (row_label, compressed_row) in enumerate(grid_rows_data):
             if focus_key and row_label != focus_key:
                 continue
@@ -2543,7 +2545,9 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
         global_map=global_map,
         tracker_type=tracker_type,
         prepare_func=_identity_prepare,
-        accumulated_updates=cast(List[Any], args.accumulated_tracker_updates),
+        accumulated_updates=cast(
+            List[Any], getattr(args, "accumulated_tracker_updates", [])
+        ),
     )
 
     args.limit -= total_processed
@@ -2553,6 +2557,297 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
         return handle_resolve_placeholders(args)
 
     processor.close()
+    return 0
+
+
+def handle_reconcile_transparency(args: argparse.Namespace) -> int:
+    """
+    Scans files for documentation markers and reconciles them with the transparency registry.
+    """
+    from cline_utils.dependency_system.io.transparency_manager import (
+        get_transparency_manager,
+    )
+
+    manager = get_transparency_manager()
+    project_root = get_project_root()
+    config = ConfigManager()
+    excluded_paths = config.get_excluded_paths()
+
+    # Identify files to scan
+    all_files: List[str] = []
+    scan_path = args.path if args.path else project_root
+
+    if os.path.isfile(scan_path):
+        all_files.append(scan_path)
+    elif os.path.isdir(scan_path):
+        for root, dirs, files in os.walk(scan_path):
+            # Skip common hidden/build dirs
+            dirs[:] = [
+                d
+                for d in dirs
+                if not d.startswith(".")
+                and d not in ("node_modules", "venv", "__pycache__")
+                and normalize_path(os.path.join(root, d)) not in excluded_paths
+            ]
+            for f in files:
+                file_path = normalize_path(os.path.join(root, f))
+                if file_path in excluded_paths:
+                    continue
+                if f.endswith((".md", ".txt", ".rst")):
+                    all_files.append(file_path)
+
+    # Secondary filter for absolute paths
+    all_files = [f for f in all_files if normalize_path(f) not in excluded_paths]
+
+    if not all_files:
+        logger.debug(f"No documentation files found to scan in {scan_path}.")
+        return 0
+
+    reconciled_count = 0
+    for file_path in all_files:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+            # Find markers and calculate shifts
+            sections: Dict[str, Tuple[int, int]] = {}
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped.startswith("---") and stripped.endswith("_START---"):
+                    section_name = stripped[3:-9]
+                    # Find end
+                    for j in range(i + 1, len(lines)):
+                        if lines[j].strip() == f"---{section_name}_END---":
+                            sections[section_name] = (i, j)
+                            break
+
+            # Dispatch based on transform
+            if args.transform == "restore":
+                if manager.restore_markers(file_path):
+                    logger.info(
+                        f"  [RESTORED] {os.path.relpath(file_path, project_root)}: Markers re-inserted from registry."
+                    )
+                    reconciled_count += 1
+                else:
+                    logger.debug(
+                        f"  [SKIP RESTORE] {os.path.relpath(file_path, project_root)}: No registry data or already tagged."
+                    )
+                continue
+
+            if args.transform == "remove":
+                if manager.remove_markers(file_path):
+                    logger.info(
+                        f"  [REMOVED MARKERS] {os.path.relpath(file_path, project_root)}: Markers moved to registry."
+                    )
+                    reconciled_count += 1
+                else:
+                    logger.debug(
+                        f"  [SKIP REMOVE] {os.path.relpath(file_path, project_root)}: No markers found or already removed."
+                    )
+                continue
+
+            # For other transforms (html, register), we need to find existing markers
+            if not sections:
+                continue
+
+            if args.transform == "html":
+                # Convert to HTML comments
+                new_lines = list(lines)
+                for name, (start_idx, end_idx) in sections.items():
+                    new_lines[start_idx] = f"<!-- ---{name}_START--- -->\n"
+                    new_lines[end_idx] = f"<!-- ---{name}_END--- -->\n"
+
+                content = "".join(new_lines)
+                # Register with markers present (but commented out)
+                registry_sections: Dict[str, Any] = {
+                    name: (start_idx + 1, end_idx + 1)
+                    for name, (start_idx, end_idx) in sections.items()
+                }
+                manager.update_file_metadata(file_path, registry_sections, content)
+
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+
+                logger.info(
+                    f"  [HTML COMMENTS] {os.path.relpath(file_path, project_root)}: {len(sections)} sections registered."
+                )
+
+            else:
+                # Just register with current markers
+                content = "".join(lines)
+                registry_sections: Dict[str, Any] = {
+                    name: (start_idx + 1, end_idx + 1)
+                    for name, (start_idx, end_idx) in sections.items()
+                }
+                manager.update_file_metadata(file_path, registry_sections, content)
+                logger.info(
+                    f"  [REGISTERED] {os.path.relpath(file_path, project_root)}: {len(sections)} sections found."
+                )
+
+            reconciled_count += 1
+
+        except Exception as e:
+            print(f"  Error processing {file_path}: {e}")
+            logger.error(f"Reconciliation error for {file_path}: {e}", exc_info=True)
+
+    print(f"\nSuccessfully reconciled transparency for {reconciled_count} files.")
+    return 0
+
+
+def handle_normalize_docs(args: argparse.Namespace) -> int:
+    """
+    Two-step documentation workflow:
+    1. Scan candidates and query local LLM to normalize docs with physical compliance markers.
+    2. If not dry-run, immediately run transparency virtualization to relocate markers/metadata
+       to transparency_registry.json, leaving the physical file completely clean.
+    """
+    from cline_utils.dependency_system.io.normalize_docs import (
+        normalize_single_file,
+        load_transparency_registry,
+        REQUIRED_MARKERS,
+    )
+    from cline_utils.dependency_system.io.transparency_manager import (
+        get_transparency_manager,
+    )
+    from cline_utils.dependency_system.analysis.local_llm_processor import (
+        LocalLLMProcessor,
+    )
+    from cline_utils.dependency_system.utils.config_manager import ConfigManager
+
+    project_root = get_project_root()
+    config_mgr = ConfigManager()
+
+    # Get doc directories dynamically
+    doc_dirs = config_mgr.get_doc_directories()
+    logger.info(f"Resolved doc directories from default-rules.md: {doc_dirs}")
+
+    registered_files = load_transparency_registry(project_root)
+    logger.info(
+        f"Loaded {len(registered_files)} registered files from transparency registry."
+    )
+
+    # Find candidate files
+    candidates: list[str] = []
+    if args.file:
+        full_path = os.path.abspath(args.file)
+        if os.path.isfile(full_path):
+            candidates.append(full_path)
+        else:
+            print(f"Error: Specified file not found: {args.file}")
+            return 1
+    else:
+        for doc_dir in doc_dirs:
+            if not os.path.isdir(doc_dir):
+                continue
+            for root, _, files in os.walk(doc_dir):
+                for file in sorted(files):
+                    if file.endswith(".md"):
+                        filepath = os.path.normpath(os.path.join(root, file))
+                        filepath_lower = filepath.lower()
+
+                        # Skip if registered
+                        if filepath_lower in registered_files:
+                            continue
+
+                        # Check compliance and placeholders
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            content = f.read()
+
+                        # If the tagging system is already present, skip to avoid re-processing converted files
+                        if "---TAGS_START---" in content:
+                            continue
+
+                        # We always normalize files that have placeholders or are missing markers.
+                        missing_markers = [
+                            m for m in REQUIRED_MARKERS if m not in content
+                        ]
+                        has_placeholders = "[FILL:" in content
+                        has_links_in_details = False
+
+                        # Check if "Documentation Links" or other reference headers exist under details
+                        if "## Details" in content:
+                            details_section = content.split("## Details")[1].split(
+                                "## References"
+                            )[0]
+                            if any(
+                                hdr in details_section
+                                for hdr in [
+                                    "Documentation Links",
+                                    "Links",
+                                    "See Also",
+                                    "Related Files",
+                                ]
+                            ):
+                                has_links_in_details = True
+
+                        if missing_markers or has_placeholders or has_links_in_details:
+                            candidates.append(filepath)
+
+    total_candidates = len(candidates)
+    logger.info(
+        f"Found {total_candidates} candidate files that need normalization or placeholder resolution."
+    )
+
+    if total_candidates == 0:
+        print("All files are fully compliant and resolved!")
+        return 0
+
+    # Limit scope info
+    if args.dry_run:
+        print("\n=== DRY RUN MODE: Will process up to 2 candidates ===")
+        limit = min(2, total_candidates)
+    else:
+        limit = args.limit
+        print(f"\nWill process up to {limit} successfully normalized candidate files.")
+
+    # Initialize Local LLM
+    model_path = (
+        args.model
+        if args.model
+        else os.path.join(project_root, "models", "Qwen3-4B-Instruct-2507-Q8_0.gguf")
+    )
+    if not os.path.exists(model_path):
+        print(f"Error: Local LLM model not found at {model_path}")
+        return 1
+
+    logger.info(f"Initializing local LLM from {model_path}...")
+    processor = LocalLLMProcessor(model_path=model_path)
+    manager = get_transparency_manager()
+
+    processed_count = 0
+
+    for filepath in candidates:
+        # Check limit constraints
+        if processed_count >= limit:
+            break
+
+        rel_path = os.path.relpath(filepath, project_root)
+        print(f"\n[{processed_count+1}/{limit}] Processing: {rel_path}")
+
+        # Step 1: Normalize
+        success = normalize_single_file(
+            filepath=filepath,
+            processor=processor,
+            project_root=project_root,
+            dry_run=args.dry_run,
+        )
+
+        if success:
+            processed_count += 1
+            if not args.dry_run:
+                # Step 2: Virtualize (remove physical markers and relocate to registry)
+                print(
+                    f"Relocating compliance markers for {rel_path} to transparency registry..."
+                )
+                if manager.remove_markers(filepath):
+                    print(
+                        f"Successfully virtualized metadata for {rel_path} to registry."
+                    )
+                else:
+                    print(f"Warning: Failed to virtualize metadata for {rel_path}.")
+
+    processor.close()
+    print(f"\nDone! Successfully processed and virtualized {processed_count} files.")
     return 0
 
 
@@ -2807,6 +3102,38 @@ def main():
         "--model", required=False, help="Optional: Path to the GGUF model"
     )
     determine_dep_parser.set_defaults(func=handle_determine_dependency)
+
+    # --- Reconcile Transparency Command ---
+    reconcile_parser = subparsers.add_parser(
+        "reconcile-transparency",
+        help="Reconcile documentation markers with the transparency registry",
+    )
+    reconcile_parser.add_argument(
+        "--path", help="Path to file or directory to scan (default: project root)"
+    )
+    reconcile_parser.add_argument(
+        "--transform",
+        choices=["html", "remove", "restore"],
+        help="Transform markers: 'html' (convert to comments), 'remove' (delete), or 'restore' (re-insert)",
+    )
+    reconcile_parser.set_defaults(func=handle_reconcile_transparency)
+
+    # --- Normalize Docs Command ---
+    normalize_docs_parser = subparsers.add_parser(
+        "normalize-docs",
+        help="Normalize documentation files and relocate markers to transparency registry",
+    )
+    normalize_docs_parser.add_argument("--file", type=str, help="Process a single file")
+    normalize_docs_parser.add_argument(
+        "--limit", type=int, default=10, help="Max files to process"
+    )
+    normalize_docs_parser.add_argument(
+        "--dry-run", action="store_true", help="Dry run mode"
+    )
+    normalize_docs_parser.add_argument(
+        "--model", required=False, help="Path to GGUF model"
+    )
+    normalize_docs_parser.set_defaults(func=handle_normalize_docs)
 
     args = parser.parse_args()
 

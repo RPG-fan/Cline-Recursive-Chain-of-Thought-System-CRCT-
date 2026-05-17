@@ -194,6 +194,29 @@ class LocalLLMProcessor:
             logger.warning(f"Tokenizer failed: {e}. Falling back to estimate.")
             return len(text) // 3
 
+    def generate(
+        self,
+        prompt: str,
+        max_tokens: int = 500,
+        stop: Optional[List[str]] = None,
+        temperature: float = 0.1,
+        echo: bool = False,
+    ) -> str:
+        """
+        Runs inference on a generic prompt and returns the generated text.
+        """
+        prompt_tokens = self.get_token_count(prompt)
+        required_ctx = prompt_tokens + max_tokens
+
+        model = self._load_model(required_ctx)
+        if model is None:
+            raise RuntimeError("Model was not loaded correctly.")
+
+        output = model(
+            prompt, max_tokens=max_tokens, stop=stop, temperature=temperature, echo=echo
+        )
+        return str(output["choices"][0]["text"].strip())
+
     # Default response margin for reasoning + result
     RESPONSE_MARGIN = 520
 
