@@ -19,7 +19,8 @@ The dependencies in tracker grids (e.g., `pso4p`) are listed in a *compressed* f
     *Note: the `next_action` field may not be relevant if you have just been initialized, defer to `activeContext.md` to determine your next steps. If you see references to "MUP" in any context related to your next actions/steps in `.clinerules` or `activeContext.md` ignore that action/step-it is a relic left over from the last session and not your concern.*
     2. **Load Plugin**: Based on `next_phase` indicated in `.clinerules/default-rules.md`, load the corresponding plugin from `.clinerules/`. **YOU MUST LOAD THE PLUGIN INSTRUCTIONS. DO NOT PROCEED WITHOUT DOING SO.**
     3. **Read Core Files**: Read the specific files listed in Section II below. Do not re-read these if already loaded in the current session.
-    4. **Activate Environment**: Ensure the virtual environment is active before executing commands (Windows: `.\.venv\Scripts\Activate.ps1`, then run as `.\.venv\Scripts\python.exe -m ...`). Create if one does not exist.
+    4. **Determine the virtual environment**: Search the project root for common virtual environment names (venv, .venv, etc.), if needed ask the user for the correct path to the environment.
+    5. **Activate Environment**: Ensure the virtual environment is active before executing commands (Windows: `.\.venv\Scripts\Activate.ps1`, then run as `.\.venv\Scripts\python.exe -m ...`). Create if one does not exist.
       - May not follow exact ".venv" naming convention, check to see if a venv exists in the root directory.
     **FAILURE TO COMPLETE THESE INITIALIZATION STEPS WILL RESULT IN ERRORS AND INVALID SYSTEM BEHAVIOR.**
 
@@ -334,7 +335,7 @@ The MUP must be followed immediately after any state-changing action:
 
 ## VIII. Dependency Processor Command Overview
 
-Located in `cline_utils/`. **All commands are executed via `.\.venv\Scripts\python.exe -m cline_utils.dependency_system.dependency_processor <command> [args...]`.** Most commands return a status message upon completion.
+Located in `cline_utils/`. **All commands are executed via `python -m cline_utils.dependency_system.dependency_processor <command> [args...]`.** Most commands return a status message upon completion.
 
 **IMPORTANT: To ensure data consistency, conserve context window tokens, and leverage built-in parsing logic, ALWAYS use the `show-keys`, `show-dependencies`, and `show-placeholders` commands to retrieve key definitions and dependency information from tracker files (`*_tracker.md`, `*_module.md`). Avoid using `read_file` on tracker files for this purpose.** Direct reading can lead to parsing errors and consumes excessive context.
 
@@ -345,7 +346,7 @@ Located in `cline_utils/`. **All commands are executed via `.\.venv\Scripts\pyth
     * **Example**:
 
     ```python
-     `.\.venv\Scripts\python.exe -m cline_utils.dependency_system.dependency_processor analyze-project`
+     `python -m cline_utils.dependency_system.dependency_processor analyze-project`
     ```
 
     * **Flags**: `--force-analysis` bypasses caches; `--force-embeddings` forces embedding recalculation; `--force-validate` forces a fresh resource validation check.
@@ -356,7 +357,7 @@ Located in `cline_utils/`. **All commands are executed via `.\.venv\Scripts\pyth
     * **Example**:
 
     ```python
-     `.\.venv\Scripts\python.exe -m cline_utils.dependency_system.dependency_processor show-dependencies --key 3Ba2#1`
+     `python -m cline_utils.dependency_system.dependency_processor show-dependencies --key 3Ba2#1`
     ```
 
     * **IMPORTANT**: The key used with `show-dependencies` is the *row*. The output keys listed are the *column* keys that have a dependency with the *row* key you provided to the `show-dependencies` command.
@@ -369,7 +370,7 @@ Located in `cline_utils/`. **All commands are executed via `.\.venv\Scripts\pyth
     **Example**:
 
     ```python
-    `.\.venv\Scripts\python.exe -m cline_utils.dependency_system.dependency_processor add-dependency --tracker cline_docs/module_relationship_tracker.md --source-key 2Aa --target-key 1Bd --dep-type ">"`
+    python -m cline_utils.dependency_system.dependency_processor add-dependency --tracker cline_docs/module_relationship_tracker.md --source-key 2Aa --target-key 1Bd 1Be --dep-type ">"
      ```
 
     *(Note: This command applies the *single* `--dep-type` to *all* specified target keys relative to the source key.)*
