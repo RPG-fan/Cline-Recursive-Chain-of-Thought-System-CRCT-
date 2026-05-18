@@ -10,13 +10,13 @@ import re
 from typing import Dict, List, Tuple
 from collections import defaultdict
 
-
 # Import only from utils or sibling core modules if necessary
 from cline_utils.dependency_system.utils.cache_manager import (
     cached,
     invalidate_dependent_entries,
     clear_all_caches,
 )
+from cline_utils.dependency_system.utils.calculate_hash import calculate_content_hash
 
 # Import KeyInfo for type hinting and usage
 from .key_manager import (
@@ -36,6 +36,11 @@ EMPTY_CHAR = "."
 
 # Compile regex pattern for RLE compression scheme (repeating characters, excluding 'o')
 COMPRESSION_PATTERN = re.compile(r"([^o])\1{2,}")
+
+
+def _deterministic_hash(grid: Dict[str, str]) -> str:
+    """Generate a stable, cross-process hash for the grid dictionary using calculate_content_hash."""
+    return calculate_content_hash(str(sorted(grid.items())))
 
 
 def compress(s: str) -> str:
@@ -191,7 +196,7 @@ def set_char_at(s: str, index: int, new_char: str) -> str:
 # --- Grid Validation ---
 @cached(
     "grid_validation",
-    key_func=lambda grid, key_info_list: f"validate_grid:{hash(str(sorted(grid.items())))}:{':'.join(sort_key_strings_hierarchically([ki.key_string for ki in key_info_list]))}",
+    key_func=lambda grid, key_info_list: f"validate_grid:{_deterministic_hash(grid)}:{':'.join(sort_key_strings_hierarchically([ki.key_string for ki in key_info_list]))}",
 )
 def validate_grid(
     grid: Dict[str, str], key_info_list: List[KeyInfo]
@@ -334,7 +339,7 @@ def add_dependency_to_grid(
         "grid_decompress", f"decompress:{new_grid.get(source_key_str)}"
     )
     # For validate_grid cache invalidation, use the key_info_list to form the cache key
-    cache_key_validate = f"validate_grid:{hash(str(sorted(new_grid.items())))}:{':'.join(sort_key_strings_hierarchically([ki.key_string for ki in key_info_list]))}"
+    cache_key_validate = f"validate_grid:{_deterministic_hash(new_grid)}:{':'.join(sort_key_strings_hierarchically([ki.key_string for ki in key_info_list]))}"
     invalidate_dependent_entries("grid_validation", cache_key_validate)
     return new_grid
 
@@ -383,7 +388,7 @@ def remove_dependency_from_grid(
     invalidate_dependent_entries(
         "grid_decompress", f"decompress:{new_grid[source_key_str]}"
     )
-    cache_key_validate = f"validate_grid:{hash(str(sorted(new_grid.items())))}:{':'.join(sort_key_strings_hierarchically([ki.key_string for ki in key_info_list]))}"
+    cache_key_validate = f"validate_grid:{_deterministic_hash(new_grid)}:{':'.join(sort_key_strings_hierarchically([ki.key_string for ki in key_info_list]))}"
     invalidate_dependent_entries("grid_validation", cache_key_validate)
     return new_grid
 
@@ -391,7 +396,7 @@ def remove_dependency_from_grid(
 # --- Dependency Retrieval ---
 @cached(
     "grid_dependencies",
-    key_func=lambda grid, source_key_str, key_info_list: f"grid_deps:{hash(str(sorted(grid.items())))}:{source_key_str}:{':'.join(sort_key_strings_hierarchically([ki.key_string for ki in key_info_list]))}",
+    key_func=lambda grid, source_key_str, key_info_list: f"grid_deps:{_deterministic_hash(grid)}:{source_key_str}:{':'.join(sort_key_strings_hierarchically([ki.key_string for ki in key_info_list]))}",
 )
 def get_dependencies_from_grid(
     grid: Dict[str, str], source_key_str: str, key_info_list: List[KeyInfo]

@@ -9,7 +9,7 @@ import glob
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from .path_utils import get_project_root, normalize_path
 from .resource_validator import ResourceValidator
@@ -312,6 +312,7 @@ class ConfigManager:
         self._threshold_cache: Dict[str, float] = {}
         self._model_name_cache: Dict[str, str] = {}
         self._path_cache: Dict[str, str] = {}
+        self._on_save_callbacks: List[Callable[[str], None]] = []
 
         self._load_and_merge_config()
 
@@ -337,6 +338,12 @@ class ConfigManager:
         # They are triggered by perform_resource_validation_and_adjustments().
 
         self._initialized = True
+
+    def register_on_save_callback(self, callback: Callable[[str], None]) -> None:
+        """Register a callback to be executed when configuration is saved."""
+        if not hasattr(self, "_on_save_callbacks") or self._on_save_callbacks is None:
+            self._on_save_callbacks = []
+        self._on_save_callbacks.append(callback)
 
     @property
     def resource_validation_results(self) -> Optional[Dict[str, Any]]:
@@ -481,22 +488,18 @@ class ConfigManager:
             temp_path = normalized_path + ".tmp"
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(self._config, f, indent=2, ensure_ascii=False)
-            
+
             # Atomic swap using os.replace to prevent corruption during writes/locks
             os.replace(temp_path, normalized_path)
             logger.info(f"Configuration saved to {config_path}")
 
-            # Invalidate config cache if using cache_manager
-            try:
-                from .cache_manager import invalidate_dependent_entries
-
-                invalidate_dependent_entries(
-                    "config_data", f"config:{os.path.getmtime(normalized_path)}"
-                )
-            except ImportError:
-                pass  # Cache manager not available
-            except Exception as e_cache:
-                logger.warning(f"Could not invalidate config cache: {e_cache}")
+            # Call any registered save callbacks to trigger cache invalidation
+            if hasattr(self, "_on_save_callbacks") and self._on_save_callbacks:
+                for callback in self._on_save_callbacks:
+                    try:
+                        callback(normalized_path)
+                    except Exception as cb_err:
+                        logger.warning(f"Error calling config save callback: {cb_err}")
 
             return True
         except OSError as e:
@@ -533,16 +536,7 @@ class ConfigManager:
         Returns:
             List of excluded directory names
         """
-        from .cache_manager import cached
-
-        @cached(
-            "excluded_dirs",
-            key_func=lambda self: f"excluded_dirs:{os.path.getmtime(self.config_path) if os.path.exists(self.config_path) else 'missing'}",
-        )
-        def _get_excluded_dirs(self) -> List[str]:
-            return self.config.get("excluded_dirs", DEFAULT_CONFIG["excluded_dirs"])
-
-        return _get_excluded_dirs(self)
+        return self.config.get("excluded_dirs", DEFAULT_CONFIG["excluded_dirs"])
 
     def get_excluded_extensions(self) -> List[str]:
         """
@@ -551,18 +545,9 @@ class ConfigManager:
         Returns:
             List of excluded file extensions
         """
-        from .cache_manager import cached
-
-        @cached(
-            "excluded_extensions",
-            key_func=lambda self: f"excluded_extensions:{os.path.getmtime(self.config_path) if os.path.exists(self.config_path) else 'missing'}",
+        return self.config.get(
+            "excluded_extensions", DEFAULT_CONFIG["excluded_extensions"]
         )
-        def _get_excluded_extensions(self) -> List[str]:
-            return self.config.get(
-                "excluded_extensions", DEFAULT_CONFIG["excluded_extensions"]
-            )
-
-        return _get_excluded_extensions(self)
 
     def get_excluded_paths(self) -> List[str]:
         """
@@ -571,50 +556,41 @@ class ConfigManager:
         Returns:
             List of excluded path patterns or absolute paths
         """
-        from .cache_manager import cached
-
-        @cached(
-            "excluded_paths",
-            key_func=lambda self: f"excluded_paths:{os.path.getmtime(self.config_path) if os.path.exists(self.config_path) else 'missing'}",
+        # Retrieve excluded_paths from config, defaulting to DEFAULT_CONFIG value
+        excluded_paths_config = self.config.get(
+            "excluded_paths", DEFAULT_CONFIG["excluded_paths"]
         )
-        def _get_excluded_paths(self) -> List[str]:
-            # Retrieve excluded_paths from config, defaulting to DEFAULT_CONFIG value
-            excluded_paths_config = self.config.get(
-                "excluded_paths", DEFAULT_CONFIG["excluded_paths"]
-            )
-            excluded_file_patterns = self.config.get(
-                "excluded_file_patterns",
-                DEFAULT_CONFIG.get("excluded_file_patterns", []),
-            )  # Get file patterns, default to empty list if not set
+        excluded_file_patterns = self.config.get(
+            "excluded_file_patterns",
+            DEFAULT_CONFIG.get("excluded_file_patterns", []),
+        )  # Get file patterns, default to empty list if not set
 
-            excluded_paths = []
-            project_root = get_project_root()
+        excluded_paths = []
+        project_root = get_project_root()
 
-            # 1. Explicitly excluded paths
-            excluded_paths.extend(
-                [
-                    (
-                        normalize_path(os.path.join(project_root, p))
-                        if not os.path.isabs(p)
-                        else normalize_path(p)
-                    )
-                    for p in excluded_paths_config
-                ]
-            )
+        # 1. Explicitly excluded paths
+        excluded_paths.extend(
+            [
+                (
+                    normalize_path(os.path.join(project_root, p))
+                    if not os.path.isabs(p)
+                    else normalize_path(p)
+                )
+                for p in excluded_paths_config
+            ]
+        )
 
-            # 2. Paths from excluded file patterns
-            for pattern in excluded_file_patterns:
-                # Construct the full pattern relative to the project root
-                full_pattern = normalize_path(
-                    os.path.join(project_root, "**", pattern)
-                )  # Use '**' for recursion
-                # Use glob with recursive=True to find matching paths
-                matching_paths = glob.glob(full_pattern, recursive=True)
-                excluded_paths.extend([normalize_path(p) for p in matching_paths])
+        # 2. Paths from excluded file patterns
+        for pattern in excluded_file_patterns:
+            # Construct the full pattern relative to the project root
+            full_pattern = normalize_path(
+                os.path.join(project_root, "**", pattern)
+            )  # Use '**' for recursion
+            # Use glob with recursive=True to find matching paths
+            matching_paths = glob.glob(full_pattern, recursive=True)
+            excluded_paths.extend([normalize_path(p) for p in matching_paths])
 
-            return excluded_paths
-
-        return _get_excluded_paths(self)
+        return excluded_paths
 
     def get_threshold(self, threshold_type: str) -> float:
         """
@@ -687,53 +663,40 @@ class ConfigManager:
         Returns:
             Sorted list of code root directories
         """
-        from .cache_manager import cached
-
-        @cached(
-            "code_roots",
-            key_func=lambda self: (
-                lambda pr: f"code_roots:{os.path.getmtime(os.path.join(pr, '.clinerules', 'default-rules.md')) if os.path.exists(os.path.join(pr, '.clinerules', 'default-rules.md')) else (os.path.getmtime(os.path.join(pr, '.clinerules')) if os.path.exists(os.path.join(pr, '.clinerules')) else 'missing')}"
-            )(get_project_root()),
+        project_root = get_project_root()
+        new_rules_path = os.path.join(project_root, ".clinerules", "default-rules.md")
+        legacy_rules_path = os.path.join(project_root, ".clinerules")
+        clinerules_path = (
+            new_rules_path if os.path.exists(new_rules_path) else legacy_rules_path
         )
-        def _get_code_root_directories(self) -> List[str]:
-            project_root = get_project_root()
-            new_rules_path = os.path.join(
-                project_root, ".clinerules", "default-rules.md"
+        code_root_dirs = []
+        try:
+            with open(clinerules_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            in_code_root_section = False
+            for line in lines:
+                line = line.strip()
+                if line == "[CODE_ROOT_DIRECTORIES]":
+                    in_code_root_section = True
+                    continue
+                if in_code_root_section:
+                    if line.startswith("-"):
+                        # Normalize path *before* adding to list
+                        path_part = line[1:].strip()  # Get content after '-'
+                        if path_part:  # Ensure it's not just '-'
+                            code_root_dirs.append(normalize_path(path_part))
+                    elif line.startswith("["):
+                        break  # Reached next section
+        except FileNotFoundError:
+            logger.warning(
+                "'.clinerules/default-rules.md' not found and legacy '.clinerules' missing. Cannot read code root directories."
             )
-            legacy_rules_path = os.path.join(project_root, ".clinerules")
-            clinerules_path = (
-                new_rules_path if os.path.exists(new_rules_path) else legacy_rules_path
-            )
-            code_root_dirs = []
-            try:
-                with open(clinerules_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                in_code_root_section = False
-                for line in lines:
-                    line = line.strip()
-                    if line == "[CODE_ROOT_DIRECTORIES]":
-                        in_code_root_section = True
-                        continue
-                    if in_code_root_section:
-                        if line.startswith("-"):
-                            # Normalize path *before* adding to list
-                            path_part = line[1:].strip()  # Get content after '-'
-                            if path_part:  # Ensure it's not just '-'
-                                code_root_dirs.append(normalize_path(path_part))
-                        elif line.startswith("["):
-                            break  # Reached next section
-            except FileNotFoundError:
-                logger.warning(
-                    "'.clinerules/default-rules.md' not found and legacy '.clinerules' missing. Cannot read code root directories."
-                )
-            except Exception as e:
-                logger.error(f"Error reading .clinerules for code roots: {e}")
-            # *** SORT the result alphabetically ***
-            code_root_dirs.sort()
-            logger.debug(f"Found and sorted code roots: {code_root_dirs}")
-            return code_root_dirs
-
-        return _get_code_root_directories(self)
+        except Exception as e:
+            logger.error(f"Error reading .clinerules for code roots: {e}")
+        # *** SORT the result alphabetically ***
+        code_root_dirs.sort()
+        logger.debug(f"Found and sorted code roots: {code_root_dirs}")
+        return code_root_dirs
 
     def get_doc_directories(self) -> List[str]:
         """
@@ -742,53 +705,40 @@ class ConfigManager:
         Returns:
             Sorted list of doc directories
         """
-        from .cache_manager import cached
-
-        @cached(
-            "doc_dirs",
-            key_func=lambda self: (
-                lambda pr: f"doc_dirs:{os.path.getmtime(os.path.join(pr, '.clinerules', 'default-rules.md')) if os.path.exists(os.path.join(pr, '.clinerules', 'default-rules.md')) else (os.path.getmtime(os.path.join(pr, '.clinerules')) if os.path.exists(os.path.join(pr, '.clinerules')) else 'missing')}"
-            )(get_project_root()),
+        project_root = get_project_root()
+        new_rules_path = os.path.join(project_root, ".clinerules", "default-rules.md")
+        legacy_rules_path = os.path.join(project_root, ".clinerules")
+        clinerules_path = (
+            new_rules_path if os.path.exists(new_rules_path) else legacy_rules_path
         )
-        def _get_doc_directories(self) -> List[str]:
-            project_root = get_project_root()
-            new_rules_path = os.path.join(
-                project_root, ".clinerules", "default-rules.md"
+        doc_dirs = []
+        try:
+            with open(clinerules_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            in_doc_section = False
+            for line in lines:
+                line = line.strip()
+                if line == "[DOC_DIRECTORIES]":
+                    in_doc_section = True
+                    continue
+                if in_doc_section:
+                    if line.startswith("-"):
+                        # Normalize path *before* adding to list
+                        path_part = line[1:].strip()  # Get content after '-'
+                        if path_part:  # Ensure it's not just '-'
+                            doc_dirs.append(normalize_path(path_part))
+                    elif line.startswith("["):
+                        break  # Reached next section
+        except FileNotFoundError:
+            logger.warning(
+                "'.clinerules/default-rules.md' not found and legacy '.clinerules' missing. Cannot read doc directories."
             )
-            legacy_rules_path = os.path.join(project_root, ".clinerules")
-            clinerules_path = (
-                new_rules_path if os.path.exists(new_rules_path) else legacy_rules_path
-            )
-            doc_dirs = []
-            try:
-                with open(clinerules_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                in_doc_section = False
-                for line in lines:
-                    line = line.strip()
-                    if line == "[DOC_DIRECTORIES]":
-                        in_doc_section = True
-                        continue
-                    if in_doc_section:
-                        if line.startswith("-"):
-                            # Normalize path *before* adding to list
-                            path_part = line[1:].strip()  # Get content after '-'
-                            if path_part:  # Ensure it's not just '-'
-                                doc_dirs.append(normalize_path(path_part))
-                        elif line.startswith("["):
-                            break  # Reached next section
-            except FileNotFoundError:
-                logger.warning(
-                    "'.clinerules/default-rules.md' not found and legacy '.clinerules' missing. Cannot read doc directories."
-                )
-            except Exception as e:
-                logger.error(f"Error reading .clinerules for doc dirs: {e}")
-            # *** SORT the result alphabetically ***
-            doc_dirs.sort()
-            logger.debug(f"Found and sorted doc dirs: {doc_dirs}")
-            return doc_dirs
-
-        return _get_doc_directories(self)
+        except Exception as e:
+            logger.error(f"Error reading .clinerules for doc dirs: {e}")
+        # *** SORT the result alphabetically ***
+        doc_dirs.sort()
+        logger.debug(f"Found and sorted doc dirs: {doc_dirs}")
+        return doc_dirs
 
     def get_allowed_dependency_chars(self) -> List[str]:
         """Get the allowed dependency characters from configuration."""
@@ -837,6 +787,7 @@ class ConfigManager:
             True if successful, False otherwise
         """
         import copy
+
         self._config = copy.deepcopy(DEFAULT_CONFIG)
         return self._save_config()
 

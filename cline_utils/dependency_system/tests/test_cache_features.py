@@ -90,3 +90,46 @@ def test_throttled_cleanup(clear_cache):
     func_to_cache(4)
     assert "manual_key" not in cache.data
     assert cache_manager._last_cleanup_time > time_cleanup_was_executed
+
+
+def test_grid_cache_deterministic_hash(clear_cache):
+    from cline_utils.dependency_system.core.key_manager import KeyInfo
+    from cline_utils.dependency_system.core.dependency_grid import (
+        _deterministic_hash,
+        validate_grid,
+        get_dependencies_from_grid,
+    )
+    from cline_utils.dependency_system.utils.calculate_hash import (
+        calculate_content_hash,
+    )
+
+    # 1. Define keys and grid
+    keys = [
+        KeyInfo("1A1", "h:/repo/src/a.py", "h:/repo/src", 1, False),
+        KeyInfo("1A2", "h:/repo/src/b.py", "h:/repo/src", 1, False),
+    ]
+    grid = {"1A1": "o<", "1A2": ">o"}
+
+    # 2. Check that _deterministic_hash produces the expected hash from calculate_content_hash
+    expected_hash = calculate_content_hash(str(sorted(grid.items())))
+    assert _deterministic_hash(grid) == expected_hash
+
+    # 3. Verify that calling validate_grid caches the result with the deterministic key
+    validate_grid(grid, keys)
+    from cline_utils.dependency_system.utils.cache_manager import cache_manager
+
+    cache = cache_manager.get_cache("grid_validation")
+
+    # Construct expected cache key: f"validate_grid:{_deterministic_hash(grid)}:{sorted keys path list}"
+    from cline_utils.dependency_system.core.key_manager import (
+        sort_key_strings_hierarchically,
+    )
+
+    expected_cache_key = f"validate_grid:{expected_hash}:{':'.join(sort_key_strings_hierarchically([ki.key_string for ki in keys]))}"
+    assert expected_cache_key in cache.data
+
+    # 4. Verify that calling get_dependencies_from_grid caches with deterministic key
+    get_dependencies_from_grid(grid, "1A1", keys)
+    cache_deps = cache_manager.get_cache("grid_dependencies")
+    expected_cache_key_deps = f"grid_deps:{expected_hash}:1A1:{':'.join(sort_key_strings_hierarchically([ki.key_string for ki in keys]))}"
+    assert expected_cache_key_deps in cache_deps.data
