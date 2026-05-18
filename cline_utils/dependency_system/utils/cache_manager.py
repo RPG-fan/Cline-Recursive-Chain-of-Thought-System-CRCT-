@@ -17,6 +17,7 @@ import time
 import uuid
 import weakref
 import atexit
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar, cast
@@ -63,6 +64,8 @@ class CacheMetrics:
     """Enhanced cache performance metrics."""
 
     hits: int = 0
+    l1_hits: int = 0
+    l2_hits: int = 0
     misses: int = 0
     evictions: int = 0
     compression_saves: int = 0
@@ -106,8 +109,15 @@ class Cache:
         self.eviction_policy = eviction_policy
         self.enable_compression = enable_compression
 
+        # Layer 1 (Short-Term Memory / Fast Buffer) cache structures
+        self.l1_data: OrderedDict[str, Tuple[Any, Optional[float], bool]] = (
+            OrderedDict()
+        )
+        self.l1_deps: Dict[str, Tuple[Optional[List[str]], Optional[int]]] = {}
+        self.l1_max_size: int = max(10, min(500, self.max_size // 10))
+
         # Enhanced features
-        self._lock = threading.RLock()  # Thread safety
+        self.lock = threading.RLock()  # Thread safety
         self.compression_threshold = COMPRESSION_THRESHOLD
 
         # Register cache for global monitoring
@@ -120,24 +130,47 @@ class Cache:
 
         logger.debug(
             f"Cache '{name}' initialized: policy={eviction_policy.value}, "
-            f"max_size={self.max_size}, compression={enable_compression}"
+            f"max_size={self.max_size}, L1 max_size={self.l1_max_size}, compression={enable_compression}"
         )
 
     def get(self, key: str) -> Any:
-        with self._lock:
+        with self.lock:
+            # 1. Check Layer 1 (Short-Term Memory / Fast Buffer)
+            if key in self.l1_data:
+                value, expiry, _ = self.l1_data[key]
+
+                # Check if expired
+                if expiry and time.time() > expiry:
+                    self.remove_key(key)
+                    self.metrics.misses += 1
+                    return None
+
+                # L1 Hit! Move to end to maintain LRU order
+                self.l1_data.move_to_end(key)
+                self.metrics.hits += 1
+                self.metrics.l1_hits += 1
+
+                # Update access count & time in metrics
+                current_time = time.time()
+                self.metrics.last_access[key] = current_time
+                self.metrics.access_count[key] = (
+                    self.metrics.access_count.get(key, 0) + 1
+                )
+
+                return value
+
+            # 2. Check Layer 2 (Long-Term Cache)
             if key not in self.data:
                 self.metrics.misses += 1
-                # logger.debug(f"Cache '{self.name}': Miss for key '{key}'")
                 return None
 
-            # Get value and metadata
+            # L2 Hit! Get value and metadata
             value, current_time, expiry = self.data[key]
 
             # Check if expired
             if expiry and time.time() > expiry:
-                self._remove_key(key)
+                self.remove_key(key)
                 self.metrics.misses += 1
-                # logger.debug(f"Cache '{self.name}': Miss (expired) for key '{key}'")
                 return None
 
             # Update access information
@@ -146,11 +179,16 @@ class Cache:
             self.metrics.last_access[key] = current_time
             self.metrics.access_count[key] = self.metrics.access_count.get(key, 0) + 1
             self.metrics.hits += 1
-            # logger.debug(f"Cache '{self.name}': Hit for key '{key}'")
+            self.metrics.l2_hits += 1
 
             # Decompress if necessary
             if isinstance(value, bytes) and self.enable_compression:
                 value = self._decompress_value(value)
+
+            # Populate Layer 1 with this item (marked as clean/not dirty)
+            self.l1_data[key] = (value, expiry, False)
+            if len(self.l1_data) > self.l1_max_size:
+                self._evict_l1_oldest()
 
             return value
 
@@ -207,6 +245,30 @@ class Cache:
         except:
             return False
 
+    def _evict_l1_oldest(self) -> None:
+        """Evict the oldest item from Layer 1, dumping it to Layer 2 if it's dirty."""
+        if not self.l1_data:
+            return
+        evicted_key, (evicted_val, evicted_expiry, is_dirty) = self.l1_data.popitem(
+            last=False
+        )
+        if is_dirty:
+            deps, ttl = self.l1_deps.pop(evicted_key, (None, None))
+            self._set_l2(evicted_key, evicted_val, deps, ttl, expiry=evicted_expiry)
+        else:
+            self.l1_deps.pop(evicted_key, None)
+
+    def flush(self) -> None:
+        """Flush all dirty items from L1 (Short-Term Memory) to L2 (Long-Term Cache)."""
+        with self.lock:
+            # Construct a list to avoid dict modification errors during iteration
+            for key, (value, expiry, is_dirty) in list(self.l1_data.items()):
+                if is_dirty:
+                    deps, ttl = self.l1_deps.get(key, (None, None))
+                    self._set_l2(key, value, deps, ttl, expiry=expiry)
+                    # Mark as clean/non-dirty in L1
+                    self.l1_data[key] = (value, expiry, False)
+
     def set(
         self,
         key: str,
@@ -214,38 +276,64 @@ class Cache:
         dependencies: Optional[List[str]] = None,
         ttl: Optional[int] = None,
     ) -> None:
-        with self._lock:
-            self.modified = True
-            # Compress if beneficial
-            if self._should_compress(key, value):
-                value = self._compress_value(value)
-                self.metrics.compression_saves += 1
-
-            # Calculate size for metrics
-            size_estimate = self._estimate_size(value)
-
-            # Evict if necessary
-            if len(self.data) >= self.max_size:
-                self._evict_items()
-
-            # Set with new metadata
+        with self.lock:
+            # Store in Layer 1 (Short-Term Memory) and mark as dirty
             expiry = (
                 time.time() + (ttl if ttl is not None else self.default_ttl)
                 if ttl != 0
                 else None
             )
-            self.data[key] = (value, time.time(), expiry)
-            self.metrics.total_size_bytes += size_estimate
+            self.l1_data[key] = (value, expiry, True)
+            self.l1_deps[key] = (dependencies, ttl)
 
-            # Track dependencies
-            if dependencies:
-                for dep in dependencies:
-                    if dep not in self.dependencies:
-                        self.dependencies[dep] = []
-                    self.dependencies[dep].append(key)
-                    if key not in self.reverse_deps:
-                        self.reverse_deps[key] = []
-                    self.reverse_deps[key].append(dep)
+            # Move to end if it already existed to maintain LRU order
+            self.l1_data.move_to_end(key)
+
+            # Evict from L1 if it exceeds L1 max size limit
+            if len(self.l1_data) > self.l1_max_size:
+                self._evict_l1_oldest()
+
+    def _set_l2(
+        self,
+        key: str,
+        value: Any,
+        dependencies: Optional[List[str]] = None,
+        ttl: Optional[int] = None,
+        expiry: Optional[float] = None,
+    ) -> None:
+        """Internal L2 set implementation with compression, eviction, and dependency tracking."""
+        self.modified = True
+        # Compress if beneficial
+        if self._should_compress(key, value):
+            value = self._compress_value(value)
+            self.metrics.compression_saves += 1
+
+        # Calculate size for metrics
+        size_estimate = self._estimate_size(value)
+
+        # Evict if necessary
+        if len(self.data) >= self.max_size:
+            self._evict_items()
+
+        # Set with new metadata
+        if expiry is None:
+            expiry = (
+                time.time() + (ttl if ttl is not None else self.default_ttl)
+                if ttl != 0
+                else None
+            )
+        self.data[key] = (value, time.time(), expiry)
+        self.metrics.total_size_bytes += size_estimate
+
+        # Track dependencies
+        if dependencies:
+            for dep in dependencies:
+                if dep not in self.dependencies:
+                    self.dependencies[dep] = []
+                self.dependencies[dep].append(key)
+                if key not in self.reverse_deps:
+                    self.reverse_deps[key] = []
+                self.reverse_deps[key].append(dep)
 
     def _evict_items(self) -> None:
         """Enhanced eviction with multiple policies."""
@@ -277,13 +365,15 @@ class Cache:
 
         # Remove evicted items
         for key in keys_to_evict:
-            self._remove_key(key)
+            self.remove_key(key)
             self.metrics.evictions += 1
 
     def get_stats(self) -> Dict[str, Any]:
         """Get enhanced cache statistics."""
-        with self._lock:
-            total_items = len(self.data)
+        with self.lock:
+            total_items = len(self.data) + len(
+                [k for k in self.l1_data if k not in self.data]
+            )
             total_size = self.metrics.total_size_bytes
 
             return {
@@ -297,6 +387,8 @@ class Cache:
                 "total_size_mb": total_size / (1024 * 1024),
                 "hit_rate": self.metrics.hit_rate,
                 "hits": self.metrics.hits,
+                "l1_hits": self.metrics.l1_hits,
+                "l2_hits": self.metrics.l2_hits,
                 "misses": self.metrics.misses,
                 "evictions": self.metrics.evictions,
                 "compression_saves": self.metrics.compression_saves,
@@ -309,7 +401,7 @@ class Cache:
             return
         try:
             lru_key = min(self.data, key=lambda k: self.data[k][1])
-            self._remove_key(lru_key)
+            self.remove_key(lru_key)
         except ValueError:
             pass
         except RuntimeError:
@@ -317,9 +409,14 @@ class Cache:
                 f"Cache '{self.name}': RuntimeError during LRU eviction. Cache may be highly contended."
             )
 
-    def _remove_key(self, key: str) -> None:
+    def remove_key(self, key: str) -> None:
         self.modified = True
         try:
+            # 1. Remove from Layer 1
+            self.l1_data.pop(key, None)
+            self.l1_deps.pop(key, None)
+
+            # 2. Remove from Layer 2
             if key in self.data:
                 # Update size metrics before removal
                 value, _, _ = self.data[key]
@@ -353,6 +450,7 @@ class Cache:
 
     def cleanup_expired(self) -> None:
         """Remove all expired entries."""
+        self.flush()
         current_time = time.time()
         try:
             items_to_check = list(self.data.items())
@@ -374,7 +472,7 @@ class Cache:
                 if key_to_remove in self.data:
                     _val, _acc_time, exp_check_final = self.data[key_to_remove]
                     if exp_check_final and current_time > exp_check_final:
-                        self._remove_key(key_to_remove)
+                        self.remove_key(key_to_remove)
                         keys_actually_removed_count += 1
             if keys_actually_removed_count > 0:
                 logger.debug(
@@ -382,11 +480,14 @@ class Cache:
                 )
 
     def is_expired(self) -> bool:
+        self.flush()
         return (time.time() - self.creation_time) > self.default_ttl and not self.data
 
     def invalidate(self, key_pattern: str) -> None:
         """Invalidate entries matching a key pattern (supports regex). Also invalidates dependent entries."""
-        with self._lock:
+        with self.lock:
+            # Flush L1 first to ensure L2 has all entries
+            self.flush()
             self.modified = True
             compiled_pattern = re.compile(key_pattern)
             # Iterate over a copy of keys for safety during removal
@@ -402,9 +503,9 @@ class Cache:
                 if key_to_invalidate in processed_for_invalidation:
                     continue
 
-                self._remove_key(
+                self.remove_key(
                     key_to_invalidate
-                )  # Handles removal from self.data and basic reverse_deps cleanup
+                )  # Handles removal from self.data, L1, and basic reverse_deps cleanup
                 processed_for_invalidation.add(key_to_invalidate)
 
                 if key_to_invalidate in self.dependencies:
@@ -427,8 +528,11 @@ class Cache:
     def stats(self) -> Dict[str, int]:
         return {
             "hits": self.metrics.hits,
+            "l1_hits": self.metrics.l1_hits,
+            "l2_hits": self.metrics.l2_hits,
             "misses": self.metrics.misses,
-            "size": len(self.data),
+            "size": len(self.data)
+            + len([k for k in self.l1_data if k not in self.data]),
             "evictions": self.metrics.evictions,
             "compression_saves": self.metrics.compression_saves,
         }
@@ -455,14 +559,22 @@ class CacheManager:
     def _json_revive(self, obj: Any) -> Any:
         """Recursively revive objects from their JSON-safe representation (Legacy)."""
         if isinstance(obj, dict):
-            if obj.get("__type__") == "bytes" and obj.get("encoding") == "hex":
+            obj_dict = cast(Dict[str, Any], obj)
+            if (
+                obj_dict.get("__type__") == "bytes"
+                and obj_dict.get("encoding") == "hex"
+            ):
                 try:
-                    return bytes.fromhex(obj.get("data", ""))
+                    data_val = obj_dict.get("data", "")
+                    if isinstance(data_val, str):
+                        return bytes.fromhex(data_val)
+                    return obj_dict
                 except (ValueError, TypeError):
-                    return obj
-            return {k: self._json_revive(v) for k, v in obj.items()}
+                    return obj_dict
+            return {str(k): self._json_revive(v) for k, v in obj_dict.items()}
         if isinstance(obj, list):
-            return [self._json_revive(v) for v in obj]
+            obj_list = cast(List[Any], obj)
+            return [self._json_revive(v) for v in obj_list]
         return obj
 
     def _migrate_json_caches(self) -> None:
@@ -599,6 +711,9 @@ class CacheManager:
                 if total_usage <= target_usage:
                     break
 
+                # First, flush L1 so we have accurate total_size_bytes and can evict from L2
+                active_cache.flush()
+
                 # Evict 20% of items or until we meet target
                 initial_size: int = active_cache.metrics.total_size_bytes
                 if initial_size == 0:
@@ -609,7 +724,7 @@ class CacheManager:
                 if len(active_cache.data) < 5 and total_usage > budget_bytes:
                     items_to_evict = 1
 
-                with active_cache._lock:
+                with active_cache.lock:
                     # Logic similar to _evict_items but forced
                     time_sorted: list[str] = sorted(
                         active_cache.data.keys(),
@@ -617,7 +732,7 @@ class CacheManager:
                     )
                     keys_to_evict: list[str] = time_sorted[:items_to_evict]
                     for key in keys_to_evict:
-                        active_cache._remove_key(key)
+                        active_cache.remove_key(key)
                         active_cache.metrics.evictions += 1
 
                 total_usage -= initial_size - active_cache.metrics.total_size_bytes
@@ -669,6 +784,7 @@ class CacheManager:
 
         saved_count = 0
         for name, cache in self.caches.items():
+            cache.flush()  # Flush L1 to L2 first!
             if cache.modified:
                 self._save_cache(name)
                 saved_count += 1
@@ -704,6 +820,14 @@ class CacheManager:
                 self._wipe_on_disk()
             else:
                 self.save_all()
+
+        # Clear L1 and L2 for all caches
+        for cache in self.caches.values():
+            with cache.lock:
+                cache.l1_data.clear()
+                cache.l1_deps.clear()
+                cache.data.clear()
+
         self.caches.clear()
         if wipe:
             logger.info("All caches cleared and wiped from disk.")
@@ -713,6 +837,7 @@ class CacheManager:
     def _save_cache(self, cache_name: str) -> None:
         if cache_name in self.caches:
             cache = self.caches[cache_name]
+            cache.flush()
 
             # Use .pkl.gz for compressed caches
             extension = ".pkl.gz" if ENABLE_COMPRESSION else ".pkl"
@@ -888,14 +1013,14 @@ def file_modified(file_path: str, project_root: str, cache_type: str = "all") ->
             cache_instance.invalidate(key_pattern_to_invalidate)
 
             # 2. Invalidate by dependency lookup (new logic)
-            with cache_instance._lock:
+            with cache_instance.lock:
                 if dep_key in cache_instance.dependencies:
                     # Get list of keys dependent on this file
                     dependent_keys = list(cache_instance.dependencies[dep_key])
                     if dependent_keys:
                         # logger.debug(f"Cache '{cache_instance.name}': Invalidating {len(dependent_keys)} entries dependent on '{norm_path}'")
                         for key in dependent_keys:
-                            cache_instance._remove_key(key)
+                            cache_instance.remove_key(key)
 
     logger.debug(
         f"Invalidated entries matching path '{norm_path}' in cache(s) type '{cache_type}'."
@@ -1176,11 +1301,12 @@ try:
     # 1. get_excluded_dirs
     _orig_get_excluded_dirs = ConfigManager.get_excluded_dirs
 
-    @cached(
-        "excluded_dirs",
-        key_func=lambda self: f"excluded_dirs:{os.path.getmtime(self.config_path) if os.path.exists(self.config_path) else 'missing'}",
-    )
-    def _get_excluded_dirs_cached(self) -> List[str]:
+    def _excluded_dirs_key(self: ConfigManager) -> str:
+        path = self.config_path
+        return f"excluded_dirs:{os.path.getmtime(path) if os.path.exists(path) else 'missing'}"
+
+    @cached("excluded_dirs", key_func=_excluded_dirs_key)
+    def _get_excluded_dirs_cached(self: ConfigManager) -> List[str]:
         return _orig_get_excluded_dirs(self)
 
     ConfigManager.get_excluded_dirs = _get_excluded_dirs_cached
@@ -1188,11 +1314,12 @@ try:
     # 2. get_excluded_extensions
     _orig_get_excluded_extensions = ConfigManager.get_excluded_extensions
 
-    @cached(
-        "excluded_extensions",
-        key_func=lambda self: f"excluded_extensions:{os.path.getmtime(self.config_path) if os.path.exists(self.config_path) else 'missing'}",
-    )
-    def _get_excluded_extensions_cached(self) -> List[str]:
+    def _excluded_extensions_key(self: ConfigManager) -> str:
+        path = self.config_path
+        return f"excluded_extensions:{os.path.getmtime(path) if os.path.exists(path) else 'missing'}"
+
+    @cached("excluded_extensions", key_func=_excluded_extensions_key)
+    def _get_excluded_extensions_cached(self: ConfigManager) -> List[str]:
         return _orig_get_excluded_extensions(self)
 
     ConfigManager.get_excluded_extensions = _get_excluded_extensions_cached
@@ -1200,11 +1327,12 @@ try:
     # 3. get_excluded_paths
     _orig_get_excluded_paths = ConfigManager.get_excluded_paths
 
-    @cached(
-        "excluded_paths",
-        key_func=lambda self: f"excluded_paths:{os.path.getmtime(self.config_path) if os.path.exists(self.config_path) else 'missing'}",
-    )
-    def _get_excluded_paths_cached(self) -> List[str]:
+    def _excluded_paths_key(self: ConfigManager) -> str:
+        path = self.config_path
+        return f"excluded_paths:{os.path.getmtime(path) if os.path.exists(path) else 'missing'}"
+
+    @cached("excluded_paths", key_func=_excluded_paths_key)
+    def _get_excluded_paths_cached(self: ConfigManager) -> List[str]:
         return _orig_get_excluded_paths(self)
 
     ConfigManager.get_excluded_paths = _get_excluded_paths_cached
@@ -1212,13 +1340,23 @@ try:
     # 4. get_code_root_directories
     _orig_get_code_root_directories = ConfigManager.get_code_root_directories
 
-    @cached(
-        "code_roots",
-        key_func=lambda self: (
-            lambda pr: f"code_roots:{os.path.getmtime(os.path.join(pr, '.clinerules', 'default-rules.md')) if os.path.exists(os.path.join(pr, '.clinerules', 'default-rules.md')) else (os.path.getmtime(os.path.join(pr, '.clinerules')) if os.path.exists(os.path.join(pr, '.clinerules')) else 'missing')}"
-        )(get_project_root_cached()),
-    )
-    def _get_code_root_directories_cached(self) -> List[str]:
+    def _code_roots_key(self: ConfigManager) -> str:
+        pr = get_project_root_cached()
+        rules_path = os.path.join(pr, ".clinerules", "default-rules.md")
+        folder_path = os.path.join(pr, ".clinerules")
+        mtime = (
+            os.path.getmtime(rules_path)
+            if os.path.exists(rules_path)
+            else (
+                os.path.getmtime(folder_path)
+                if os.path.exists(folder_path)
+                else "missing"
+            )
+        )
+        return f"code_roots:{mtime}"
+
+    @cached("code_roots", key_func=_code_roots_key)
+    def _get_code_root_directories_cached(self: ConfigManager) -> List[str]:
         return _orig_get_code_root_directories(self)
 
     ConfigManager.get_code_root_directories = _get_code_root_directories_cached
@@ -1226,13 +1364,23 @@ try:
     # 5. get_doc_directories
     _orig_get_doc_directories = ConfigManager.get_doc_directories
 
-    @cached(
-        "doc_dirs",
-        key_func=lambda self: (
-            lambda pr: f"doc_dirs:{os.path.getmtime(os.path.join(pr, '.clinerules', 'default-rules.md')) if os.path.exists(os.path.join(pr, '.clinerules', 'default-rules.md')) else (os.path.getmtime(os.path.join(pr, '.clinerules')) if os.path.exists(os.path.join(pr, '.clinerules')) else 'missing')}"
-        )(get_project_root_cached()),
-    )
-    def _get_doc_directories_cached(self) -> List[str]:
+    def _doc_dirs_key(self: ConfigManager) -> str:
+        pr = get_project_root_cached()
+        rules_path = os.path.join(pr, ".clinerules", "default-rules.md")
+        folder_path = os.path.join(pr, ".clinerules")
+        mtime = (
+            os.path.getmtime(rules_path)
+            if os.path.exists(rules_path)
+            else (
+                os.path.getmtime(folder_path)
+                if os.path.exists(folder_path)
+                else "missing"
+            )
+        )
+        return f"doc_dirs:{mtime}"
+
+    @cached("doc_dirs", key_func=_doc_dirs_key)
+    def _get_doc_directories_cached(self: ConfigManager) -> List[str]:
         return _orig_get_doc_directories(self)
 
     ConfigManager.get_doc_directories = _get_doc_directories_cached
