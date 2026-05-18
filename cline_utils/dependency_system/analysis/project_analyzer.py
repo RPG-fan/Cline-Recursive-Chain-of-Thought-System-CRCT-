@@ -536,6 +536,27 @@ def analyze_project(
         }
 
         logger.info(f"Symbol map merge complete: {len(merged_symbol_map)} files")
+
+        # Realign locked transparency registry entries using the new symbol map
+        try:
+            from cline_utils.dependency_system.io.transparency_manager import (
+                get_transparency_manager,
+            )
+
+            tm = get_transparency_manager()
+            realigned_count = tm.realign_locked_entries(merged_symbol_map)
+            if realigned_count > 0:
+                logger.info(
+                    f"Successfully realigned {realigned_count} drifted transparency entries."
+                )
+                analysis_results["symbol_map_generation"][
+                    "realigned_count"
+                ] = realigned_count
+        except Exception as e:
+            logger.error(
+                f"Failed to realign locked transparency entries during project analysis: {e}",
+                exc_info=True,
+            )
     except Exception as e:
         logger.error(f"Failed to merge symbol maps: {e}", exc_info=True)
         analysis_results["symbol_map_generation"]["status"] = "error"
