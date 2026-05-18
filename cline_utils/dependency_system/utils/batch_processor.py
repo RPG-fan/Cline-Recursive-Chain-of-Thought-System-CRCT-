@@ -198,7 +198,7 @@ class BatchProcessor:
 
         if any(res is None for res in results):
             logger.warning(
-                f"Some items failed processing ({len(results) - len(final_results)} errors). Results list contains only successful items."
+                f"Some items failed processing ({len(results) - len(final_results)} errors). Results list contains None placeholders for failed items at corresponding indices to preserve alignment."
             )
 
         # Make sure final newline is printed after progress bar
@@ -377,7 +377,7 @@ def process_items(
     show_progress: bool = True,
     phase_name: str = "Processing",
     **kwargs: Any,
-) -> List[R]:
+) -> List[Optional[R]]:
     """
     Convenience function to process items in parallel using BatchProcessor.
     Extra keyword arguments (**kwargs) are passed directly to the processor_func.

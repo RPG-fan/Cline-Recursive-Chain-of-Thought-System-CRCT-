@@ -13,7 +13,7 @@ def export_json(
     unused: List[Dict[str, Any]],
     output_path: str,
     comment_index: Optional[Dict[str, List[Dict[str, Any]]]] = None,
-) -> None:
+) -> bool:
     """Generate the machine-readable JSON report."""
     try:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -23,5 +23,7 @@ def export_json(
 
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
+        return True
     except Exception as e:
         print(f"[report] Failed writing JSON report: {e}")
+        return False

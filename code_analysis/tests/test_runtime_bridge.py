@@ -582,21 +582,21 @@ def test_should_suppress_issue():
 
 def test_maybe_run_runtime_inspector_no_env(monkeypatch):
     monkeypatch.delenv("CRCT_AUTO_RUNTIME", raising=False)
-    with patch("subprocess.run") as mock_run:
+    with patch("os.path.isdir", return_value=True), patch("subprocess.run") as mock_run:
         maybe_run_runtime_inspector("/tmp/proj")
         mock_run.assert_not_called()
 
 def test_maybe_run_runtime_inspector_file_exists(monkeypatch, tmp_path):
     monkeypatch.setenv("CRCT_AUTO_RUNTIME", "1")
 
-    with patch("os.path.exists", return_value=True), patch("subprocess.run") as mock_run:
+    with patch("os.path.isdir", return_value=True), patch("os.path.exists", return_value=True), patch("subprocess.run") as mock_run:
         maybe_run_runtime_inspector("/tmp/proj")
         mock_run.assert_not_called()
 
 def test_maybe_run_runtime_inspector_runs(monkeypatch):
     monkeypatch.setenv("CRCT_AUTO_RUNTIME", "1")
 
-    with patch("os.path.exists", return_value=False), patch("subprocess.run") as mock_run:
+    with patch("os.path.isdir", return_value=True), patch("os.path.exists", return_value=False), patch("subprocess.run") as mock_run:
         maybe_run_runtime_inspector("/tmp/proj")
         mock_run.assert_called_once()
         args = mock_run.call_args[0][0]

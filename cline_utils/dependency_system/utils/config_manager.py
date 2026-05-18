@@ -476,11 +476,14 @@ class ConfigManager:
         """
         config_path = self.config_path  # Ensure path is initialized
         try:
-            os.makedirs(
-                os.path.dirname(normalize_path(self.config_path)), exist_ok=True
-            )
-            with open(normalize_path(self.config_path), "w", encoding="utf-8") as f:
+            normalized_path = normalize_path(config_path)
+            os.makedirs(os.path.dirname(normalized_path), exist_ok=True)
+            temp_path = normalized_path + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(self._config, f, indent=2, ensure_ascii=False)
+            
+            # Atomic swap using os.replace to prevent corruption during writes/locks
+            os.replace(temp_path, normalized_path)
             logger.info(f"Configuration saved to {config_path}")
 
             # Invalidate config cache if using cache_manager
@@ -488,7 +491,7 @@ class ConfigManager:
                 from .cache_manager import invalidate_dependent_entries
 
                 invalidate_dependent_entries(
-                    "config_data", f"config:{os.path.getmtime(config_path)}"
+                    "config_data", f"config:{os.path.getmtime(normalized_path)}"
                 )
             except ImportError:
                 pass  # Cache manager not available
@@ -833,7 +836,8 @@ class ConfigManager:
         Returns:
             True if successful, False otherwise
         """
-        self._config = DEFAULT_CONFIG.copy()
+        import copy
+        self._config = copy.deepcopy(DEFAULT_CONFIG)
         return self._save_config()
 
     def get_char_priority(self, char: str) -> int:
