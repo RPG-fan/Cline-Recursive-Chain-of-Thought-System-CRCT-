@@ -1067,8 +1067,14 @@ def generate_symbol_essence_string(
         seen_exports: Set[str] = set()
         exports_list = cast(List[Dict[str, Any]], exports)
         for e in exports_list:
-            e_name = str(e.get("name") or e.get("default") or "unknown").strip()
-            e_from = str(e.get("from") or "").strip()
+            if isinstance(e, str):
+                e_name = e.strip()
+                e_from = ""
+            elif isinstance(e, dict):
+                e_name = str(e.get("name") or e.get("default") or "unknown").strip()
+                e_from = str(e.get("from") or "").strip()
+            else:
+                continue
             if not e_name:
                 continue
             line = f"{e_name} <- {e_from}" if e_from else e_name

@@ -1195,8 +1195,8 @@ def suggest_python_dependencies(
 
     if combined_suggestions:
         logger.debug(f"Final Combined Dependencies for {norm_file_path}:")
-        for target_path, char_code in combined_suggestions:
-            logger.debug(f"  -> {target_path} ({char_code})")
+        # for target_path, char_code in combined_suggestions:
+        #     logger.debug(f"  -> {target_path} ({char_code})")
     else:
         logger.debug(f"No combined dependencies found for {norm_file_path}.")
 

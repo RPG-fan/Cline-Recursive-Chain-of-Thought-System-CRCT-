@@ -3,8 +3,9 @@ Enhanced exception types for the project analyzer system.
 Provides specific, actionable exception types for better error handling and debugging.
 """
 
+import builtins
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +184,7 @@ class PathError(ProjectAnalyzerError):
         super().__init__(message, **kwargs)
 
 
-class PermissionError(ProjectAnalyzerError):
+class ProjectPermissionError(ProjectAnalyzerError):
     """File/directory permission errors."""
 
     def __init__(self, path: str, operation: str, **kwargs):
@@ -216,11 +217,11 @@ class TimeoutError(ProjectAnalyzerError):
 # Error recovery helpers
 def handle_file_analysis_error(
     file_path: str, original_error: Exception
-) -> FileAnalysisError:
-    """Convert various file-related exceptions to FileAnalysisError."""
+) -> Union[FileAnalysisError, ProjectPermissionError]:
+    """Convert various file-related exceptions to FileAnalysisError or ProjectPermissionError."""
 
-    if isinstance(original_error, PermissionError):
-        return PermissionError(file_path, "read")
+    if isinstance(original_error, builtins.PermissionError):
+        return ProjectPermissionError(file_path, "read")
     elif isinstance(original_error, UnicodeDecodeError):
         return EncodingError(file_path, str(original_error.encoding))
     elif isinstance(original_error, SyntaxError):
