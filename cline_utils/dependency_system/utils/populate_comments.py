@@ -35,7 +35,6 @@ import logging
 import os
 import re
 import shutil
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, cast
 
@@ -348,7 +347,11 @@ def _collect_export_symbols(data: Any, index: TargetSymbolIndex) -> None:
     """Add explicit exports to a target index, handling list and dict formats."""
     if isinstance(data, dict):
         for key, value in cast(Dict[Any, Any], data).items():
-            line = _get_symbol_line(value) if isinstance(value, dict) else None
+            line = (
+                _get_symbol_line(cast(Dict[str, Any], value))
+                if isinstance(value, dict)
+                else None
+            )
             _add_target_symbol(index, key, line)
     elif isinstance(data, list):
         for item in cast(List[Any], data):
@@ -362,7 +365,9 @@ def _collect_export_symbols(data: Any, index: TargetSymbolIndex) -> None:
                     or d_item.get("class_name")
                 )
                 if name is not None:
-                    _add_target_symbol(index, name, _get_symbol_line(d_item))
+                    _add_target_symbol(
+                        index, name, _get_symbol_line(cast(Dict[str, Any], d_item))
+                    )
 
 
 def _build_target_symbol_index(
@@ -463,40 +468,6 @@ def _format_target_symbols(symbols: Optional[List[TargetSymbol]]) -> str:
         f"{symbol.name}:{symbol.line if symbol.line is not None else '?'}"
         for symbol in symbols
     )
-
-
-def _collect_file_exports(file_symbol_data: Dict[str, Any]) -> Set[str]:
-    """
-    Collect all names exported or defined by a file from its symbol map entry.
-
-    Includes function names, class names (and their method names),
-    globals_defined, and explicit exports.
-    """
-    names: Set[str] = set()
-
-    # Functions
-    names.update(_extract_names(file_symbol_data.get("functions", [])))
-
-    # Classes and their methods
-    classes = file_symbol_data.get("classes", [])
-    if isinstance(classes, list):
-        for cls in cast(List[Any], classes):
-            if isinstance(cls, dict):
-                d_cls = cast(Dict[Any, Any], cls)
-                names.add(str(d_cls.get("name", "")))
-                names.update(_extract_names(d_cls.get("methods", [])))
-
-    # Global variables/assignments
-    names.update(_extract_names(file_symbol_data.get("globals_defined", [])))
-
-    # Explicit exports (handles both List[Dict] from AST and Dict from Runtime)
-    names.update(_extract_names(file_symbol_data.get("exports", [])))
-
-    # Filter out empty strings
-    if "" in names:
-        names.remove("")
-
-    return names
 
 
 # ── Language helpers ───────────────────────────────────────────────────────────
@@ -772,13 +743,28 @@ def _iter_connection_map_items(
 
 def backup_and_write(file_path: Path, new_content: str, project_root: Path) -> None:
     """
-    Write new_content to file_path after creating a timestamped backup.
+    Write new_content to file_path after creating a single backup file (e.g., filename.bak)
+    and automatically cleaning up any old timestamped backups in the backup directory.
     Skips the write if backup creation fails to protect the original.
     """
     backup_dir = project_root / ".comment_backup"
     backup_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = backup_dir / f"{file_path.name}.{timestamp}.bak"
+
+    # 1. Clean up any extra/old timestamped backups in the backup directory
+    # to clear out the thousands of backups some users must have acquired by now.
+    old_backup_pattern = re.compile(r"^.+\.\d{8}_\d{6}\.bak$")
+    try:
+        for item in backup_dir.iterdir():
+            if item.is_file() and old_backup_pattern.match(item.name):
+                try:
+                    item.unlink()
+                except Exception as e:
+                    logger.debug(f"Failed to delete old backup file {item}: {e}")
+    except Exception as exc:
+        logger.warning(f"Error during backup directory cleanup: {exc}")
+
+    # 2. Write backup to a single backup file per source file (e.g. filename.bak)
+    backup_path = backup_dir / f"{file_path.name}.bak"
     try:
         shutil.copy2(file_path, backup_path)
     except Exception as exc:

@@ -343,13 +343,31 @@ class TrackerBatchCollector:
             if results:
                 report_batch_results(results, dry_run=False)
                 manager = get_transparency_manager()
-                virtualized = 0
+                files_processed: Set[str] = set()
+                files_with_maps: Set[str] = set()
+                paths_to_virtualize: List[str] = []
                 for result in results:
-                    path = result.get("path") if isinstance(result, dict) else None
-                    if path and manager.virtualize_connection_maps(
-                        path, clear_if_absent=True
-                    ):
-                        virtualized += 1
+                    if isinstance(result, dict):
+                        path = result.get("path")
+                        if isinstance(path, str):
+                            files_processed.add(path)
+                            maps_added = result.get("maps_added")
+                            maps_updated = result.get("maps_updated")
+                            maps_count = (
+                                maps_added if isinstance(maps_added, int) else 0
+                            ) + (maps_updated if isinstance(maps_updated, int) else 0)
+                            if maps_count > 0:
+                                files_with_maps.add(path)
+                                paths_to_virtualize.append(path)
+                virtualized = 0
+                if paths_to_virtualize:
+                    virtualized = manager.bulk_virtualize_connection_maps(
+                        paths_to_virtualize, clear_if_absent=False
+                    )
+                if files_processed:
+                    manager.bulk_prune_stale_virtual_maps(
+                        files_processed, files_with_maps
+                    )
                 if virtualized:
                     logger.info(
                         "Virtualized CONNECTION_MAP comments for "

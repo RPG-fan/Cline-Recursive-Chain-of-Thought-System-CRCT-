@@ -15,6 +15,7 @@ from cline_utils.dependency_system.utils.populate_comments import (
     _resolve_target_symbols,
     build_connection_map,
     process_file,
+    backup_and_write,
 )
 
 
@@ -92,7 +93,7 @@ def test_populate_comments_symbol_references_include_attributes_and_inheritance(
     )
 
 
-def test_populate_comments_low_value_logger_does_not_create_target_map(tmp_path):
+def test_populate_comments_low_value_logger_does_not_create_target_map(tmp_path: Path):
     index = _build_target_symbol_index(
         {"globals_defined": [{"name": "logger", "line": 18}]}
     )
@@ -108,11 +109,12 @@ def test_populate_comments_low_value_logger_does_not_create_target_map(tmp_path)
         "function",
     )
 
+    assert refs is not None
     assert refs == SymbolReferences(actionable=set(), ambient=set())
     assert _resolve_relevant_target_symbols(refs, index) == []
 
 
-def test_populate_comments_build_connection_map_formats_precise_targets(tmp_path):
+def test_populate_comments_build_connection_map_formats_precise_targets(tmp_path: Path):
     source = _ki("1A", tmp_path / "source.py")
     target = _ki("1B", tmp_path / "target.py")
     unknown = _ki("1C", tmp_path / "unknown.py")
@@ -132,13 +134,14 @@ def test_populate_comments_build_connection_map_formats_precise_targets(tmp_path
     )
 
     assert (
-        line
-        == "# --- CONNECTION_MAP: 1B(target_func:7|TargetClass:20) {d}, "
+        line == "# --- CONNECTION_MAP: 1B(target_func:7|TargetClass:20) {d}, "
         "1C(file:?) {x} --- source_func [AUTO]"
     )
 
 
-def test_populate_comments_build_connection_map_returns_empty_for_no_entries(tmp_path):
+def test_populate_comments_build_connection_map_returns_empty_for_no_entries(
+    tmp_path: Path,
+):
     source = _ki("1A", tmp_path / "source.py")
     directory = _dir_ki("1B", tmp_path / "pkg")
 
@@ -153,7 +156,7 @@ def test_populate_comments_build_connection_map_returns_empty_for_no_entries(tmp
     assert line == ""
 
 
-def test_populate_comments_process_file_dry_run_refreshes_old_flat_map(tmp_path):
+def test_populate_comments_process_file_dry_run_refreshes_old_flat_map(tmp_path: Path):
     source_path = tmp_path / "source.py"
     target_path = tmp_path / "target.py"
     unknown_path = tmp_path / "unknown.py"
@@ -208,7 +211,7 @@ def test_populate_comments_process_file_dry_run_refreshes_old_flat_map(tmp_path)
     ]
 
 
-def test_populate_comments_process_file_refreshes_class_methods(tmp_path):
+def test_populate_comments_process_file_refreshes_class_methods(tmp_path: Path):
     source_path = tmp_path / "source.py"
     target_path = tmp_path / "target.py"
     source_path.write_text(
@@ -263,9 +266,10 @@ def test_populate_comments_process_file_refreshes_class_methods(tmp_path):
         full_symbol_map=full_symbol_map,
     )
 
-    assert "    # --- CONNECTION_MAP: 1B(target_func:1) {d} --- is_ready [AUTO]" in result[
-        "generated_connection_maps"
-    ]
+    assert (
+        "    # --- CONNECTION_MAP: 1B(target_func:1) {d} --- is_ready [AUTO]"
+        in result["generated_connection_maps"]
+    )
     assert all("1C(" not in line for line in result["generated_connection_maps"])
 
 
@@ -307,7 +311,9 @@ def test_transparency_extract_connection_map_metadata_parses_precise_entries():
     ]
 
 
-def test_transparency_virtualizes_connection_maps_and_overlays_hidden_layer(tmp_path):
+def test_transparency_virtualizes_connection_maps_and_overlays_hidden_layer(
+    tmp_path: Path,
+):
     source_path = tmp_path / "source.py"
     source_path.write_text(
         "# --- STATION_HEADER: 1A ---\n"
@@ -347,15 +353,18 @@ def test_transparency_virtualizes_connection_maps_and_overlays_hidden_layer(tmp_
         },
     ]
 
-    assert extract_connection_map_metadata(clean_content, metadata) == metadata[
-        "connection_maps"
-    ]
+    assert (
+        extract_connection_map_metadata(clean_content, metadata)
+        == metadata["connection_maps"]
+    )
     overlaid = overlay_connection_maps(clean_content, metadata)
     assert "CONNECTION_MAP: 1B(target_func:7|TargetClass:20) {d}" in overlaid
     assert overlaid.splitlines()[1].startswith("# --- CONNECTION_MAP:")
 
 
-def test_transparency_virtualize_clears_stale_maps_when_populate_emits_none(tmp_path):
+def test_transparency_virtualize_clears_stale_maps_when_populate_emits_none(
+    tmp_path: Path,
+):
     source_path = tmp_path / "source.py"
     source_path.write_text("def source_func():\n    return 1\n", encoding="utf-8")
     manager = TransparencyManager(str(tmp_path / "transparency_registry.json"))
@@ -373,7 +382,12 @@ def test_transparency_virtualize_clears_stale_maps_when_populate_emits_none(tmp_
                 "dep_char": "d",
             }
         ],
-        [{"line": 1, "content": "# --- CONNECTION_MAP: 1B(old_target:9) {d} --- source_func [AUTO]"}],
+        [
+            {
+                "line": 1,
+                "content": "# --- CONNECTION_MAP: 1B(old_target:9) {d} --- source_func [AUTO]",
+            }
+        ],
     )
 
     assert manager.virtualize_connection_maps(str(source_path), clear_if_absent=True)
@@ -381,3 +395,125 @@ def test_transparency_virtualize_clears_stale_maps_when_populate_emits_none(tmp_
     assert metadata is not None
     assert "connection_maps" not in metadata
     assert "connection_map_lines" not in metadata
+
+
+def test_backup_and_write_cleanup(tmp_path: Path):
+    # Setup source file and project root structure
+    project_root = tmp_path
+    file_path = project_root / "test_module.py"
+    file_path.write_text("original content", encoding="utf-8")
+
+    # Create backup directory and populate it with old timestamped backups
+    backup_dir = project_root / ".comment_backup"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    old_backup_1 = backup_dir / "test_module.py.20251112_010203.bak"
+    old_backup_2 = backup_dir / "test_module.py.20251113_040506.bak"
+    old_backup_other = backup_dir / "other_module.py.20251114_070809.bak"
+    unrelated_file = backup_dir / "unrelated.txt"
+
+    old_backup_1.write_text("old content 1", encoding="utf-8")
+    old_backup_2.write_text("old content 2", encoding="utf-8")
+    old_backup_other.write_text("old other content", encoding="utf-8")
+    unrelated_file.write_text("some text", encoding="utf-8")
+
+    # Execute backup_and_write
+    new_content = "new updated content"
+    backup_and_write(file_path, new_content, project_root)
+
+    # Assertions
+    # 1. Source file has the new content
+    assert file_path.read_text(encoding="utf-8") == new_content
+
+    # 2. Single backup file is created
+    single_backup_path = backup_dir / "test_module.py.bak"
+    assert single_backup_path.exists()
+    assert single_backup_path.read_text(encoding="utf-8") == "original content"
+
+    # 3. All old timestamped backups have been cleaned up
+    assert not old_backup_1.exists()
+    assert not old_backup_2.exists()
+    assert not old_backup_other.exists()
+
+    # 4. Unrelated files/directories are NOT touched or deleted
+    assert unrelated_file.exists()
+    assert unrelated_file.read_text(encoding="utf-8") == "some text"
+
+
+def test_bulk_prune_stale_virtual_maps(tmp_path: Path):
+    manager = TransparencyManager(str(tmp_path / "transparency_registry.json"))
+
+    file_a = tmp_path / "file_a.py"
+    file_b = tmp_path / "file_b.py"
+    file_c = tmp_path / "file_c.py"
+
+    file_a.write_text("def a(): pass", encoding="utf-8")
+    file_b.write_text("def b(): pass", encoding="utf-8")
+    file_c.write_text("def c(): pass", encoding="utf-8")
+
+    # Write connection maps for A, B, and C
+    manager._write_connection_map_metadata(
+        str(file_a),
+        "def a(): pass",
+        [
+            {
+                "source_symbol": "a",
+                "source_line": 1,
+                "target_key": "1B",
+                "target_symbol": "b",
+                "target_line": 1,
+                "dep_char": "d",
+            }
+        ],
+        [{"line": 1, "content": "# --- CONNECTION_MAP: 1B(b:1) {d} --- a [AUTO]"}],
+    )
+
+    manager._write_connection_map_metadata(
+        str(file_b),
+        "def b(): pass",
+        [
+            {
+                "source_symbol": "b",
+                "source_line": 1,
+                "target_key": "1A",
+                "target_symbol": "a",
+                "target_line": 1,
+                "dep_char": "d",
+            }
+        ],
+        [{"line": 1, "content": "# --- CONNECTION_MAP: 1A(a:1) {d} --- b [AUTO]"}],
+    )
+
+    manager._write_connection_map_metadata(
+        str(file_c),
+        "def c(): pass",
+        [
+            {
+                "source_symbol": "c",
+                "source_line": 1,
+                "target_key": "1A",
+                "target_symbol": "a",
+                "target_line": 1,
+                "dep_char": "d",
+            }
+        ],
+        [{"line": 1, "content": "# --- CONNECTION_MAP: 1A(a:1) {d} --- c [AUTO]"}],
+    )
+
+    # Execute bulk prune where only file_a was processed with maps, and all files were processed
+    files_processed = {str(file_a), str(file_b), str(file_c)}
+    files_with_maps = {str(file_a)}
+
+    manager.bulk_prune_stale_virtual_maps(files_processed, files_with_maps)
+
+    # Assertions
+    meta_a = manager.get_file_metadata(str(file_a))
+    meta_b = manager.get_file_metadata(str(file_b))
+    meta_c = manager.get_file_metadata(str(file_c))
+
+    assert meta_a is not None
+    assert "connection_maps" in meta_a
+    assert meta_b is not None
+    assert "connection_maps" not in meta_b
+    assert meta_c is not None
+    assert "connection_maps" not in meta_c
