@@ -11,7 +11,7 @@ import json  # Added for saving/loading map
 import logging
 import os
 import re
-import shutil  # Added for renaming
+import time
 from collections import defaultdict
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union, cast
 
@@ -44,6 +44,38 @@ KEY_PATTERN = r"\d+|\D+"
 GLOBAL_KEY_MAP_FILENAME = "global_key_map.json"
 OLD_GLOBAL_KEY_MAP_FILENAME = "global_key_map_old.json"  # <<< NEW
 TRACKER_MAP_FILENAME = "tracker_map.json"
+MAX_TOP_LEVEL_ROOTS = 26  # Tier-1 directory letters A–Z
+
+
+def _rotate_global_key_map_atomically(
+    current_map_path: str,
+    old_map_path: str,
+    *,
+    max_retries: int = 5,
+    base_delay: float = 0.05,
+) -> None:
+    """
+    Atomically rotate the current global key map file to the old-map filename.
+
+    Uses os.replace (not shutil.move) and retries on transient Windows file locks.
+    """
+    last_err: Optional[OSError] = None
+    for attempt in range(max_retries):
+        try:
+            os.replace(current_map_path, old_map_path)
+            return
+        except OSError as err:
+            last_err = err
+            if attempt < max_retries - 1:
+                delay = base_delay * (2**attempt)
+                logger.warning(
+                    f"Key map rotation retry {attempt + 1}/{max_retries} "
+                    f"('{current_map_path}' -> '{old_map_path}'): {err}. "
+                    f"Retrying in {delay}s."
+                )
+                time.sleep(delay)
+    if last_err is not None:
+        raise last_err
 
 
 class KeyGenerationError(ValueError):
@@ -222,13 +254,20 @@ def generate_keys(
 
     Raises:
         FileNotFoundError: If a root path does not exist.
-        KeyGenerationError: If key generation rules are violated (e.g., >26 subdirs).
+        KeyGenerationError: If key generation rules are violated (e.g., >26 subdirs
+            or >26 top-level root paths).
     """
     if isinstance(root_paths, str):
         root_paths = [root_paths]
     for root_path in root_paths:
         if not os.path.exists(root_path):
             raise FileNotFoundError(f"Root path '{root_path}' does not exist.")
+
+    if len(root_paths) > MAX_TOP_LEVEL_ROOTS:
+        raise KeyGenerationError(
+            f"Key generation failed: at most {MAX_TOP_LEVEL_ROOTS} top-level root paths "
+            f"are supported (letters A-Z), but {len(root_paths)} were provided."
+        )
 
     config_manager = ConfigManager()
     excluded_dirs_names = (
@@ -298,6 +337,11 @@ def generate_keys(
             # --- Assign key to the current directory being processed ---
             current_dir_key_info: Optional[KeyInfo] = None
             if parent_info is None:  # This is a top-level directory from root_paths
+                if top_level_dir_count > MAX_TOP_LEVEL_ROOTS - 1:
+                    raise KeyGenerationError(
+                        f"Key generation failed: exceeded maximum top-level directories "
+                        f"({MAX_TOP_LEVEL_ROOTS}, letters A-Z)."
+                    )
                 dir_letter = chr(ASCII_A_UPPER + top_level_dir_count)
                 key_str = f"1{dir_letter}"
                 current_tier = 1
@@ -601,7 +645,7 @@ def generate_keys(
         os.makedirs(script_dir, exist_ok=True)  # Ensure directory exists
 
         # Step 1: Load the PREVIOUS map BEFORE renaming so we read the right file.
-        # (shutil.move overwrites old_map_path, so reading after the rename would
+        # (os.replace overwrites old_map_path, so reading after the rename would
         # give us the map from two runs ago rather than the immediately prior run.)
         previous_map: Optional[Dict[str, KeyInfo]] = None
         try:
@@ -621,7 +665,7 @@ def generate_keys(
         # Step 3: Rotate the on-disk maps: current → old.
         if os.path.exists(current_map_path):
             try:
-                shutil.move(current_map_path, old_map_path)
+                _rotate_global_key_map_atomically(current_map_path, old_map_path)
                 logger.info(
                     f"Renamed existing '{GLOBAL_KEY_MAP_FILENAME}' to '{OLD_GLOBAL_KEY_MAP_FILENAME}'."
                 )

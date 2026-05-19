@@ -646,7 +646,7 @@ class CacheManager:
             # Rebuild cache with de-aliased data, preserving TTL/access metadata
             new_cache = Cache(cache_name, ttl)
             for k, v in dealiased.items():
-                new_cache.set(k, v, ttl=0)
+                new_cache.data[k] = (v, time.time(), None)
             new_cache.dependencies = cache.dependencies
             new_cache.modified = False
             self.caches[cache_name] = new_cache
@@ -947,7 +947,7 @@ class CacheManager:
 
                     cache = Cache(cache_name)
                     for key, value in raw_data.items():
-                        cache.set(key, value, ttl=0)
+                        cache.data[key] = (value, time.time(), None)
                     cache.dependencies = persistence_data.get("dependencies", {})
                     cache.modified = False  # Reset after loading/population
                     self.caches[cache_name] = cache

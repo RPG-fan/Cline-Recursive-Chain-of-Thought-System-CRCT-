@@ -5,6 +5,9 @@ Module for managing embeddings generation and similarity calculations using cont
 Handles embedding creation from project files using Symbol Essence Strings (SES) derived from
 the project symbol map, and calculates cosine similarity between embeddings.
 """
+
+import gc
+import hashlib
 import json
 import logging
 import os
@@ -2143,6 +2146,49 @@ def _download_reranker_model(model_dir: str) -> bool:
         return False
 
 
+def _flush_accelerator_memory_cache() -> None:
+    """Flush GPU/MPS allocator caches after releasing model tensors."""
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        try:
+            torch.mps.empty_cache()
+        except Exception:
+            pass
+
+
+def _release_reranker_model_allocation(model: Any = None) -> None:
+    """Drop a partial reranker model allocation without clearing the tokenizer."""
+    global _reranker_model
+
+    release = model if model is not None else _reranker_model
+    _reranker_model = None
+    if release is not None:
+        del release
+    gc.collect()
+    _flush_accelerator_memory_cache()
+
+
+def _clear_reranker_load_state() -> None:
+    """Clear reranker singletons and free VRAM after a failed load."""
+    global _reranker_model, _reranker_tokenizer
+    global reranker_false_id, reranker_true_id, _reranker_prefix_tokens, _reranker_suffix_tokens
+
+    stale_model = _reranker_model
+    stale_tokenizer = _reranker_tokenizer
+    _reranker_model = None
+    _reranker_tokenizer = None
+    reranker_false_id = None
+    reranker_true_id = None
+    _reranker_prefix_tokens = None
+    _reranker_suffix_tokens = None
+
+    del stale_model, stale_tokenizer
+    gc.collect()
+    _flush_accelerator_memory_cache()
+
+
 def _load_reranker_model():
     """Lazy loads the reranker model (Singleton)."""
     global _reranker_model, _reranker_tokenizer
@@ -2219,6 +2265,7 @@ def _load_reranker_model():
                 logger.warning(
                     f"Optimization failed, falling back to standard load: {e}"
                 )
+                _release_reranker_model_allocation(_reranker_model)
                 _reranker_model = AutoModelForCausalLM.from_pretrained(  # type: ignore
                     model_name_or_path
                 )
@@ -2260,13 +2307,7 @@ def _load_reranker_model():
                 logger.info(f"Loaded Qwen3-Reranker-0.6B on {_reranker_model.device}")
         except Exception as e:
             logger.error(f"Failed to load reranker: {e}", exc_info=True)
-            # Clean up partial load
-            _reranker_model = None
-            _reranker_tokenizer = None
-            reranker_false_id = None
-            reranker_true_id = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            _clear_reranker_load_state()
             return None, None
 
     return _reranker_tokenizer, _reranker_model
@@ -2274,12 +2315,7 @@ def _load_reranker_model():
 
 def unload_reranker_model():
     """Unloads reranker model to free memory."""
-    global _reranker_model, _reranker_tokenizer
-    _reranker_model = None
-    _reranker_tokenizer = None
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.empty_cache()
+    _clear_reranker_load_state()
 
 
 def get_instruction_for_relation_type(source_path: str, target_path: str) -> str:
@@ -2361,13 +2397,19 @@ def _get_rerank_cache_key(
     instruction: Optional[str] = None,
 ) -> str:
     """Generates a deterministic cache key for reranking."""
-    # Hash the candidate texts to create a compact key part
-    import hashlib
-
     candidates_hash = hashlib.md5(
         "".join(sorted(candidate_texts)).encode("utf-8")
     ).hexdigest()
-    return f"rerank:{hashlib.md5(query_text.encode('utf-8')).hexdigest()}:{candidates_hash}:{top_k}"
+    query_hash = hashlib.md5(query_text.encode("utf-8")).hexdigest()
+    instruction_hash = hashlib.sha256((instruction or "").encode("utf-8")).hexdigest()[
+        :16
+    ]
+    source_normalized = normalize_path(source_file_path) if source_file_path else ""
+    source_hash = hashlib.sha256(source_normalized.encode("utf-8")).hexdigest()[:16]
+    return (
+        f"rerank:{query_hash}:{candidates_hash}:{top_k}:"
+        f"{instruction_hash}:{source_hash}"
+    )
 
 
 @cached("reranking", key_func=_get_rerank_cache_key)

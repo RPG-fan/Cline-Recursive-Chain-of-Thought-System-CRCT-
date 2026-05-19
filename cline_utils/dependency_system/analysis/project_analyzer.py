@@ -51,6 +51,9 @@ from cline_utils.dependency_system.utils.tracker_utils import (
     aggregate_all_dependencies,
     get_key_global_instance_string,
 )
+from cline_utils.dependency_system.utils.viz.renderer import (
+    cleanup_orphaned_render_processes,
+)
 from cline_utils.dependency_system.utils.visualize_dependencies import (
     generate_dependency_diagram,
     render_mermaid_to_image,
@@ -68,87 +71,6 @@ OLD_PROJECT_SYMBOL_MAP_FILENAME = "project_symbol_map_old.json"
 # --- Constants for the AST verified links file ---
 AST_VERIFIED_LINKS_FILENAME = "ast_verified_links.json"
 OLD_AST_VERIFIED_LINKS_FILENAME = "ast_verified_links_old.json"
-
-# Process names spawned by mmdc (Mermaid CLI) that should be cleaned up
-# if the rendering executor crashes mid-flight.
-_RENDER_PROCESS_NAMES = {"mmdc", "node", "chrome", "chromium"}
-
-
-def _cleanup_orphaned_render_processes(parent_pid: int) -> None:
-    """Kill orphaned mmdc/node/chrome processes left by a crashed render batch.
-
-    After a ``ProcessPoolExecutor`` crash the worker processes may terminate,
-    but the Node.js / headless-Chrome subprocesses they spawned can survive as
-    orphans.  These orphans hold file-handles and, on Windows, can keep the
-    CUDA driver locked — making subsequent ``torch.cuda`` calls hang until
-    reboot.
-
-    This function walks the process tree rooted at *parent_pid*, finds any
-    child whose name matches ``_RENDER_PROCESS_NAMES``, and terminates it.
-    A ``taskkill`` fallback is used when ``psutil`` is unavailable.
-    """
-    killed = 0
-
-    # --- Primary path: psutil ---
-    try:
-        import psutil
-
-        try:
-            parent = psutil.Process(parent_pid)
-        except psutil.NoSuchProcess:
-            logger.debug(
-                "Cleanup: parent PID %d no longer exists, skipping.", parent_pid
-            )
-            return
-
-        children = parent.children(recursive=True)
-        for child in children:
-            try:
-                if child.name().lower().split(".")[0] in _RENDER_PROCESS_NAMES:
-                    logger.warning(
-                        "Killing orphaned render process: pid=%d name=%s",
-                        child.pid,
-                        child.name(),
-                    )
-                    child.kill()
-                    killed += 1
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-
-        if killed:
-            # Give killed processes a moment to release resources
-            psutil.wait_procs([c for c in children if not c.is_running()], timeout=5)
-            logger.info("Cleaned up %d orphaned render process(es).", killed)
-        else:
-            logger.debug("Cleanup: no orphaned render processes found.")
-
-        return
-    except ImportError:
-        pass  # Fall through to subprocess fallback
-
-    # --- Fallback: taskkill (Windows) ---
-    import platform
-    import subprocess as _sp
-
-    if platform.system() == "Windows":
-        for name in _RENDER_PROCESS_NAMES:
-            try:
-                _sp.run(
-                    ["taskkill", "/F", "/IM", f"{name}.exe", "/T"],
-                    capture_output=True,
-                    timeout=10,
-                )
-                killed += 1
-            except Exception:
-                pass
-        if killed:
-            logger.info("Cleaned up render processes via taskkill (fallback).")
-    else:
-        logger.warning(
-            "Cannot clean up orphaned render processes: "
-            "psutil is unavailable and OS is not Windows."
-        )
-
 
 # Caching for analyze_project (Consider if key_func needs more refinement)
 # @cached("project_analysis",
@@ -1626,38 +1548,49 @@ def analyze_project(
                 # Orphaned render processes can hold GPU/CUDA driver locks,
                 # making torch.cuda hang until reboot.
                 parent_pid = os.getpid()
-                render_crashed = False
+                from multiprocessing import Manager
 
+                tracked_pids: List[int] = []
                 try:
-                    for chunk_idx, chunk in enumerate(chunks):
-                        logger.debug(
-                            f"Rendering chunk {chunk_idx + 1}/{len(chunks)} "
-                            f"({len(chunk)} diagram(s))..."
-                        )
-                        with ProcessPoolExecutor(max_workers=len(chunk)) as executor:
-                            futures = {
-                                executor.submit(
-                                    render_mermaid_to_image, code, path
-                                ): path
-                                for code, path in chunk
-                            }
-                            for future in as_completed(futures):
-                                path = futures[future]
-                                try:
-                                    future.result()
-                                except Exception as e:
-                                    logger.error(
-                                        f"Failed to render diagram {path}: {e}"
-                                    )
+                    with Manager() as render_manager:
+                        render_process_registry = render_manager.list()
+
+                        for chunk_idx, chunk in enumerate(chunks):
+                            logger.debug(
+                                f"Rendering chunk {chunk_idx + 1}/{len(chunks)} "
+                                f"({len(chunk)} diagram(s))..."
+                            )
+                            with ProcessPoolExecutor(
+                                max_workers=len(chunk)
+                            ) as executor:
+                                futures = {
+                                    executor.submit(
+                                        render_mermaid_to_image,
+                                        code,
+                                        path,
+                                        render_process_registry,
+                                    ): path
+                                    for code, path in chunk
+                                }
+                                for future in as_completed(futures):
+                                    path = futures[future]
+                                    try:
+                                        future.result()
+                                    except Exception as e:
+                                        logger.error(
+                                            f"Failed to render diagram {path}: {e}"
+                                        )
+
+                        tracked_pids = list(render_process_registry)
                 except Exception as render_err:
-                    render_crashed = True
                     logger.error(
                         f"Render executor crashed: {render_err}", exc_info=True
                     )
                     raise
                 finally:
-                    if render_crashed:
-                        _cleanup_orphaned_render_processes(parent_pid)
+                    cleanup_orphaned_render_processes(
+                        parent_pid, tracked_root_pids=tracked_pids
+                    )
 
         except Exception as viz_err:
             logger.error(
