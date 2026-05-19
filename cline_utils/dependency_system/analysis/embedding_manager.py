@@ -15,7 +15,8 @@ import re
 import sys
 import textwrap
 import threading
-import urllib.request
+import urllib.error
+from urllib.request import Request, urlopen
 from typing import Any, Dict, List, Optional, Set, Tuple, Sequence, cast
 
 import numpy as np
@@ -251,6 +252,184 @@ def _verify_qwen3_model(model_path: str) -> bool:
         return False
 
 
+def _download_with_retry(
+    url: str,
+    path: str,
+    description: str,
+    max_retries: int = 5,
+    initial_delay: float = 1.0,
+    use_phase_tracker: bool = False,
+) -> bool:
+    """
+    Downloads a file with exponential backoff retry logic and download resume capabilities.
+
+    Uses exponential backoff with jitter for transient failures, but aborts immediately
+    on permanent client HTTP errors (400, 401, 403, 404). Supports resuming partial
+    downloads via the HTTP 'Range' header.
+    """
+    import random
+    import time
+
+    if (
+        not url.strip().startswith(("http://", "https://"))
+        or "\n" in url
+        or "\r" in url
+    ):
+        logger.error(f"Invalid URL or scheme for file download: {url}")
+        return False
+
+    model_dir = os.path.dirname(path)
+    if model_dir:
+        os.makedirs(model_dir, exist_ok=True)
+
+    downloaded = 0
+    total_size = 0
+    tracker = None
+
+    for attempt in range(max_retries):
+        try:
+            req = Request(url)
+            req.add_header("User-Agent", "LLMRPG-Downloader/1.0")
+
+            is_resume = False
+            if downloaded > 0:
+                req.add_header("Range", f"bytes={downloaded}-")
+                is_resume = True
+                logger.info(
+                    f"Attempting to resume download for {description} from byte {downloaded} "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+            else:
+                logger.info(
+                    f"Starting download for {description} (attempt {attempt + 1}/{max_retries})"
+                )
+
+            with urlopen(req) as response:
+                status: int = int(getattr(response, "status", 200))
+                headers = response.info()
+                content_len = int(headers.get("Content-Length", 0))
+
+                # Handle HTTP response code.
+                if is_resume and status == 206:
+                    if total_size == 0:
+                        total_size = downloaded + content_len
+                    open_mode = "ab"
+                    logger.debug(
+                        f"Server accepted Range request (status 206). Resuming at byte {downloaded}."
+                    )
+                else:
+                    if is_resume:
+                        logger.warning(
+                            f"Server ignored Range request (status {status}). Restarting download from scratch."
+                        )
+                    downloaded = 0
+                    total_size = content_len
+                    open_mode = "wb"
+
+                chunk_size = 8192
+
+                if use_phase_tracker and tracker is None:
+                    tracker = PhaseTracker(
+                        total=total_size, phase_name=description, unit="bytes"
+                    )
+                    tracker.current = downloaded
+                    cast(Any, tracker).__enter__()
+                elif tracker is not None:
+                    tracker.set_total(total_size)
+                    tracker.current = downloaded
+
+                with open(path, open_mode) as f:
+                    while True:
+                        chunk = response.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+
+                        if tracker:
+                            tracker.update(
+                                len(chunk),
+                                description=f"{downloaded}/{total_size} bytes",
+                            )
+                        elif total_size > 0:
+                            progress = (downloaded / total_size) * 100
+                            print(
+                                f"\rDownload progress ({description}): {progress:.1f}% ({downloaded}/{total_size} bytes)",
+                                end="",
+                                flush=True,
+                            )
+
+                if not tracker and total_size > 0:
+                    print()  # Final progress newline
+
+                if tracker:
+                    cast(Any, tracker).__exit__(None, None, None)
+                    tracker = None
+
+                return True
+
+        except urllib.error.HTTPError as e:
+            logger.warning(
+                f"Download HTTP error (status {e.code}) for {description}: {e.reason}"
+            )
+            if e.code in (400, 401, 403, 404):
+                logger.error(
+                    f"Permanent HTTP error {e.code} encountered. Aborting download."
+                )
+                if tracker:
+                    cast(Any, tracker).__exit__(type(e), e, e.__traceback__)
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                return False
+
+            if attempt < max_retries - 1:
+                delay = min(
+                    30.0, initial_delay * (2**attempt) + random.uniform(0.0, 1.0)
+                )
+                logger.info(f"Retrying transient HTTP error in {delay:.2f} seconds...")
+                time.sleep(delay)
+            else:
+                logger.error(
+                    f"Failed to download {description} after {max_retries} attempts due to HTTP errors."
+                )
+                if tracker:
+                    cast(Any, tracker).__exit__(type(e), e, e.__traceback__)
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                return False
+
+        except Exception as e:
+            logger.warning(
+                f"Download attempt {attempt + 1} failed for {description}: {e}"
+            )
+            if attempt < max_retries - 1:
+                delay = min(
+                    30.0, initial_delay * (2**attempt) + random.uniform(0.0, 1.0)
+                )
+                logger.info(f"Retrying in {delay:.2f} seconds...")
+                time.sleep(delay)
+            else:
+                logger.error(
+                    f"Failed to download {description} after {max_retries} attempts."
+                )
+                if tracker:
+                    cast(Any, tracker).__exit__(type(e), e, e.__traceback__)
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                return False
+
+    return False
+
+
 def _download_qwen3_model(model_path: str) -> bool:
     """Download the Qwen3-Embedding-4B-Q6_K model if it doesn't exist or is invalid."""
     # First check if model exists and is valid
@@ -273,63 +452,29 @@ def _download_qwen3_model(model_path: str) -> bool:
     # Qwen3-Embedding-4B-Q6_K download URL (using resolve endpoint for direct download)
     model_url = "https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF/resolve/main/Qwen3-Embedding-4B-Q6_K.gguf"
 
-    logger.info(f"Downloading Qwen3 model from {model_url} to {model_path}")
+    success = _download_with_retry(
+        url=model_url,
+        path=model_path,
+        description="Downloading Qwen3",
+        use_phase_tracker=True,
+    )
 
-    if (
-        not model_url.strip().startswith(("http://", "https://"))
-        or "\n" in model_url
-        or "\r" in model_url
-    ):
-        logger.error(f"Invalid URL or scheme for model download: {model_url}")
-        return False
-
-    try:
-        # Download with progress reporting
-        with urllib.request.urlopen(model_url) as response:
-            total_size = int(response.headers.get("Content-Length", 0))
-            downloaded = 0
-            chunk_size = 8192
-
-            with open(model_path, "wb") as f:
-                with PhaseTracker(
-                    total=total_size, phase_name="Downloading Qwen3", unit="bytes"
-                ) as tracker:
-                    while True:
-                        chunk = response.read(chunk_size)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        tracker.update(
-                            len(chunk), description=f"{downloaded}/{total_size} bytes"
-                        )
-
-        # Verify download
-        if os.path.exists(model_path) and os.path.getsize(model_path) > 0:
-            # Final verification after download
-            if _verify_qwen3_model(model_path):
-                logger.debug(
-                    f"Successfully downloaded and verified Qwen3 model to {model_path}"
-                )
-                return True
-            else:
-                logger.error("Downloaded Qwen3 model failed verification")
-                try:
-                    os.remove(model_path)
-                except:
-                    pass
-                return False
+    if success:
+        # Final verification after download
+        if _verify_qwen3_model(model_path):
+            logger.debug(
+                f"Successfully downloaded and verified Qwen3 model to {model_path}"
+            )
+            return True
         else:
-            logger.error(f"Download failed - file not found or empty: {model_path}")
-            return False
-
-    except Exception as e:
-        logger.error(f"Failed to download Qwen3 model: {e}")
-        if os.path.exists(model_path):
+            logger.error("Downloaded Qwen3 model failed verification")
             try:
                 os.remove(model_path)
-            except OSError:
+            except:
                 pass
+            return False
+    else:
+        logger.error(f"Download failed: {model_path}")
         return False
 
 
@@ -2063,46 +2208,12 @@ RERANKER_FILES = [
 
 def _download_file(url: str, path: str, description: str) -> bool:
     """Generic file download with progress reporting."""
-    if (
-        not url.strip().startswith(("http://", "https://"))
-        or "\n" in url
-        or "\r" in url
-    ):
-        logger.error(f"Invalid URL or scheme for file download: {url}")
-        return False
-
-    try:
-        logger.info(f"Downloading {description} from {url} to {path}")
-        with urllib.request.urlopen(url) as response:
-            total_size = int(response.headers.get("Content-Length", 0))
-            downloaded = 0
-            chunk_size = 8192
-
-            with open(path, "wb") as f:
-                while True:
-                    chunk = response.read(chunk_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    downloaded += len(chunk)
-
-                    if total_size > 0:
-                        progress = (downloaded / total_size) * 100
-                        print(
-                            f"\rDownload progress ({description}): {progress:.1f}% ({downloaded}/{total_size} bytes)",
-                            end="",
-                            flush=True,
-                        )
-            print()  # Newline after progress bar
-        return True
-    except Exception as e:
-        logger.error(f"Failed to download {description}: {e}")
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-        return False
+    return _download_with_retry(
+        url=url,
+        path=path,
+        description=description,
+        use_phase_tracker=False,
+    )
 
 
 def _verify_reranker_model(model_dir: str) -> bool:

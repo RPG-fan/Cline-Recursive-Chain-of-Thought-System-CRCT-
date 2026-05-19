@@ -1,6 +1,7 @@
 import pytest
 import json
 import datetime
+from pathlib import Path
 from typing import Any, Generator
 from unittest.mock import MagicMock, patch, mock_open
 
@@ -307,3 +308,50 @@ class TestResourceValidatorIntegration:
             assert settings["batch_size"] == 16
             assert settings["memory_efficient"] is True
             assert settings["enable_parallel"] is False
+
+    def test_validate_disk_space_skipped_when_enabled(self) -> None:
+        validator = ResourceValidator(strict_mode=False, skip_disk_estimation=True)
+        # Verify that it doesn't even use shutil.disk_usage or stat, returns a skipped dict directly
+        with patch(
+            "cline_utils.dependency_system.utils.resource_validator.shutil"
+        ) as mock_shutil:
+            result = validator._validate_disk_space(MOCK_PROJECT_PATH)
+            assert result["sufficient"] is True
+            assert result["free_space_mb"] == 999999.0
+            assert result["skipped"] is True
+            mock_shutil.disk_usage.assert_not_called()
+
+    def test_estimate_disk_space_optimized_os_scandir(self) -> None:
+        validator = ResourceValidator(strict_mode=False)
+
+        # Mock os.scandir to return a mock entry
+        mock_file_entry = MagicMock()
+        mock_file_entry.is_symlink.return_value = False
+        mock_file_entry.is_dir.return_value = False
+        mock_file_entry.is_file.return_value = True
+        mock_file_entry.stat.return_value.st_size = 10 * 1024 * 1024  # 10MB
+
+        mock_dir_entry = MagicMock()
+        mock_dir_entry.name = ".git"
+        mock_dir_entry.is_symlink.return_value = False
+        mock_dir_entry.is_dir.return_value = True
+        mock_dir_entry.is_file.return_value = False
+
+        mock_scandir = MagicMock()
+        # Set up scandir context manager behavior
+        mock_scandir.return_value.__enter__.return_value = [
+            mock_file_entry,
+            mock_dir_entry,
+        ]
+
+        with patch("os.scandir", mock_scandir):
+            with patch("pathlib.Path.exists", return_value=True):
+                result = validator._estimate_required_disk_space(MOCK_PROJECT_PATH)
+
+                # Should find 1 file of 10MB.
+                # Total required = 10MB + analysis_overhead (2MB) + cache_space (50 + 1/100 = 50.01MB) = 62.01MB.
+                # Since min required disk space returned is 100MB, it should return 100MB.
+                assert result >= 100
+
+                # Verify scandir was called on MOCK_PROJECT_PATH
+                mock_scandir.assert_called_with(str(Path(MOCK_PROJECT_PATH)))

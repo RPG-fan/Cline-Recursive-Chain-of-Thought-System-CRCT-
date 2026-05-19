@@ -3,6 +3,7 @@ import time
 import shutil
 from typing import Optional
 
+
 class PhaseTracker:
     """
     A simple progress tracker that displays a progress bar, current task description,
@@ -82,18 +83,29 @@ class PhaseTracker:
         if not self.is_tty:
             if self.total > 0:
                 percent = (self.current / self.total) * 100
-                if self.current == self.total or self.current % max(1, self.total // 5) == 0:
-                     print(f"[{self.phase_name}] {self.current}/{self.total} ({percent:.1f}%) - {self.description}")
+                if (
+                    self.current == self.total
+                    or self.current % max(1, self.total // 5) == 0
+                ):
+                    print(
+                        f"[{self.phase_name}] {self.current}/{self.total} ({percent:.1f}%) - {self.description}"
+                    )
             return
+
+        # Query terminal size dynamically to handle terminal resizing
+        try:
+            self.term_width = shutil.get_terminal_size((80, 20)).columns
+        except Exception:
+            pass
 
         now = time.time()
         elapsed = now - self.start_time
-        
+
         # Calculate percentage
         percent = 0.0
         if self.total > 0:
             percent = min(100.0, (self.current / self.total) * 100.0)
-        
+
         # Calculate ETA
         eta_str = "??"
         if self.current > 0 and self.total > 0:
@@ -102,7 +114,7 @@ class PhaseTracker:
                 remaining_items = self.total - self.current
                 eta_seconds = remaining_items / rate
                 eta_str = self._format_time(eta_seconds)
-        
+
         # Construct bar
         # Available width calculation
         # Format: [Phase] [Bar] Percent% | Desc | ETA
@@ -111,33 +123,37 @@ class PhaseTracker:
         # Percent: 6 chars " 100.0%"
         # ETA: 10 chars " | ETA: xx"
         # Spacers: 4 chars
-        
+
         prefix = f"[{self.phase_name}] "
         suffix = f" {percent:5.1f}% | ETA: {eta_str}"
-        
+
         # Description is variable, let's truncate it if needed
         # Reserve space for bar (at least 10 chars)
-        reserved_width = len(prefix) + len(suffix) + 15 # +15 for spacers and min bar
-        available_for_desc = max(10, self.term_width - reserved_width - 20) # -20 for bar length
-        
+        reserved_width = len(prefix) + len(suffix) + 15  # +15 for spacers and min bar
+        available_for_desc = max(
+            10, self.term_width - reserved_width - 20
+        )  # -20 for bar length
+
         desc_str = ""
         if self.description:
             desc_str = f" | {self.description}"
             if len(desc_str) > available_for_desc:
-                desc_str = desc_str[:available_for_desc-3] + "..."
-        
+                desc_str = desc_str[: available_for_desc - 3] + "..."
+
         # Recalculate bar width based on actual desc length
-        bar_width = self.term_width - len(prefix) - len(suffix) - len(desc_str) - 3 # -3 for brackets and space
+        bar_width = (
+            self.term_width - len(prefix) - len(suffix) - len(desc_str) - 3
+        )  # -3 for brackets and space
         bar_width = max(5, bar_width)
-        
+
         filled_length = int(bar_width * percent / 100.0)
         bar = "=" * filled_length + "-" * (bar_width - filled_length)
-        
+
         line = f"\r{prefix}[{bar}]{suffix}{desc_str}"
-        
+
         # Pad with spaces to overwrite previous line if it was longer
         if len(line) < self.term_width:
             line += " " * (self.term_width - len(line))
-            
+
         sys.stdout.write(line)
         sys.stdout.flush()

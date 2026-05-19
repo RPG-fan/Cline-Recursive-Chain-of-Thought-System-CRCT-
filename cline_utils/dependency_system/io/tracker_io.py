@@ -34,6 +34,7 @@ from cline_utils.dependency_system.core.key_manager import (
     load_global_key_map,
     load_old_global_key_map,
 )
+from cline_utils.dependency_system.core.exceptions_enhanced import TrackerIOError
 
 # --- IO Imports (Specific tracker data for paths/filters) ---
 from cline_utils.dependency_system.io.update_doc_tracker import doc_tracker_data
@@ -581,7 +582,9 @@ def write_mini_tracker_with_template_preservation(
             f"Error during write_mini_tracker_with_template_preservation for {output_file}: {e_write_mini}",
             exc_info=True,
         )
-        # Consider if this should raise to stop cache invalidation etc. For now, just logs.
+        raise TrackerIOError(
+            tracker_path=output_file, operation="write_mini_template_preservation"
+        ) from e_write_mini
 
 
 # --- Patched: Top-level write_tracker_file ---
@@ -613,7 +616,15 @@ def write_tracker_file(
                 f"Aborting write to {tracker_path} due to grid validation failure. "
                 + f"Expected {expected_grid_size} items, received {len(grid_rows_ordered)} grid rows."
             )
-            return False
+            raise TrackerIOError(
+                tracker_path=tracker_path,
+                operation="write",
+                details={
+                    "reason": "grid_validation_failure",
+                    "expected_size": expected_grid_size,
+                    "actual_size": len(grid_rows_ordered),
+                },
+            )
 
         # --- Ensure grid_rows_ordered matches expected_grid_size ---
         # This is a final safety check; validation should ideally catch inconsistencies.
@@ -691,10 +702,10 @@ def write_tracker_file(
         return True
     except IOError as e:
         logger.error(f"I/O Error writing {tracker_path}: {e}", exc_info=True)
-        return False
+        raise TrackerIOError(tracker_path=tracker_path, operation="write") from e
     except Exception as e:
         logger.exception(f"Unexpected error writing {tracker_path}: {e}")
-        return False
+        raise TrackerIOError(tracker_path=tracker_path, operation="write") from e
 
 
 # --- Backup ---
@@ -1340,12 +1351,16 @@ def create_mini_tracker(
         logger.error(
             f"I/O Error creating mini tracker {output_file}: {e_io}", exc_info=True
         )
-        return False
+        raise TrackerIOError(
+            tracker_path=output_file, operation="create_mini"
+        ) from e_io
     except Exception as e_exc:
         logger.exception(
             f"Unexpected error creating mini tracker {output_file}: {e_exc}"
         )
-        return False
+        raise TrackerIOError(
+            tracker_path=output_file, operation="create_mini"
+        ) from e_exc
 
 
 # Shared helper used by consolidation and pruning: determines whether a path

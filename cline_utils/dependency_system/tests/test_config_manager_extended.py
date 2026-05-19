@@ -5,29 +5,36 @@ from unittest.mock import MagicMock, patch, mock_open
 
 from cline_utils.dependency_system.utils.config_manager import (
     ConfigManager,
-    DEFAULT_CONFIG
+    DEFAULT_CONFIG,
 )
+
 
 @pytest.fixture(autouse=True)
 def mock_cached():
     def no_op_cached(*args, **kwargs):
         def decorator(func):
             return func
+
         return decorator
-        
-    with patch("cline_utils.dependency_system.utils.cache_manager.cached", side_effect=no_op_cached):
+
+    with patch(
+        "cline_utils.dependency_system.utils.cache_manager.cached",
+        side_effect=no_op_cached,
+    ):
         yield
+
 
 @pytest.fixture
 def clean_config_manager():
     # Reset singleton instance
     ConfigManager._instance = None
     # Patch load methods to avoid file I/O
-    with patch.object(ConfigManager, '_load_user_config_file', return_value=None):
-        with patch.object(ConfigManager, '_save_config', return_value=True):
+    with patch.object(ConfigManager, "_load_user_config_file", return_value=None):
+        with patch.object(ConfigManager, "_save_config", return_value=True):
             manager = ConfigManager()
             yield manager
     ConfigManager._instance = None
+
 
 class TestConfigManagerExtended:
     def test_singleton(self, clean_config_manager):
@@ -48,19 +55,29 @@ class TestConfigManagerExtended:
     def test_environment_overrides(self):
         # Reset singleton
         ConfigManager._instance = None
-        
-        with patch.dict(os.environ, {
-            "ANALYZER_BATCH_SIZE": "64",
-            "ANALYZER_LOG_LEVEL": "DEBUG",
-            "ANALYZER_USE_STREAMING": "false"
-        }):
-            with patch.object(ConfigManager, '_load_user_config_file', return_value=None):
-                with patch.object(ConfigManager, '_save_config', return_value=True):
+
+        with patch.dict(
+            os.environ,
+            {
+                "ANALYZER_BATCH_SIZE": "64",
+                "ANALYZER_LOG_LEVEL": "DEBUG",
+                "ANALYZER_USE_STREAMING": "false",
+                "ANALYZER_SKIP_DISK_ESTIMATION": "true",
+            },
+        ):
+            with patch.object(
+                ConfigManager, "_load_user_config_file", return_value=None
+            ):
+                with patch.object(ConfigManager, "_save_config", return_value=True):
                     manager = ConfigManager()
-                    
+
                     assert manager.get_performance_setting("default_batch_size") == 64
                     assert manager.get_output_setting("log_level") == "DEBUG"
-                    assert manager.get_performance_setting("use_streaming_analysis") is False
+                    assert (
+                        manager.get_performance_setting("use_streaming_analysis")
+                        is False
+                    )
+                    assert manager.get_resource_setting("skip_disk_estimation") is True
 
     def test_resource_adjustments_low_memory(self, clean_config_manager):
         # Mock ResourceValidator to return low memory
@@ -68,20 +85,31 @@ class TestConfigManagerExtended:
         mock_validator.validate_system_resources.return_value = {
             "valid": True,
             "resource_check": {
-                "memory": {"available_mb": 512}, # Low memory
+                "memory": {"available_mb": 512},  # Low memory
                 "cpu": {"cores": 4},
-                "disk_space": {"free_space_mb": 10000}
-            }
+                "disk_space": {"free_space_mb": 10000},
+            },
         }
-        
-        with patch("cline_utils.dependency_system.utils.config_manager.ResourceValidator", return_value=mock_validator):
+
+        with patch(
+            "cline_utils.dependency_system.utils.config_manager.ResourceValidator",
+            return_value=mock_validator,
+        ):
             clean_config_manager._apply_resource_adjustments()
-            
+
             # Should have adjusted batch sizes
-            assert clean_config_manager.get_performance_setting("default_batch_size") <= 16
-            assert clean_config_manager.get_performance_setting("embedding_batch_size") <= 8
+            assert (
+                clean_config_manager.get_performance_setting("default_batch_size") <= 16
+            )
+            assert (
+                clean_config_manager.get_performance_setting("embedding_batch_size")
+                <= 8
+            )
             assert clean_config_manager.get_performance_setting("max_workers") == 1
-            assert clean_config_manager.get_performance_setting("use_streaming_analysis") is True
+            assert (
+                clean_config_manager.get_performance_setting("use_streaming_analysis")
+                is True
+            )
 
     def test_resource_adjustments_low_disk(self, clean_config_manager):
         # Mock ResourceValidator to return low disk
@@ -91,23 +119,31 @@ class TestConfigManagerExtended:
             "resource_check": {
                 "memory": {"available_mb": 4096},
                 "cpu": {"cores": 4},
-                "disk_space": {"free_space_mb": 100} # Low disk
-            }
+                "disk_space": {"free_space_mb": 100},  # Low disk
+            },
         }
-        
-        with patch("cline_utils.dependency_system.utils.config_manager.ResourceValidator", return_value=mock_validator):
+
+        with patch(
+            "cline_utils.dependency_system.utils.config_manager.ResourceValidator",
+            return_value=mock_validator,
+        ):
             clean_config_manager._apply_resource_adjustments()
-            
+
             # Should have reduced cache size and disabled diagrams
-            assert clean_config_manager.get_performance_setting("cache_size_limit") <= 1000
-            assert clean_config_manager.get_output_setting("auto_generate_diagrams") is False
+            assert (
+                clean_config_manager.get_performance_setting("cache_size_limit") <= 1000
+            )
+            assert (
+                clean_config_manager.get_output_setting("auto_generate_diagrams")
+                is False
+            )
 
     def test_get_analysis_settings(self, clean_config_manager):
         settings = clean_config_manager.get_analysis_settings()
         assert "use_streaming" in settings
         assert "batch_size" in settings
         assert "memory_limit_mb" in settings
-        assert settings["batch_size"] == 32 # Default
+        assert settings["batch_size"] == 32  # Default
 
     def test_get_optimization_recommendations(self, clean_config_manager):
         # Manually set validation results
@@ -115,10 +151,10 @@ class TestConfigManagerExtended:
             "resource_check": {
                 "memory": {"available_mb": 512},
                 "cpu": {"cores": 1},
-                "disk_space": {"free_space_mb": 100}
+                "disk_space": {"free_space_mb": 100},
             }
         }
-        
+
         recommendations = clean_config_manager.get_optimization_recommendations()
         assert any("streaming analysis" in r for r in recommendations)
         assert any("limited CPU" in r for r in recommendations)

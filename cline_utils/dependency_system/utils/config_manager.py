@@ -203,6 +203,7 @@ DEFAULT_CONFIG = {
         "strict_resource_validation": False,  # Fail on resource warnings
         "allow_partial_analysis": True,  # Allow analysis with limited resources
         "resource_check_enabled": True,  # Enable pre-analysis resource checks
+        "skip_disk_estimation": False,  # Skip disk estimation and space validation if True
     },
     # VRAM resource management for GPU-accelerated operations
     "vram": {
@@ -256,6 +257,7 @@ DEFAULT_CONFIG = {
             "ENABLE_GGUF",
             "GGUF_PATH",
             "SIMILARITY_THRESHOLD",
+            "SKIP_DISK_ESTIMATION",
         ],
     },
 }
@@ -850,6 +852,7 @@ class ConfigManager:
             "ENABLE_GGUF": ("embedding", "enable_gguf_models"),
             "GGUF_PATH": ("embedding", "gguf_model_path"),
             "SIMILARITY_THRESHOLD": ("embedding", "similarity_threshold"),
+            "SKIP_DISK_ESTIMATION": ("resources", "skip_disk_estimation"),
         }
 
         for env_var, (section, key) in env_mappings.items():
@@ -894,7 +897,10 @@ class ConfigManager:
             validator = ResourceValidator(
                 strict_mode=self.get_resource_setting(
                     "strict_resource_validation", False
-                )
+                ),
+                skip_disk_estimation=self.get_resource_setting(
+                    "skip_disk_estimation", False
+                ),
             )
             project_root = get_project_root()
             results = validator.validate_system_resources(str(project_root))
@@ -1002,7 +1008,10 @@ class ConfigManager:
             validator = ResourceValidator(
                 strict_mode=self.get_resource_setting(
                     "strict_resource_validation", False
-                )
+                ),
+                skip_disk_estimation=self.get_resource_setting(
+                    "skip_disk_estimation", False
+                ),
             )
             results = validator.validate_system_resources(project_path)
             self._resource_validation_results = results

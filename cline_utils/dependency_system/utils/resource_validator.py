@@ -162,15 +162,17 @@ class ResourceValidator:
     RECOMMENDED_MEMORY_MB = 2048
     RECOMMENDED_DISK_SPACE_MB = 500
 
-    def __init__(self, strict_mode: bool = False):
+    def __init__(self, strict_mode: bool = False, skip_disk_estimation: bool = False):
         """
         Initialize resource validator.
 
         Args:
             strict_mode: If True, fail on warnings. If False, only fail on critical issues.
+            skip_disk_estimation: If True, skip disk estimation and space validation.
         """
         super().__init__()
         self.strict_mode = strict_mode
+        self.skip_disk_estimation = skip_disk_estimation
         self.validation_results: Dict[str, Any] = {}
 
     def validate_system_resources(
@@ -453,6 +455,19 @@ class ResourceValidator:
     def _validate_disk_space(self, project_path: str) -> Dict[str, Any]:
         """Validate disk space for project analysis."""
         try:
+            if self.skip_disk_estimation:
+                logger.info(
+                    "Disk space estimation and validation skipped via configuration"
+                )
+                return {
+                    "sufficient": True,
+                    "free_space_mb": 999999.0,
+                    "total_space_mb": 999999.0,
+                    "required_mb": 0,
+                    "path": project_path,
+                    "skipped": True,
+                }
+
             # Get free space for project directory
             project_dir = Path(project_path)
             if not project_dir.exists():
@@ -774,24 +789,90 @@ class ResourceValidator:
             return {"sufficient": False, "reason": f"Project validation error: {e}"}
 
     def _estimate_required_disk_space(self, project_path: str) -> int:
-        """Estimate required disk space for analysis."""
+        """
+        Estimate required disk space for analysis using an optimized os.scandir traversal.
+        Respects excluded directories and limits scanning overhead.
+        """
         try:
             project_dir = Path(project_path)
             if not project_dir.exists():
                 return 200  # Conservative estimate
 
-            # Calculate total size of project files
-            total_size_mb = 0
-            file_count = 0
+            try:
+                from .config_manager import ConfigManager
 
-            for file_path in project_dir.rglob("*"):
-                if file_path.is_file():
-                    try:
-                        size_mb = file_path.stat().st_size / (1024 * 1024)
-                        total_size_mb += size_mb
-                        file_count += 1
-                    except (OSError, PermissionError):
-                        continue
+                config_mgr = ConfigManager()
+                excluded_dirs = set(config_mgr.get_excluded_dirs())
+            except Exception:
+                # Fallback if config manager is not fully initialized
+                excluded_dirs = {
+                    "__pycache__",
+                    ".git",
+                    ".svn",
+                    ".hg",
+                    ".vscode",
+                    ".idea",
+                    "venv",
+                    "env",
+                    ".venv",
+                    "node_modules",
+                    "build",
+                    "dist",
+                    "target",
+                    "out",
+                    "tmp",
+                    "temp",
+                    "tests",
+                    "__tests__",
+                    "embeddings",
+                }
+
+            total_size_bytes = 0
+            file_count = 0
+            max_scan_files = (
+                10000  # Cap the scan at 10,000 files to prevent endless scan
+            )
+            max_depth = 8  # Limit recursive depth for estimation purposes
+
+            def _scan_dir(dir_path: str, current_depth: int) -> None:
+                nonlocal total_size_bytes, file_count
+                if file_count >= max_scan_files or current_depth > max_depth:
+                    return
+
+                try:
+                    with os.scandir(dir_path) as entries:
+                        for entry in entries:
+                            if file_count >= max_scan_files:
+                                break
+
+                            if entry.is_symlink():
+                                continue
+
+                            if entry.is_dir(follow_symlinks=False):
+                                if entry.name in excluded_dirs:
+                                    continue
+                                _scan_dir(entry.path, current_depth + 1)
+                            elif entry.is_file(follow_symlinks=False):
+                                try:
+                                    # entry.stat() is cached on Windows during scandir
+                                    stat_val = entry.stat()
+                                    total_size_bytes += stat_val.st_size
+                                    file_count += 1
+                                except (OSError, PermissionError):
+                                    continue
+                except (OSError, PermissionError):
+                    pass
+
+            _scan_dir(str(project_dir), 1)
+
+            total_size_mb = total_size_bytes / (1024 * 1024)
+
+            # If we hit the file limit, extrapolate the size
+            if file_count >= max_scan_files:
+                logger.warning(
+                    f"Disk estimation capped at {max_scan_files} files. Extrapolating disk requirement."
+                )
+                total_size_mb = total_size_mb * 1.5
 
             # Add overhead for analysis results (estimated 20% of source size)
             analysis_overhead = total_size_mb * 0.2

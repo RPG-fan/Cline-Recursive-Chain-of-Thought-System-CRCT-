@@ -93,6 +93,21 @@ from cline_utils.dependency_system.utils.visualize_dependencies import (
     render_mermaid_to_image,
 )
 
+# --- Exception Imports ---
+from cline_utils.dependency_system.core.exceptions_enhanced import (
+    ProjectAnalyzerError,
+    MemoryLimitError,
+    DiskSpaceError,
+    ResourceValidationError,
+    ModelError,
+    TrackerIOError,
+    TrackerUpdateError,
+    BinaryFileError,
+    EncodingError,
+    ParsingError,
+    FileAnalysisError,
+)
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -349,6 +364,29 @@ def command_handler_analyze_file(args: argparse.Namespace) -> int:
         else:
             print(json.dumps(results, indent=2))
         return 0
+    except BinaryFileError as e:
+        print(
+            f"\n[ANALYSIS ERROR] Binary file detected: {e.file_path} (size: {e.file_size} bytes)"
+        )
+        print("Text analysis is not supported for binary files.")
+        return 1
+    except EncodingError as e:
+        print(f"\n[ANALYSIS ERROR] Failed to decode file: {e.file_path}")
+        print(f"Attempted encoding: {e.encoding_attempted}")
+        return 1
+    except ParsingError as e:
+        print(f"\n[ANALYSIS ERROR] Syntax/parsing failure in: {e.file_path}")
+        if e.line_number:
+            print(f"Line number: {e.line_number}")
+        if e.syntax_details:
+            print(f"Syntax details: {e.syntax_details}")
+        return 1
+    except FileAnalysisError as e:
+        print(f"\n[ANALYSIS ERROR] File analysis failed: {e.message}")
+        return 1
+    except ProjectAnalyzerError as e:
+        print(f"\n[ANALYZER ERROR] {e.message}")
+        return 1
     except Exception as e:
         print(f"Error analyzing file: {str(e)}")
         return 1
@@ -492,6 +530,65 @@ def command_handler_analyze_project(args: argparse.Namespace) -> int:
             if results.get("status") == "success" or results.get("status") == "warning"
             else 1
         )
+    except MemoryLimitError as e:
+        logger.error(
+            f"Memory limit exceeded: {e.message}", extra={"details": e.details}
+        )
+        print(f"\n[FATAL ERROR] Memory Limit Exceeded!")
+        print(
+            f"Current Memory: {e.current_mb:.1f} MB (Required: {e.required_mb:.1f} MB)"
+        )
+        print(
+            "Please free up system resources or increase memory allocation in config."
+        )
+        return 1
+    except DiskSpaceError as e:
+        logger.error(
+            f"Disk space insufficient: {e.message}", extra={"details": e.details}
+        )
+        print(f"\n[FATAL ERROR] Disk Space Insufficient!")
+        print(f"Path: {e.path}")
+        print(
+            f"Current Space: {e.current_mb:.1f} MB (Required: {e.required_mb:.1f} MB)"
+        )
+        print("Please clean up disk space and try again.")
+        return 1
+    except ResourceValidationError as e:
+        logger.error(
+            f"Resource validation failed: {e.message}", extra={"details": e.details}
+        )
+        print(f"\n[FATAL ERROR] Resource Validation Failed: {e.message}")
+        return 1
+    except ModelError as e:
+        logger.error(f"AI Model Error: {e.message}", extra={"details": e.details})
+        print(
+            f"\n[AI MODEL ERROR] Model '{e.model_name}' failed during '{e.error_type}':"
+        )
+        print(f"Details: {e.message}")
+        print(
+            "Please check your LLM provider status, api keys, or local model runner connection."
+        )
+        return 1
+    except TrackerIOError as e:
+        logger.error(f"Tracker I/O Error: {e.message}", extra={"details": e.details})
+        print(f"\n[TRACKER I/O ERROR] File system operation failed on tracker:")
+        print(f"Tracker Path: {e.tracker_path}")
+        print(f"Operation: {e.operation}")
+        print(f"Details: {e.message}")
+        return 1
+    except TrackerUpdateError as e:
+        logger.error(f"Tracker Update Error: {e.message}", extra={"details": e.details})
+        print(f"\n[TRACKER UPDATE ERROR] Failed to update tracker content:")
+        print(f"Tracker Path: {e.tracker_path}")
+        print(f"Operation: {e.operation}")
+        print(f"Details: {e.message}")
+        return 1
+    except ProjectAnalyzerError as e:
+        logger.error(
+            f"Project Analyzer Error: {e.message}", extra={"details": e.details}
+        )
+        print(f"\n[ANALYZER ERROR] {e.message}")
+        return 1
     except Exception as e:
         logger.error(f"Error analyzing project: {str(e)}", exc_info=True)
         print(f"Error analyzing project: {str(e)}")
