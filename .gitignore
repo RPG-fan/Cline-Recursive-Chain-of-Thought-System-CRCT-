@@ -6,4 +6,5 @@
 docs/**
 .comment_backup/
 .agent/**
-.clinerules.config.json
+.clinerules.config.json
+debug_llm_repair.log

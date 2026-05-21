@@ -78,6 +78,7 @@ def main():
                 stdout=f,
                 stderr=subprocess.STDOUT,
                 cwd=safe_project_root,
+                shell=(os.name == "nt"),
             )
         if result.returncode == 0:
             print("Pyright analysis completed successfully.")
@@ -123,7 +124,16 @@ def main():
                 if Path(file).suffix not in EXTENSIONS:
                     continue
                 scanned_file_paths.append(filepath)
-                all_issues.extend(scan_file(filepath))
+
+    # Batch run static scans concurrently
+    if scanned_file_paths:
+        from cline_utils.dependency_system.utils.batch_processor import BatchProcessor
+        print(f"Scanning {len(scanned_file_paths)} files in parallel...")
+        processor = BatchProcessor(phase_name="Scanning Files", show_progress=True)
+        batch_results = processor.process_items(scanned_file_paths, scan_file)
+        for res in batch_results:
+            if res:
+                all_issues.extend(res)
 
     # ---- runtime-only findings ----
     if runtime_data:

@@ -107,7 +107,7 @@ def analyze_node(
                     if child.child_count == 1 and child.children[0].type == "string":
                         continue
                 if child.type == "raise_statement":
-                    if "NotImplementedError" in child.text.decode("utf8"):
+                    if "NotImplementedError" in child.text.decode("utf-8", errors="replace"):
                         has_raise_not_implemented = True
                         continue
                 non_trivial_children.append(child)
@@ -129,7 +129,7 @@ def analyze_node(
                         "file": str(filepath),
                         "line": node.start_point[0] + 1,
                         "end_line": node.end_point[0] + 1,
-                        "content": node.text.decode("utf8").split("\n")[0] + "...",
+                        "content": node.text.decode("utf-8", errors="replace").split("\n")[0] + "...",
                     }
                 )
 
@@ -154,7 +154,7 @@ def analyze_node(
                         "file": str(filepath),
                         "line": node.start_point[0] + 1,
                         "end_line": node.end_point[0] + 1,
-                        "content": node.text.decode("utf8").split("\n")[0] + "...",
+                        "content": node.text.decode("utf-8", errors="replace").split("\n")[0] + "...",
                     }
                 )
 
@@ -165,19 +165,37 @@ def analyze_node(
         "class_declaration",
     ):
         body_node = node.child_by_field_name("body")
-        if body_node and body_node.type == "statement_block":
-            non_comment_children = [
-                c for c in body_node.children if c.type not in ("comment", "{", "}")
-            ]
-            if not non_comment_children:
+        if body_node and body_node.type in ("statement_block", "class_body"):
+            non_trivial_children = []
+            has_throw_not_implemented = False
+            for child in body_node.children:
+                if child.type in ("comment", "{", "}"):
+                    continue
+                if child.type == "throw_statement":
+                    child_text = child.text.decode("utf-8", errors="replace")
+                    if "Not implemented" in child_text or "NotImplementedError" in child_text or "not implemented" in child_text:
+                        has_throw_not_implemented = True
+                        continue
+                non_trivial_children.append(child)
+            
+            if not non_trivial_children:
+                kind = (
+                    "NotImplementedError"
+                    if has_throw_not_implemented
+                    else "Empty/Stub Function/Class"
+                )
                 issues.append(
                     {
-                        "type": "Improper Implementation",
-                        "subtype": "Empty/Stub Function/Class",
+                        "type": (
+                            "Incomplete Implementation"
+                            if has_throw_not_implemented
+                            else "Improper Implementation"
+                        ),
+                        "subtype": kind,
                         "file": str(filepath),
                         "line": node.start_point[0] + 1,
                         "end_line": node.end_point[0] + 1,
-                        "content": node.text.decode("utf8").split("\n")[0] + "...",
+                        "content": node.text.decode("utf-8", errors="replace").split("\n")[0] + "...",
                     }
                 )
 
@@ -192,19 +210,25 @@ def scan_file(filepath: str) -> List[Dict[str, Any]]:
         with open(filepath, "rb") as f:
             content = f.read()
 
+        ext = Path(filepath).suffix
+        lang = None
+        if ext == ".py":
+            lang = "python"
+        elif ext == ".js":
+            lang = "javascript"
+        elif ext == ".ts":
+            lang = "typescript"
+        elif ext in (".jsx", ".tsx"):
+            lang = "tsx"
+
+        parser = get_parser(lang) if lang else None
+        is_parsed = parser is not None
+
         try:
             text_content = content.decode("utf-8", errors="ignore")
             lines = text_content.splitlines()
             for i, line in enumerate(lines):
                 for label, pattern in PATTERNS.items():
-                    ext = Path(filepath).suffix
-                    is_parsed = _has_tree_sitter and ext in (
-                        ".py",
-                        ".js",
-                        ".ts",
-                        ".jsx",
-                        ".tsx",
-                    )
                     if is_parsed and label in ("pass", "NotImplementedError"):
                         continue
                     if pattern.search(line):
@@ -226,7 +250,7 @@ def scan_file(filepath: str) -> List[Dict[str, Any]]:
                             }
                         )
 
-                if not _has_tree_sitter and "def " in line and "pass" in line:
+                if not is_parsed and "def " in line and "pass" in line:
                     issues.append(
                         {
                             "type": "Improper Implementation",
@@ -239,23 +263,9 @@ def scan_file(filepath: str) -> List[Dict[str, Any]]:
         except Exception as e:
             print(f"Error doing regex scan on {filepath}: {e}")
 
-        if _has_tree_sitter:
-            ext = Path(filepath).suffix
-            lang = None
-            if ext == ".py":
-                lang = "python"
-            elif ext == ".js":
-                lang = "javascript"
-            elif ext == ".ts":
-                lang = "typescript"
-            elif ext in (".jsx", ".tsx"):
-                lang = "tsx"
-
-            if lang:
-                parser = get_parser(lang)
-                if parser:
-                    tree = parser.parse(content)
-                    analyze_node(tree.root_node, issues, filepath, content)
+        if is_parsed and parser:
+            tree = parser.parse(content)
+            analyze_node(tree.root_node, issues, filepath, content)
     except Exception as e:
         print(f"Error reading {filepath}: {e}")
     return issues

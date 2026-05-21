@@ -24,6 +24,35 @@ PROJECT_SYMBOL_MAP_PATH = os.path.join(
 
 
 # ===========================================================================
+# Internal helpers
+# ===========================================================================
+
+
+def _record_ref(
+    ref_name: str,
+    file_path: str,
+    active_classes: Set[str],
+    all_methods: Dict[str, Set[str]],
+    refs: Dict[str, Set[str]],
+) -> None:
+    """Register *ref_name* as referenced from *file_path*.
+
+    If *ref_name* is a bare method name that belongs to one or more classes,
+    and those classes are active in the calling file (defined or imported),
+    the fully-qualified ``ClassName.method_name`` form is also registered so
+    that caller lookups on the FQN return the correct result.
+
+    All dependencies are received as explicit parameters so this function is
+    safe to call from any context without closure-capture side-effects.
+    """
+    refs[ref_name].add(file_path)
+    if ref_name in all_methods:
+        for cls_name in all_methods[ref_name]:
+            if cls_name in active_classes:
+                refs[f"{cls_name}.{ref_name}"].add(file_path)
+
+
+# ===========================================================================
 # RuntimeIndex Class
 # ===========================================================================
 class RuntimeIndex:
@@ -86,6 +115,28 @@ class RuntimeIndex:
             self._by_qualname[qn].append((file_path, sym, kind))
 
     def _build(self):
+        self._all_methods = defaultdict(set)  # method_name -> set(Class_name)
+        self._file_defined_classes = defaultdict(set)  # file_path -> set(Class_name)
+
+        for raw_path, finfo in self.raw.items():
+            fp = self.norm(raw_path)
+            classes_val = finfo.get("classes") or []
+            for cls_any in classes_val:
+                if isinstance(cls_any, dict):
+                    cls_name = cls_any.get("name")
+                    if cls_name:
+                        self._file_defined_classes[fp].add(cls_name)
+                        meths = cls_any.get("methods") or []
+                        for meth_any in meths:
+                            if isinstance(meth_any, dict):
+                                meth_name = meth_any.get("name")
+                                if meth_name:
+                                    self._all_methods[meth_name].add(cls_name)
+
+        all_project_classes = set()
+        for classes in self._file_defined_classes.values():
+            all_project_classes.update(classes)
+
         for raw_path, finfo in self.raw.items():
             file_path = self.norm(raw_path)
 
@@ -100,6 +151,21 @@ class RuntimeIndex:
             else:
                 self._exports[file_path] = []
 
+            # Determine active classes in this file
+            active_classes = set(self._file_defined_classes[file_path])
+
+            # Add imported classes
+            imports_list = finfo.get("imports") or []
+            for imp in imports_list:
+                if isinstance(imp, dict):
+                    inm = imp.get("name") or imp.get("module")
+                    if inm in all_project_classes:
+                        active_classes.add(inm)
+                elif isinstance(imp, str):
+                    for cls_name in all_project_classes:
+                        if cls_name in imp:
+                            active_classes.add(cls_name)
+
             # Functions
             fns = cast(List[Any], finfo.get("functions") or [])
             for fn_any in fns:
@@ -109,12 +175,12 @@ class RuntimeIndex:
                     attrs = cast(List[Any], fn.get("attribute_accesses") or [])
                     for ref in attrs:
                         if isinstance(ref, str):
-                            self._refs[ref].add(file_path)
+                            _record_ref(ref, file_path, active_classes, self._all_methods, self._refs)
                     scope = cast(Dict[str, Any], fn.get("scope_references") or {})
                     g_list = cast(List[Any], scope.get("globals") or [])
                     for g in g_list:
                         if isinstance(g, str):
-                            self._refs[g].add(file_path)
+                            _record_ref(g, file_path, active_classes, self._all_methods, self._refs)
 
             # Classes (and their methods)
             classes_val = cast(List[Any], finfo.get("classes") or [])
@@ -139,14 +205,14 @@ class RuntimeIndex:
                             )
                             for ref in m_attrs:
                                 if isinstance(ref, str):
-                                    self._refs[ref].add(file_path)
+                                    _record_ref(ref, file_path, active_classes, self._all_methods, self._refs)
                             it_scope = cast(
                                 Dict[str, Any], meth.get("scope_references") or {}
                             )
                             m_gs = cast(List[Any], it_scope.get("globals") or [])
                             for g in m_gs:
                                 if isinstance(g, str):
-                                    self._refs[g].add(file_path)
+                                    _record_ref(g, file_path, active_classes, self._all_methods, self._refs)
 
             # Calls
             calls_list = cast(List[Any], finfo.get("calls") or [])
@@ -157,7 +223,7 @@ class RuntimeIndex:
                 elif isinstance(call, str):
                     n = call
                 if n:
-                    self._refs[n].add(file_path)
+                    _record_ref(n, file_path, active_classes, self._all_methods, self._refs)
 
             # Imports
             imports_list = cast(List[Any], finfo.get("imports") or [])
@@ -171,7 +237,7 @@ class RuntimeIndex:
                 elif isinstance(imp, str):
                     inm = imp
                 if inm:
-                    self._refs[inm].add(file_path)
+                    _record_ref(inm, file_path, active_classes, self._all_methods, self._refs)
 
     def symbol_at(self, file_path: str, line: int) -> Optional[Dict[str, Any]]:
         """Return the smallest symbol whose line range encloses *line*."""
@@ -476,21 +542,57 @@ def _emit_runtime_issues_for_symbol(
                 }
             )
 
-    # 5. Orphan
+    # 5. Orphan / Dead Unexported Code
     if name and not name.startswith("_"):
-        callers = idx.callers_of(name, exclude_file=file_path)
-        if not callers and idx.is_exported(file_path, name):
-            sink.append(
-                {
-                    "type": "Unused Item (runtime)",
-                    "subtype": "Orphan Export",
-                    "file": file_path,
-                    "line": line,
-                    "content": f"{qualname} exported but no other file references it",
-                    "_runtime_only": True,
-                    "_qualname": qualname,
-                }
+        # For methods, query using qualname (which is Class.method).
+        # For other kinds, query using name.
+        query_name = qualname if kind == "method" else name
+
+        if idx.is_exported(file_path, name):
+            callers = idx.callers_of(query_name, exclude_file=file_path)
+            if not callers:
+                sink.append(
+                    {
+                        "type": "Unused Item (runtime)",
+                        "subtype": "Orphan Export",
+                        "file": file_path,
+                        "line": line,
+                        "content": f"{qualname} exported but no other file references it",
+                        "_runtime_only": True,
+                        "_qualname": qualname,
+                    }
+                )
+        else:
+            # "Dead Unexported Code": unexported symbol with zero callers *anywhere*.
+            # Guards to avoid high false-positive rates:
+            #   1. Skip dunder names (__init__, __str__, etc.) — called implicitly
+            #      by the Python runtime, never by static call sites.
+            #   2. Skip trivial-body symbols — they are already caught by the
+            #      Annotated Stub / Concrete Stub Method / Async Stub rules and
+            #      tagging them as "dead" adds no signal.
+            #   3. Skip symbols defined in test files — pytest collects and runs
+            #      them by convention; they will never have static caller refs.
+            is_dunder = name.startswith("__") and name.endswith("__")
+            is_in_test_file = (
+                os.path.basename(file_path).startswith("test_")
+                or os.path.basename(file_path).endswith("_test.py")
+                or os.sep + "tests" + os.sep in file_path
+                or "/tests/" in file_path
             )
+            if not is_dunder and not is_trivial and not is_in_test_file:
+                callers = idx.callers_of(query_name, exclude_file=None)
+                if not callers:
+                    sink.append(
+                        {
+                            "type": "Unused Item (runtime)",
+                            "subtype": "Dead Unexported Code",
+                            "file": file_path,
+                            "line": line,
+                            "content": f"{qualname} is unexported and has zero caller references",
+                            "_runtime_only": True,
+                            "_qualname": qualname,
+                        }
+                    )
 
 
 def enrich_issue(issue: Dict[str, Any], idx: RuntimeIndex) -> Dict[str, Any]:
@@ -532,7 +634,14 @@ def enrich_issue(issue: Dict[str, Any], idx: RuntimeIndex) -> Dict[str, Any]:
         # Cross-file links
         name = sym.get("name")
         if name:
-            callers = idx.callers_of(name, exclude_file=file_path)
+            # Task 39: If kind is method and enclosing class is present, qualify target name
+            if sym.get("_kind") == "method" and enclosing_class:
+                class_name = enclosing_class.get("name")
+                target_name = f"{class_name}.{name}" if class_name else name
+            else:
+                target_name = name
+
+            callers = idx.callers_of(target_name, exclude_file=file_path)
             if callers:
                 ctx["linked_areas"] = {
                     "callers": callers[:20],

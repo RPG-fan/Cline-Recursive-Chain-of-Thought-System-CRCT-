@@ -103,6 +103,51 @@ _AUDIT_SUBTYPES: Tuple[str, ...] = (
 _TIER_INCOMPLETE: str = "incomplete"
 _TIER_AUDIT: str = "audit"
 
+# Extensions that support block comments in the format /* ... */
+_BLOCK_COMMENT_EXTS = {
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".cs",
+    ".java",
+    ".cpp",
+    ".c",
+    ".h",
+    ".rs",
+    ".go",
+    ".swift",
+    ".kt",
+    ".sql",
+    ".glsl",
+    ".hlsl",
+}
+
+import re
+
+# Precompile regexes using word boundaries.
+# If a tag starts with a word character, prepend \b.
+# If a tag ends with a word character, append \b.
+_INCOMPLETE_REGEXES = {
+    tag: re.compile(
+        (r"\b" if tag[0].isalnum() or tag[0] == "_" else "") +
+        re.escape(tag) +
+        (r"\b" if tag[-1].isalnum() or tag[-1] == "_" else ""),
+        re.IGNORECASE
+    )
+    for tag in _INCOMPLETE_SUBTYPES
+}
+
+_AUDIT_REGEXES = {
+    tag: re.compile(
+        (r"\b" if tag[0].isalnum() or tag[0] == "_" else "") +
+        re.escape(tag) +
+        (r"\b" if tag[-1].isalnum() or tag[-1] == "_" else ""),
+        re.IGNORECASE
+    )
+    for tag in _AUDIT_SUBTYPES
+}
+
 # Per-extension single-line comment markers.
 # Longer markers are tried first in _strip_comment_marker to avoid ambiguous
 # prefix matches (e.g. "///" before "//").
@@ -256,14 +301,12 @@ def _detect_subtype(body: str) -> Tuple[Optional[str], Optional[str]]:
         "incomplete"  -- unfinished-work marker (TODO, FIXME, WIP, HACK, XXX, STUB)
         "audit"       -- linting suppression or structural note (NOQA, TYPE:, NOTE:)
     """
-    upper = body.upper()
-
-    for tag in _INCOMPLETE_SUBTYPES:
-        if tag.upper() in upper:
+    for tag, regex in _INCOMPLETE_REGEXES.items():
+        if regex.search(body):
             return tag, _TIER_INCOMPLETE
 
-    for tag in _AUDIT_SUBTYPES:
-        if tag.upper() in upper:
+    for tag, regex in _AUDIT_REGEXES.items():
+        if regex.search(body):
             return tag, _TIER_AUDIT
 
     return None, None
@@ -339,46 +382,130 @@ def scan_file_comments(
     """
     results: List[Dict[str, Any]] = []
     comment_chars = _get_comment_chars(file_path)
+    ext = os.path.splitext(file_path)[1].lower()
+
+    def _emit_body(body: str, lineno: int) -> None:
+        """Apply silencing rules and append a result entry for *body*.
+
+        Centralising this logic prevents duplication when a single source
+        line contributes more than one comment body (e.g. ``/* TODO */ // FIXME``).
+        """
+        if not body:
+            return
+        if silence_blocks and body.startswith(BLOCK_BODY_START):
+            return  # START line is silenced; caller manages in_silenced_block
+        if silence_blocks and in_silenced_block:
+            return  # content between delimiters is silenced
+        if _is_silenced_body(body, silenced_prefixes):
+            return
+        subtype, tier = _detect_subtype(body)
+        results.append(
+            {
+                "line": lineno,
+                "preview": body[:preview_len],
+                "subtype": subtype,
+                "tier": tier,
+            }
+        )
 
     try:
         with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
             in_silenced_block = False
+            in_block_comment = False
 
             for lineno, raw_line in enumerate(fh, start=1):
-                stripped = raw_line.strip()
+                bodies: List[str] = []
 
-                # Strip comment marker; skip non-comment lines entirely.
-                # in_silenced_block intentionally persists across non-comment
-                # lines -- a missing END delimiter is fail-closed by design.
-                body = _strip_comment_marker(stripped, comment_chars)
-                if body is None:
+                if in_block_comment:
+                    idx_end = raw_line.find("*/")
+                    if idx_end != -1:
+                        raw_body = raw_line[:idx_end]
+                        in_block_comment = False
+                        # Check for a trailing single-line comment after */
+                        remainder = raw_line[idx_end + 2:]
+                        for marker in comment_chars:
+                            m_idx = remainder.find(marker)
+                            if m_idx != -1:
+                                trailer = remainder[m_idx + len(marker):].lstrip()
+                                if trailer:
+                                    bodies.append(trailer)
+                                break
+                    else:
+                        raw_body = raw_line
+
+                    # Clean up the block body: strip and remove optional leading *
+                    cleaned = raw_body.strip()
+                    if cleaned.startswith("*"):
+                        cleaned = cleaned[1:].lstrip()
+                    if cleaned:
+                        bodies.insert(0, cleaned)
+                else:
+                    # Find earliest single-line marker
+                    first_marker_idx = -1
+                    matched_marker = None
+                    for marker in comment_chars:
+                        idx = raw_line.find(marker)
+                        if idx != -1:
+                            if first_marker_idx == -1 or idx < first_marker_idx:
+                                first_marker_idx = idx
+                                matched_marker = marker
+
+                    # Find block start if supported for this extension
+                    block_start_idx = raw_line.find("/*") if ext in _BLOCK_COMMENT_EXTS else -1
+
+                    if block_start_idx != -1 and (
+                        first_marker_idx == -1 or block_start_idx < first_marker_idx
+                    ):
+                        # Block comment starts on this line
+                        block_end_idx = raw_line.find("*/", block_start_idx + 2)
+                        if block_end_idx != -1:
+                            # Same-line block: /* ... */
+                            raw_body = raw_line[block_start_idx + 2 : block_end_idx]
+                            in_block_comment = False
+
+                            # Also scan the text after */ for a trailing single-line
+                            # comment so lines like ``/* TODO */ // FIXME`` produce
+                            # two entries instead of silently dropping the second tag.
+                            remainder = raw_line[block_end_idx + 2:]
+                            for marker in comment_chars:
+                                m_idx = remainder.find(marker)
+                                if m_idx != -1:
+                                    trailer = remainder[m_idx + len(marker):].lstrip()
+                                    if trailer:
+                                        bodies.append(trailer)
+                                    break
+                        else:
+                            # Multi-line block: capture until closing */ on a later line
+                            raw_body = raw_line[block_start_idx + 2:]
+                            in_block_comment = True
+
+                        cleaned = raw_body.strip()
+                        if cleaned.startswith("*"):
+                            cleaned = cleaned[1:].lstrip()
+                        if cleaned:
+                            bodies.insert(0, cleaned)
+                    elif first_marker_idx != -1:
+                        # Single-line comment
+                        bodies.append(
+                            raw_line[first_marker_idx + len(matched_marker):].lstrip()
+                        )
+
+                if not bodies:
                     continue
 
                 # --- Block-range silencer (marker-agnostic) -----------------
-                # Explicit continue on START so the delimiter line itself is
-                # silenced, not just the content between delimiters.
-                if silence_blocks and body.startswith(BLOCK_BODY_START):
-                    in_silenced_block = True
-                    continue  # START line is silenced
-
-                if silence_blocks and in_silenced_block:
-                    if body.startswith(BLOCK_BODY_END):
-                        in_silenced_block = False
-                    continue  # END line and all content between are silenced
-
-                # --- Line-level body-prefix silencer ------------------------
-                if _is_silenced_body(body, silenced_prefixes):
-                    continue
-
-                subtype, tier = _detect_subtype(body)
-                results.append(
-                    {
-                        "line": lineno,
-                        "preview": body[:preview_len],
-                        "subtype": subtype,
-                        "tier": tier,
-                    }
-                )
+                # The first body on this line drives the silenced-block state
+                # machine so that START/END delimiters work correctly even when
+                # a line contributes multiple bodies (rare but handled cleanly).
+                for body in bodies:
+                    if silence_blocks and body.startswith(BLOCK_BODY_START):
+                        in_silenced_block = True
+                        break  # START line is silenced; skip all bodies on this line
+                    if silence_blocks and in_silenced_block:
+                        if body.startswith(BLOCK_BODY_END):
+                            in_silenced_block = False
+                        break  # END line and all content between are silenced
+                    _emit_body(body, lineno)
 
     except OSError as e:
         logger.debug(f"comment_index: skipping {file_path}: {e}")

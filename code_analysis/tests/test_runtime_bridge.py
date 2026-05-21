@@ -455,6 +455,7 @@ def test_runtime_only_findings():
                     "inheritance": {},
                 }
             ],
+            "calls": ["func_stub"],
         }
     }
     idx = RuntimeIndex(data)
@@ -469,7 +470,7 @@ def test_runtime_only_findings():
 
 
 def test_emit_runtime_issues_annotated_stub():
-    idx = RuntimeIndex({})
+    idx = RuntimeIndex({"other_file.py": {"calls": ["my_func"]}})
     sym = {
         "name": "my_func",
         "source_context": {"line_range": [10, 11]},
@@ -513,7 +514,7 @@ def test_emit_runtime_issues_exported_placeholder():
 
 
 def test_emit_runtime_issues_async_stub():
-    idx = RuntimeIndex({})
+    idx = RuntimeIndex({"other_file.py": {"calls": ["my_func"]}})
     sym = {
         "name": "my_func",
         "source_context": {"line_range": [10, 11]},
@@ -536,7 +537,7 @@ def test_emit_runtime_issues_async_stub():
 
 
 def test_emit_runtime_issues_concrete_stub_method():
-    idx = RuntimeIndex({})
+    idx = RuntimeIndex({"other_file.py": {"calls": ["MyClass.my_meth"]}})
     sym = {
         "name": "my_meth",
         "source_context": {"line_range": [10, 11]},
@@ -707,3 +708,96 @@ def test_maybe_run_runtime_inspector_runs(monkeypatch):
         args = mock_run.call_args[0][0]
         assert "-m" in args
         assert "cline_utils.dependency_system.analysis.runtime_inspector" in args
+
+
+def test_emit_runtime_issues_dead_unexported_code():
+    # If the symbol is not in exports, and has zero callers anywhere
+    idx = RuntimeIndex({"file.py": {"exports": []}})
+    sym = {
+        "name": "my_private_helper",
+        "source_context": {"line_range": [10, 11]},
+    }
+    sink = []
+
+    with patch("code_analysis.scanner.heuristics.has_trivial_body", return_value=False):
+        _emit_runtime_issues_for_symbol(
+            sink, idx, "file.py", sym, "function", "my_private_helper"
+        )
+
+    assert len(sink) == 1
+    assert sink[0]["subtype"] == "Dead Unexported Code"
+    assert sink[0]["content"] == "my_private_helper is unexported and has zero caller references"
+
+
+def test_runtime_index_method_fqn_refs():
+    # Verify that method references are qualified using Class.method in RuntimeIndex._refs
+    data = {
+        "file1.py": {
+            "classes": [
+                {
+                    "name": "ClassA",
+                    "methods": [
+                        {"name": "foo", "line": 5}
+                    ]
+                },
+                {
+                    "name": "ClassB",
+                    "methods": [
+                        {"name": "foo", "line": 15}
+                    ]
+                }
+            ],
+            "calls": [
+                # In this file, foo is called.
+                # If ClassA is active, ClassA.foo will be registered in _refs.
+                "foo"
+            ]
+        }
+    }
+    # Create the index. ClassA and ClassB are both defined in file1.py, so they are both active there.
+    idx = RuntimeIndex(data)
+    
+    nf = RuntimeIndex.norm("file1.py")
+    # Verify that simple name foo is registered as a reference
+    assert nf in idx._refs["foo"]
+    # Verify that both qualified names ClassA.foo and ClassB.foo are registered as references
+    assert nf in idx._refs["ClassA.foo"]
+    assert nf in idx._refs["ClassB.foo"]
+
+
+def test_enrich_issue_method_fqn():
+    idx = RuntimeIndex(
+        {
+            "file.py": {
+                "classes": [
+                    {
+                        "name": "MyClass",
+                        "source_context": {"line_range": [5, 20]},
+                        "methods": [
+                            {"name": "my_method", "line": 10}
+                        ]
+                    }
+                ],
+            },
+            "another_file.py": {
+                "calls": ["MyClass.my_method"]
+            }
+        }
+    )
+    
+    # We should have Class.method registered in another_file
+    nf = RuntimeIndex.norm("another_file.py")
+    assert nf in idx._refs["MyClass.my_method"]
+    
+    # Enrich the issue for MyClass.my_method in file.py
+    issue = {
+        "file": "file.py",
+        "line": 10,
+        "_qualname": "MyClass.my_method",
+        "subtype": "Concrete Stub Method"
+    }
+    
+    enriched = enrich_issue(issue, idx)
+    ctx = enriched["context"]
+    assert ctx["linked_areas"]["caller_count"] == 1
+    assert ctx["linked_areas"]["callers"] == [nf]
