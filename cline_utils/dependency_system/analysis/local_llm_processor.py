@@ -10,6 +10,7 @@ from typing import Any, List, Optional, Tuple
 import torch
 
 from cline_utils.dependency_system.utils.resource_validator import ResourceValidator
+from cline_utils.dependency_system.utils import tokenizer_factory
 
 try:
     from llama_cpp import Llama
@@ -186,17 +187,24 @@ class LocalLLMProcessor:
 
     def get_token_count(self, text: str) -> int:
         """Get exact token count using the model's tokenizer."""
-        model = self._model
-        if model is None:
-            # Load a minimal tokenizer-only instance (no GPU layers, tiny context)
-            # This is extremely fast and avoids double-loading a large model just for counting.
-            model = self._load_model(required_ctx=16, n_gpu_layers=0)
+        # 1. Try using the centralized tokenizer factory (extremely lightweight, offline-first)
         try:
-            tokens = model.tokenize(text.encode("utf-8"))
-            return len(tokens)
+            tokenizer = tokenizer_factory.get_tokenizer(self.model_path)
+            if tokenizer is not None:
+                return tokenizer_factory.count_tokens(text, tokenizer)
         except Exception as e:
-            logger.warning(f"Tokenizer failed: {e}. Falling back to estimate.")
-            return len(text) // 3
+            logger.warning(f"Centralized tokenizer factory failed: {e}. Trying in-memory llama-cpp model.")
+
+        # 2. Secondary fallback: use the in-memory llama-cpp-python model if it's already loaded
+        if self._model is not None:
+            try:
+                tokens = self._model.tokenize(text.encode("utf-8"))
+                return len(tokens)
+            except Exception as e:
+                logger.warning(f"In-memory llama-cpp tokenizer failed: {e}.")
+
+        # 3. Final fallback: standard character-based fallback
+        return len(text) // 4
 
     def generate(
         self,

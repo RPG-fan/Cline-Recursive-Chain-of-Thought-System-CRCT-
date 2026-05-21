@@ -1,6 +1,8 @@
 import pytest
 from typing import Any
+from unittest.mock import MagicMock
 from cline_utils.dependency_system.analysis import local_llm_processor as llm_mod
+from cline_utils.dependency_system.utils import tokenizer_factory
 
 
 class _FakeLlama:
@@ -40,6 +42,8 @@ def test_token_based_context_sizing_avoids_unneeded_32768_reload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _FakeLlama.created.clear()
+    # Disable central tokenizer to force Llama tokenization fallback
+    monkeypatch.setattr(tokenizer_factory, "get_tokenizer", lambda *args, **kwargs: None)
     monkeypatch.setattr(llm_mod, "Llama", _FakeLlama)
 
     processor = llm_mod.LocalLLMProcessor(model_path="models/fake.gguf")
@@ -63,6 +67,8 @@ def test_local_llm_calculates_gpu_layers_dynamically(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _FakeLlama.created.clear()
+    # Disable central tokenizer to force Llama tokenization fallback
+    monkeypatch.setattr(tokenizer_factory, "get_tokenizer", lambda *args, **kwargs: None)
 
     class FakeResourceValidator:
         def validate_gpu(self) -> dict[str, Any]:
@@ -86,8 +92,36 @@ def test_local_llm_calculates_gpu_layers_dynamically(
     )
     processor.close()
 
-    assert len(_FakeLlama.created) >= 2
-    # The first load is the tokenizer-only load with n_gpu_layers=0
-    assert _FakeLlama.created[0]["n_gpu_layers"] == 0
-    # The second load is the inference load which dynamically calculated layers > 0
-    assert _FakeLlama.created[1]["n_gpu_layers"] > 0
+    assert len(_FakeLlama.created) == 1
+    # The inference load dynamically calculated layers > 0
+    assert _FakeLlama.created[0]["n_gpu_layers"] > 0
+
+
+def test_local_llm_uses_tokenizer_factory_optimization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeLlama.created.clear()
+
+    # Mock a successful tokenizer from tokenizer_factory
+    mock_tok = MagicMock()
+    mock_tok.encode.return_value = [1] * 50
+    monkeypatch.setattr(tokenizer_factory, "get_tokenizer", lambda *args, **kwargs: mock_tok)
+    monkeypatch.setattr(tokenizer_factory, "count_tokens", lambda text, tok: len(tok.encode(text)))
+
+    monkeypatch.setattr(llm_mod, "Llama", _FakeLlama)
+
+    processor = llm_mod.LocalLLMProcessor(model_path="models/fake.gguf")
+    processor.determine_dependency(
+        source_content="short source",
+        target_content="short target",
+        source_basename="a.py",
+        target_basename="b.py",
+        source_tokens=120,
+        target_tokens=120,
+        instructional_prompt="Analyze.",
+    )
+    processor.close()
+
+    # With the optimization, Llama is never loaded for token counting.
+    # It is only loaded once for the actual inference run.
+    assert len(_FakeLlama.created) == 1

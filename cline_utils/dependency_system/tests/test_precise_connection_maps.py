@@ -548,3 +548,77 @@ def test_transparency_find_source_line_js_arrow_and_dynamic_methods():
     assert records[2]["source_symbol"] == "object_method"
     assert records[2]["source_line"] == 10
 
+
+def test_populate_comments_prevents_redundant_writes(tmp_path: Path):
+    source_path = tmp_path / "source.py"
+    # Write a source file with an existing station header
+    source_path.write_text(
+        "# --- STATION_HEADER_START --- [AUTO]\n"
+        "# ROLE:    [FILL: describe this file's responsibility]\n"
+        "# LAYER:   [FILL: e.g. Service | Utility | Controller | Model]\n"
+        "# CRCT_KEY:   1A [AUTO]\n"
+        "# TRACKER_REF: mini_tracker.md [AUTO]\n"
+        "# --- STATION_HEADER_END --- [AUTO]\n"
+        "def source_func():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    source = _ki("1A", source_path)
+    symbol_data = {
+        "functions": [{"name": "source_func", "line": 7}],
+        "classes": [],
+    }
+
+    # First pass: actually write it to verify it completes and writes
+    result = process_file(
+        file_path=source_path,
+        source_key="1A",
+        key_info_list=[source],
+        grid_row="o",
+        tracker_ref="mini_tracker.md",
+        entry_from=[],
+        exits_to=[],
+        symbol_data=symbol_data,
+        project_root=tmp_path,
+        dry_run=False,
+        verbose=False,
+    )
+
+    assert result["station_added"] is True
+
+    # Retrieve mtime after the first write
+    first_mtime = source_path.stat().st_mtime
+
+    # Clear the backup directory to verify if a new backup is created
+    backup_dir = tmp_path / ".comment_backup"
+    if backup_dir.exists():
+        for f in backup_dir.iterdir():
+            f.unlink()
+
+    # Second pass: run with identical details, should NOT write
+    result2 = process_file(
+        file_path=source_path,
+        source_key="1A",
+        key_info_list=[source],
+        grid_row="o",
+        tracker_ref="mini_tracker.md",
+        entry_from=[],
+        exits_to=[],
+        symbol_data=symbol_data,
+        project_root=tmp_path,
+        dry_run=False,
+        verbose=False,
+    )
+
+    # Assert result is consistent but no actual write occurred
+    assert result2["station_added"] is True
+
+    # Verify mtime is exactly the same and no new backup file was written
+    second_mtime = source_path.stat().st_mtime
+    assert first_mtime == second_mtime
+
+    backup_files = list(backup_dir.iterdir()) if backup_dir.exists() else []
+    assert len(backup_files) == 0
+
+

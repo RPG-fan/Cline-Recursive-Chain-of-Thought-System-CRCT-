@@ -1019,7 +1019,7 @@ def process_file(
         for s in scaffolds[1:]:
             logger.debug(f"  {s}")
 
-    if not dry_run and scaffolds:
+    if not dry_run and scaffolds and new_source != source:
         backup_and_write(file_path, new_source, project_root)
 
     return result

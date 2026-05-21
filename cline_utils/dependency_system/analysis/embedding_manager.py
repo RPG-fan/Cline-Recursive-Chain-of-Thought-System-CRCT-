@@ -31,6 +31,8 @@ from cline_utils.dependency_system.io.transparency_manager import (
 )
 import torch
 
+from cline_utils.dependency_system.utils import tokenizer_factory
+
 # from llama_cpp import Llama
 # from transformers import (
 #     AutoModelForCausalLM,
@@ -530,12 +532,24 @@ def _get_tokenizer() -> Optional[Any]:
     if _tokenizer_instance is not None:
         return _tokenizer_instance
 
-    # 1. Try reusing Reranker tokenizer if loaded
-    if _reranker_tokenizer is not None:
-        _tokenizer_instance = _reranker_tokenizer
-        return _tokenizer_instance
+    try:
+        model_name = None
+        if _selected_model_config and "name" in _selected_model_config:
+            model_name = _selected_model_config["name"]
+        _tokenizer_instance = tokenizer_factory.get_tokenizer(model_name)
+        if _tokenizer_instance is not None:
+            return _tokenizer_instance
+    except Exception as e:
+        logger.warning(f"Centralized tokenizer factory failed in embedding_manager: {e}")
 
-    # 2. Try loading from local reranker path
+    # Fallback to legacy checks if factory failed
+    try:
+        if "_reranker_tokenizer" in globals() and _reranker_tokenizer is not None:
+            _tokenizer_instance = _reranker_tokenizer
+            return _tokenizer_instance
+    except Exception:
+        pass
+
     try:
         project_root = get_project_root()
         local_model_path = os.path.join(project_root, "models", "qwen3_reranker")
@@ -557,14 +571,7 @@ def _get_tokenizer() -> Optional[Any]:
 
 def _count_tokens(text: str, tokenizer: Any = None) -> int:
     """Count tokens in text using tokenizer or fallback estimate."""
-    if tokenizer is not None:
-        try:
-            return len(tokenizer.encode(text, add_special_tokens=False))
-        except Exception:
-            pass
-
-    # Fallback: Rough estimate (4 chars per token is standard rule of thumb)
-    return len(text) // 4
+    return tokenizer_factory.count_tokens(text, tokenizer)
 
 
 def _load_model(n_ctx: int = 8192):

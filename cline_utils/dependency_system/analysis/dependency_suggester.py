@@ -52,6 +52,19 @@ logger = logging.getLogger(__name__)
 GLOBAL_SCAN_LIMIT = 1500
 _PROJECT_SYMBOL_MAP_FILENAME_LOCAL = "project_symbol_map.json"
 
+# --- Cross-file import resolution ledgers ---
+# These dicts act as a shared ledger across all files processed in the same
+# analysis run, so imports that appear in many files (e.g. common utilities)
+# are resolved only once and reused on subsequent lookups.
+#
+# Key for Python ledger: (import_name, source_file_dir, project_root, relative_level)
+# Value: the List[(resolved_path, item_verified)] returned by _convert_python_import_to_paths
+#
+# Key for JS ledger: (import_path, source_dir, project_root, tsconfig_path_or_empty)
+# Value: Optional[str] – the resolved tracked path, or None
+_py_import_resolution_ledger: Dict[Tuple[str, str, str, int], List[Tuple[str, bool]]] = {}
+_js_import_resolution_ledger: Dict[Tuple[str, str, str, str], Optional[str]] = {}
+
 
 def _get_symbol_map_path() -> str:
     """Robustly determines the path to project_symbol_map.json."""
@@ -85,6 +98,8 @@ def clear_caches():
         cast(Any, _find_and_parse_tsconfig)._cache.clear()
     if hasattr(load_project_symbol_map, "_cache"):
         cast(Any, load_project_symbol_map)._cache.clear()
+    _py_import_resolution_ledger.clear()
+    _js_import_resolution_ledger.clear()
 
 
 @cached("metadata", track_path_args=[0])
@@ -2670,6 +2685,18 @@ def _convert_python_import_to_paths(
     Tuple[str, bool]
 ]:  # Returns List[(resolved_module_path, item_verified_in_module_symbols)]
 
+    # --- Ledger check: path resolution is purely structural and independent of
+    # specific_item_name, so we cache at the module-path level only.  Symbol
+    # verification (specific_item_name) is a cheap in-memory lookup done after
+    # the path is found and is NOT stored in the ledger.
+    _ledger_key = (import_name, source_file_dir, project_root, relative_level)
+    if _ledger_key in _py_import_resolution_ledger:
+        logger.debug(
+            f"PyImportLedger: HIT for '{import_name}' (level={relative_level}) "
+            f"from '{source_file_dir}'"
+        )
+        return _py_import_resolution_ledger[_ledger_key]
+
     potential_paths_abs_info: List[Tuple[str, bool]] = []  # (path, item_verified_flag)
     normalized_project_root = normalize_path(project_root)
 
@@ -2836,12 +2863,15 @@ def _convert_python_import_to_paths(
                     logger.debug(
                         f"Absolute import '{import_name}' resolved to '{p_candidate_str}'. Taking first match."
                     )
+                    _py_import_resolution_ledger[_ledger_key] = potential_paths_abs_info
                     return potential_paths_abs_info  # Return immediately
 
     if not potential_paths_abs_info and import_name:
         logger.debug(
             f"Could not resolve import '{import_name}' (item: {specific_item_name}, level:{relative_level}) from source '{source_file_dir}' to any *tracked* project files. Candidates checked (sample): {candidate_module_file_paths_to_check_in_map[:3]}"
         )
+    # Store in ledger before returning so future files with the same import skip work.
+    _py_import_resolution_ledger[_ledger_key] = potential_paths_abs_info
     return potential_paths_abs_info
 
 
@@ -2929,6 +2959,13 @@ def _resolve_js_import_path(
     """Resolves a JS/TS import path to a tracked file path."""
     if tracked_paths_globally is None:
         tracked_paths_globally = tracked_paths_globally or set(path_to_key_info.keys())
+
+    # --- Ledger check: JS import resolution depends on the import string, the
+    # source directory, the project root, and the tsconfig file (if any).
+    _tsconfig_path_key = tsconfig_info[0] if tsconfig_info else ""
+    _js_ledger_key = (import_path, source_dir, project_root, _tsconfig_path_key)
+    if _js_ledger_key in _js_import_resolution_ledger:
+        return _js_import_resolution_ledger[_js_ledger_key]
     if import_path.startswith("."):
         base_path = normalize_path(
             os.path.abspath(os.path.join(source_dir, import_path))
@@ -2947,7 +2984,9 @@ def _resolve_js_import_path(
         for ext in extensions:
             candidate = normalize_path(base_path + ext)
             if candidate in tracked_paths_globally:
+                _js_import_resolution_ledger[_js_ledger_key] = candidate
                 return candidate
+        _js_import_resolution_ledger[_js_ledger_key] = None
         return None
 
     if tsconfig_info:
@@ -2983,6 +3022,7 @@ def _resolve_js_import_path(
                     for ext in extensions:
                         candidate = normalize_path(candidate_base + ext)
                         if candidate in tracked_paths_globally:
+                            _js_import_resolution_ledger[_js_ledger_key] = candidate
                             return candidate
 
     # Fallback for non-aliased, non-relative paths (e.g. from baseUrl)
@@ -3008,8 +3048,11 @@ def _resolve_js_import_path(
         for ext in extensions:
             candidate = normalize_path(candidate_base + ext)
             if candidate in tracked_paths_globally:
+                _js_import_resolution_ledger[_js_ledger_key] = candidate
                 return candidate
 
+    # Store miss in ledger so repeated unresolvable paths are skipped immediately.
+    _js_import_resolution_ledger[_js_ledger_key] = None
     return None
 
 
