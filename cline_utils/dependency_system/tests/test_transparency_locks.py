@@ -143,3 +143,108 @@ def test_transparency_locks_and_realignment(tmp_path):
     lines = drifted_content.splitlines()
     assert updated_meta["sections"]["CONTEXT"]["anchors"][1] == lines[13].strip()  # "This is context content drifted."
     assert updated_meta["sections"]["OVERVIEW"]["anchors"][1] == lines[15].strip()  # "This is overview content drifted."
+
+
+def test_nested_boundary_restoration(tmp_path):
+    """
+    Tests that deeply nested transparency section structures (e.g. child inside parent)
+    can be virtualized (remove_markers) and restored (restore_markers)
+    without shift offset corruption, and the output matches original content exactly.
+    """
+    registry_file = tmp_path / "transparency_registry.json"
+    manager = TransparencyManager(str(registry_file))
+
+    # Create a simulated document with nested sections
+    doc_file = tmp_path / "test_nested_doc.md"
+    original_content = (
+        "---PARENT_START---\n"
+        "This is parent context start.\n"
+        "---CHILD_START---\n"
+        "This is nested child context content.\n"
+        "---CHILD_END---\n"
+        "This is parent context end.\n"
+        "---PARENT_END---\n"
+    )
+    doc_file.write_text(original_content, encoding="utf-8")
+
+    # 1. Virtualize: remove markers
+    success_remove = manager.remove_markers(str(doc_file))
+    assert success_remove is True
+
+    # Check clean content: markers should be completely stripped
+    clean_content = doc_file.read_text(encoding="utf-8")
+    expected_clean = (
+        "This is parent context start.\n"
+        "This is nested child context content.\n"
+        "This is parent context end.\n"
+    )
+    assert clean_content == expected_clean
+
+    # Check metadata: sections should be registered
+    meta = manager.get_file_metadata(str(doc_file))
+    assert meta is not None
+    assert "PARENT" in meta["sections"]
+    assert "CHILD" in meta["sections"]
+
+    # 2. Restore: restore markers
+    success_restore = manager.restore_markers(str(doc_file))
+    assert success_restore is True
+
+    # Restored content should match original content exactly!
+    restored_content = doc_file.read_text(encoding="utf-8")
+    assert restored_content == original_content
+
+
+def test_timestamp_synchronization(tmp_path):
+    """
+    Tests that the recorded last_modified timestamp in the registry matches
+    the actual physical disk modification time (mtime) exactly to microsecond precision.
+    We test both remove_markers (which uses update_file_metadata) and
+    virtualize_connection_maps (which uses _write_connection_map_metadata).
+    """
+    registry_file = tmp_path / "transparency_registry.json"
+    manager = TransparencyManager(str(registry_file))
+
+    # Test Case 1: remove_markers (update_file_metadata)
+    doc_file = tmp_path / "test_sync_doc.md"
+    original_content = (
+        "---SECTION_START---\n"
+        "This is context content.\n"
+        "---SECTION_END---\n"
+    )
+    doc_file.write_text(original_content, encoding="utf-8")
+
+    success_remove = manager.remove_markers(str(doc_file))
+    assert success_remove is True
+
+    # Read registry entry
+    meta = manager.get_file_metadata(str(doc_file))
+    assert meta is not None
+    recorded_mtime = meta.get("last_modified")
+    actual_mtime = os.path.getmtime(str(doc_file))
+
+    assert recorded_mtime is not None
+    # Verify exact microsecond precision match
+    assert recorded_mtime == actual_mtime
+
+    # Test Case 2: virtualize_connection_maps (_write_connection_map_metadata)
+    py_file = tmp_path / "test_sync_py.py"
+    py_content = (
+        "def hello():\n"
+        "    # CONNECTION_MAP: none --- hello [AUTO]\n"
+        "    pass\n"
+    )
+    py_file.write_text(py_content, encoding="utf-8")
+
+    success_virtualize = manager.virtualize_connection_maps(str(py_file))
+    assert success_virtualize is True
+
+    meta_py = manager.get_file_metadata(str(py_file))
+    assert meta_py is not None
+    recorded_mtime_py = meta_py.get("last_modified")
+    actual_mtime_py = os.path.getmtime(str(py_file))
+
+    assert recorded_mtime_py is not None
+    assert recorded_mtime_py == actual_mtime_py
+
+

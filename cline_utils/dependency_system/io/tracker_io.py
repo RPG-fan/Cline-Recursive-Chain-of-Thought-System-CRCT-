@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from collections import defaultdict
 from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple, cast, Callable
 
@@ -582,9 +583,7 @@ def write_mini_tracker_with_template_preservation(
             f"Error during write_mini_tracker_with_template_preservation for {output_file}: {e_write_mini}",
             exc_info=True,
         )
-        raise TrackerIOError(
-            tracker_path=output_file, operation="write_mini_template_preservation"
-        ) from e_write_mini
+        raise TrackerIOError(tracker_path=output_file, operation="write_mini_template_preservation") from e_write_mini
 
 
 # --- Patched: Top-level write_tracker_file ---
@@ -623,7 +622,7 @@ def write_tracker_file(
                     "reason": "grid_validation_failure",
                     "expected_size": expected_grid_size,
                     "actual_size": len(grid_rows_ordered),
-                },
+                }
             )
 
         # --- Ensure grid_rows_ordered matches expected_grid_size ---
@@ -734,7 +733,37 @@ def backup_tracker_file(tracker_path: str) -> str:
         base_name = os.path.basename(tracker_path)
         backup_filename = f"{base_name}.{timestamp}.bak"
         backup_path = os.path.join(backup_dir_abs, backup_filename)
-        shutil.copy2(tracker_path, backup_path)
+
+        # Write atomically using a temporary file and os.replace with retries
+        temp_backup_path = backup_path + ".tmp"
+        shutil.copy2(tracker_path, temp_backup_path)
+
+        max_retries = 5
+        base_delay = 0.05
+        last_err: Optional[OSError] = None
+        for attempt in range(max_retries):
+            try:
+                os.replace(temp_backup_path, backup_path)
+                last_err = None
+                break
+            except OSError as err:
+                last_err = err
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2**attempt)
+                    logger.warning(
+                        f"Backup rotation retry {attempt + 1}/{max_retries} "
+                        f"('{temp_backup_path}' -> '{backup_path}'): {err}. "
+                        f"Retrying in {delay}s."
+                    )
+                    time.sleep(delay)
+        if last_err is not None:
+            try:
+                if os.path.exists(temp_backup_path):
+                    os.remove(temp_backup_path)
+            except OSError:
+                pass
+            raise last_err
+
         logger.debug(
             f"Backed up tracker '{base_name}' to: {os.path.basename(backup_path)}"
         )
@@ -780,11 +809,26 @@ def backup_tracker_file(tracker_path: str) -> str:
                     f"Cleaning up {len(files_to_delete)} older backups for '{base_name}'."
                 )
                 for _, file_path_to_delete in files_to_delete:
-                    try:
-                        os.remove(file_path_to_delete)
-                    except OSError as delete_error:
+                    # Retry deleting the old backup to handle transient locks on Windows
+                    last_del_err: Optional[OSError] = None
+                    for attempt in range(max_retries):
+                        try:
+                            if os.path.exists(file_path_to_delete):
+                                os.remove(file_path_to_delete)
+                            last_del_err = None
+                            break
+                        except OSError as delete_error:
+                            last_del_err = delete_error
+                            if attempt < max_retries - 1:
+                                delay = base_delay * (2**attempt)
+                                logger.warning(
+                                    f"Delete old backup retry {attempt + 1}/{max_retries} for '{file_path_to_delete}': {delete_error}. "
+                                    f"Retrying in {delay}s."
+                                )
+                                time.sleep(delay)
+                    if last_del_err is not None:
                         logger.error(
-                            f"Error deleting old backup {file_path_to_delete}: {delete_error}"
+                            f"Error deleting old backup {file_path_to_delete} after maximum retries: {last_del_err}"
                         )
         except Exception as cleanup_error:
             logger.error(
@@ -818,6 +862,7 @@ def _merge_grids(
     for i in range(merged_size):
         if i < merged_size:
             merged_decompressed_grid_rows[i][i] = DIAGONAL_CHAR  # Safety check
+
 
     # Helper to decompress a list of rows, robustly
     def safe_decompress_rows(
@@ -1351,16 +1396,14 @@ def create_mini_tracker(
         logger.error(
             f"I/O Error creating mini tracker {output_file}: {e_io}", exc_info=True
         )
-        raise TrackerIOError(
-            tracker_path=output_file, operation="create_mini"
-        ) from e_io
+        raise TrackerIOError(tracker_path=output_file, operation="create_mini") from e_io
     except Exception as e_exc:
         logger.exception(
             f"Unexpected error creating mini tracker {output_file}: {e_exc}"
         )
-        raise TrackerIOError(
-            tracker_path=output_file, operation="create_mini"
-        ) from e_exc
+        raise TrackerIOError(tracker_path=output_file, operation="create_mini") from e_exc
+
+
 
 
 # Shared helper used by consolidation and pruning: determines whether a path

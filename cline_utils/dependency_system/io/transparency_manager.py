@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import os
@@ -5,6 +6,18 @@ import re
 import threading
 import time
 from typing import Dict, Any, Optional, Tuple, List, Set, cast
+
+try:
+    import msvcrt
+    _HAS_MSVCRT = True
+except ImportError:
+    _HAS_MSVCRT = False
+
+try:
+    import fcntl
+    _HAS_FCNTL = True
+except ImportError:
+    _HAS_FCNTL = False
 from cline_utils.dependency_system.utils.calculate_hash import calculate_content_hash
 from cline_utils.dependency_system.utils.cache_manager import (
     normalize_path_cached as normalize_path,
@@ -43,7 +56,17 @@ def _find_source_line(lines: List[str], map_line_index: int, source_symbol: str)
 
     Falls back to the comment line itself if no nearby definition is visible.
     """
-    patterns = (
+    escaped = re.escape(source_symbol)
+    compiled_patterns = [
+        # Keywords: def, class, function, const, let, var
+        re.compile(rf"\b(def|class|function|const|let|var)\s+{escaped}\b"),
+        # Arrow function: name = (...) => or name: (...) =>
+        re.compile(rf"\b{escaped}\s*[:=]\s*(async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>"),
+        # Dynamic Class/Object Method: myMethod(...) or async myMethod(...) or static, public, private, protected modifiers
+        re.compile(rf"\b(?:async\s+|static\s+|public\s+|private\s+|protected\s+)*{escaped}\s*\("),
+    ]
+
+    fallback_patterns = (
         f"def {source_symbol}",
         f"class {source_symbol}",
         f"function {source_symbol}",
@@ -52,7 +75,10 @@ def _find_source_line(lines: List[str], map_line_index: int, source_symbol: str)
         f"var {source_symbol}",
     )
     for idx in range(map_line_index + 1, min(len(lines), map_line_index + 12)):
-        if any(pattern in lines[idx] for pattern in patterns):
+        line_content = lines[idx]
+        if any(pat.search(line_content) for pat in compiled_patterns):
+            return idx + 1
+        if any(pattern in line_content for pattern in fallback_patterns):
             return idx + 1
     return map_line_index + 1
 
@@ -186,6 +212,66 @@ def overlay_connection_maps(
     return "".join(lines)
 
 
+class TransparencyLock:
+    def __init__(self, lock_path: str, timeout: float = 10.0):
+        self.lock_path = lock_path
+        self.timeout = timeout
+        self.fd = None
+
+    def acquire(self) -> None:
+        start_time = time.time()
+        while True:
+            try:
+                self.fd = open(self.lock_path, "a", encoding="utf-8")
+                break
+            except PermissionError:
+                if time.time() - start_time > self.timeout:
+                    raise TimeoutError(f"Timed out trying to open lock file: {self.lock_path}")
+                time.sleep(0.05)
+
+        while True:
+            try:
+                if _HAS_MSVCRT:
+                    self.fd.seek(0)
+                    msvcrt.locking(self.fd.fileno(), msvcrt.LK_NBLCK, 1)
+                elif _HAS_FCNTL:
+                    fcntl.flock(self.fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (OSError, BlockingIOError):
+                if time.time() - start_time > self.timeout:
+                    try:
+                        self.fd.close()
+                    except Exception:
+                        pass
+                    self.fd = None
+                    raise TimeoutError(f"Timed out acquiring lock on: {self.lock_path}")
+                time.sleep(0.05)
+
+    def release(self) -> None:
+        if self.fd:
+            try:
+                if _HAS_MSVCRT:
+                    self.fd.seek(0)
+                    msvcrt.locking(self.fd.fileno(), msvcrt.LK_UNLCK, 1)
+                elif _HAS_FCNTL:
+                    fcntl.flock(self.fd.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            finally:
+                try:
+                    self.fd.close()
+                except Exception:
+                    pass
+                self.fd = None
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
+
 class TransparencyManager:
     """
     Manages the "invisible" transparency layer for documentation section markers.
@@ -197,75 +283,131 @@ class TransparencyManager:
         self.registry_path = registry_path
         self._lock = threading.RLock()
         self._registry: Dict[str, Any] = {"files": {}}
+        self._in_update = 0
+        self._last_loaded_mtime = 0.0
         self._load()
 
     def _load(self) -> None:
-        """Loads the transparency registry from disk."""
+        """Loads the transparency registry from disk. Call under _lock."""
         with self._lock:
             if os.path.exists(self.registry_path):
                 try:
+                    mtime = os.path.getmtime(self.registry_path)
                     with open(self.registry_path, "r", encoding="utf-8") as f:
                         self._registry = json.load(f)
+                    self._last_loaded_mtime = mtime
                 except Exception as e:
                     logger.error(f"Failed to load transparency registry: {e}")
                     self._registry = {"files": {}}
+                    self._last_loaded_mtime = 0.0
             else:
                 self._registry = {"files": {}}
+                self._last_loaded_mtime = 0.0
+
+    def _reload_if_stale(self) -> None:
+        """Reloads the registry if it has been modified on disk by another process. Call under _lock."""
+        with self._lock:
+            if os.path.exists(self.registry_path):
+                try:
+                    mtime = os.path.getmtime(self.registry_path)
+                    if mtime > self._last_loaded_mtime:
+                        self._load()
+                except Exception as e:
+                    logger.debug(f"Failed to check/reload registry: {e}")
+
+    def _save_under_lock(self) -> None:
+        """Saves the transparency registry to disk atomically. Call under lock."""
+        temp_path = self.registry_path + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(self.registry_path), exist_ok=True)
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(self._registry, f, indent=2)
+
+            max_retries = 5
+            success = False
+            for attempt in range(max_retries):
+                try:
+                    if os.path.exists(self.registry_path):
+                        os.replace(temp_path, self.registry_path)
+                    else:
+                        os.rename(temp_path, self.registry_path)
+                    success = True
+                    break
+                except (PermissionError, OSError) as ex:
+                    if attempt < max_retries - 1:
+                        sleep_time = 0.05 * (2 ** attempt)
+                        logger.warning(
+                            f"Atomic save retry {attempt+1}/{max_retries} due to transient lock: {ex}. Retrying in {sleep_time}s."
+                        )
+                        time.sleep(sleep_time)
+                    else:
+                        raise ex
+
+            if not success:
+                raise RuntimeError("Failed to rename temporary file after maximum retries")
+
+            try:
+                self._last_loaded_mtime = os.path.getmtime(self.registry_path)
+            except Exception:
+                pass
+
+        except Exception as e:
+            logger.error(f"Failed to save transparency registry atomically: {e}. Attempting direct fallback write.")
+            try:
+                with open(self.registry_path, "w", encoding="utf-8") as f:
+                    json.dump(self._registry, f, indent=2)
+                logger.info("Direct fallback write to transparency registry succeeded.")
+                try:
+                    self._last_loaded_mtime = os.path.getmtime(self.registry_path)
+                except Exception:
+                    pass
+            except Exception as fallback_err:
+                logger.error(f"Direct fallback write to transparency registry also failed: {fallback_err}")
+            finally:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
 
     def _save(self) -> None:
         """Saves the transparency registry to disk atomically with retry and fallback."""
+        lock_path = self.registry_path + ".lock"
         with self._lock:
-            temp_path = self.registry_path + ".tmp"
-            try:
-                # Ensure directory exists
-                os.makedirs(os.path.dirname(self.registry_path), exist_ok=True)
-                with open(temp_path, "w", encoding="utf-8") as f:
-                    json.dump(self._registry, f, indent=2)
+            with TransparencyLock(lock_path):
+                self._save_under_lock()
 
-                # Atomic rename (on Windows this may require os.replace and retries)
-                max_retries = 5
-                success = False
-                for attempt in range(max_retries):
+    @contextlib.contextmanager
+    def _update_context(self):
+        """
+        Context manager to handle file locking, reloading the registry from disk,
+        allowing modifications to self._registry, and saving it back atomically.
+        Supports reentrant calls.
+        """
+        os.makedirs(os.path.dirname(self.registry_path), exist_ok=True)
+        lock_path = self.registry_path + ".lock"
+
+        with self._lock:
+            if self._in_update == 0:
+                with TransparencyLock(lock_path):
+                    self._load()
+                    self._in_update += 1
                     try:
-                        if os.path.exists(self.registry_path):
-                            os.replace(temp_path, self.registry_path)
-                        else:
-                            os.rename(temp_path, self.registry_path)
-                        success = True
-                        break
-                    except (PermissionError, OSError) as ex:
-                        if attempt < max_retries - 1:
-                            # Exponential backoff: 0.05, 0.1, 0.2, 0.4 seconds
-                            sleep_time = 0.05 * (2 ** attempt)
-                            logger.warning(
-                                f"Atomic save retry {attempt+1}/{max_retries} due to transient lock: {ex}. Retrying in {sleep_time}s."
-                            )
-                            time.sleep(sleep_time)
-                        else:
-                            raise ex
-
-                if not success:
-                    raise RuntimeError("Failed to rename temporary file after maximum retries")
-
-            except Exception as e:
-                logger.error(f"Failed to save transparency registry atomically: {e}. Attempting direct fallback write.")
-                # Direct fallback write
+                        yield
+                    finally:
+                        self._in_update -= 1
+                        self._save_under_lock()
+            else:
+                self._in_update += 1
                 try:
-                    with open(self.registry_path, "w", encoding="utf-8") as f:
-                        json.dump(self._registry, f, indent=2)
-                    logger.info("Direct fallback write to transparency registry succeeded.")
-                except Exception as fallback_err:
-                    logger.error(f"Direct fallback write to transparency registry also failed: {fallback_err}")
+                    yield
                 finally:
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except Exception:
-                            pass
+                    self._in_update -= 1
 
     def get_file_metadata(self, file_path: str) -> Optional[Dict[str, Any]]:
         """Retrieves transparency metadata for a specific file, excluding locked ones."""
         with self._lock:
+            self._reload_if_stale()
             norm_path = normalize_path(file_path)
             entry = self._registry["files"].get(norm_path)
             if entry and entry.get("locked"):
@@ -275,16 +417,16 @@ class TransparencyManager:
     def get_raw_file_metadata(self, file_path: str) -> Optional[Dict[str, Any]]:
         """Retrieves raw transparency metadata for a file, even if locked."""
         with self._lock:
+            self._reload_if_stale()
             norm_path = normalize_path(file_path)
             return self._registry["files"].get(norm_path)
 
     def lock_entry(self, file_path: str) -> None:
         """Flags the transparency metadata for a file as locked/pending realignment."""
-        with self._lock:
+        with self._update_context():
             norm_path = normalize_path(file_path)
             if norm_path in self._registry["files"]:
                 self._registry["files"][norm_path]["locked"] = True
-                self._save()
                 logger.warning(f"Placed a drift lock on transparency entry for {file_path} (pending next project analysis)")
 
     def update_file_metadata(
@@ -298,7 +440,7 @@ class TransparencyManager:
             sections: Dictionary mapping section names (e.g. 'TAGS') to metadata.
             content: Current file content to generate checksum.
         """
-        with self._lock:
+        with self._update_context():
             norm_path = normalize_path(file_path)
             checksum = calculate_content_hash(content, file_path)
             existing = self._registry["files"].get(norm_path, {})
@@ -326,7 +468,6 @@ class TransparencyManager:
                         entry[key] = existing[key]
 
             self._registry["files"][norm_path] = entry
-            self._save()
 
     def _generate_floating_markers(self, content: str) -> List[Dict[str, Any]]:
         """Generates 3 floating markers at 25%, 50%, 75% of the total lines of the clean content."""
@@ -395,7 +536,7 @@ class TransparencyManager:
         *,
         defer_save: bool = False,
     ) -> None:
-        with self._lock:
+        with self._update_context():
             norm_path = normalize_path(file_path)
             existing = self._registry["files"].get(norm_path, {})
             existing_dict = cast(Dict[str, Any], existing) if isinstance(existing, dict) else {}
@@ -416,8 +557,6 @@ class TransparencyManager:
             if connection_map_lines:
                 entry["connection_map_lines"] = connection_map_lines
             self._registry["files"][norm_path] = entry
-            if not defer_save:
-                self._save()
 
     def virtualize_connection_maps(
         self, file_path: str, *, clear_if_absent: bool = False, defer_save: bool = False
@@ -434,7 +573,7 @@ class TransparencyManager:
         Returns:
             True if file content or metadata changed.
         """
-        with self._lock:
+        with self._update_context():
             norm_path = normalize_path(file_path)
             if self._is_excluded(norm_path, file_path, "virtualize connection maps for"):
                 return False
@@ -482,12 +621,12 @@ class TransparencyManager:
                     _parse_connection_map_text(original_content), removed_line_numbers
                 )
 
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(clean_content)
+
                 self._write_connection_map_metadata(
                     file_path, clean_content, records, raw_lines, defer_save=defer_save
                 )
-
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(clean_content)
 
                 logger.debug(f"Virtualized CONNECTION_MAP comments for {file_path}")
                 return True
@@ -504,15 +643,13 @@ class TransparencyManager:
         Perform virtualization of connection maps on multiple files in bulk,
         saving the registry exactly once at the end to avoid expensive disk I/O.
         """
-        with self._lock:
+        with self._update_context():
             virtualized = 0
             for path in file_paths:
                 if self.virtualize_connection_maps(
                     path, clear_if_absent=clear_if_absent, defer_save=True
                 ):
                     virtualized += 1
-            if virtualized > 0:
-                self._save()
             return virtualized
 
     def bulk_prune_stale_virtual_maps(
@@ -523,8 +660,7 @@ class TransparencyManager:
         For any file in files_processed that is NOT in files_with_maps, removes 'connection_maps'
         and 'connection_map_lines' to ensure they don't linger as ghost/stale metadata.
         """
-        with self._lock:
-            changed = False
+        with self._update_context():
             for file_path in files_processed:
                 if file_path in files_with_maps:
                     continue
@@ -535,9 +671,6 @@ class TransparencyManager:
                     for key in ("connection_maps", "connection_map_lines"):
                         if key in existing:
                             del existing[key]
-                            changed = True
-            if changed:
-                self._save()
 
     def check_drift(self, file_path: str, current_content: str) -> bool:
         """
@@ -562,7 +695,7 @@ class TransparencyManager:
         Returns:
             True if markers were restored, False otherwise.
         """
-        with self._lock:
+        with self._update_context():
             norm_path = normalize_path(file_path)
 
             # Safety Check: Do not operate on excluded files or directories
@@ -598,150 +731,136 @@ class TransparencyManager:
                 logger.error(f"File {file_path} not found. Cannot restore markers.")
                 return False
 
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
 
-            sections = metadata.get("sections", {})
-            if not sections:
-                logger.debug(f"No sections defined in metadata for {file_path}.")
-                return False
-
-            content = "".join(lines)
-            # Drift Check: If content hash doesn't match, line numbers might be wrong!
-            is_drifted = self.check_drift(file_path, content)
-            if is_drifted:
-                logger.warning(
-                    f"Transparency drift detected for {file_path}! Attempting instant auto-recovery..."
-                )
-                recovered_metadata = self.recover_alignment(file_path, content)
-                if recovered_metadata:
-                    logger.info(f"Successfully recovered transparency alignment for {file_path} before restoring markers!")
-                    metadata = recovered_metadata
-                    is_drifted = False  # Clear drifted status since we've recovered
-                else:
-                    logger.error(
-                        f"Could not recover transparency alignment for {file_path}. Entry has been invalidated. Cannot restore markers."
-                    )
+                sections = metadata.get("sections", {})
+                if not sections:
+                    logger.debug(f"No sections defined in metadata for {file_path}.")
                     return False
 
-            # Sections can be:
-            # 1. List [start, end] (1-indexed)
-            # 2. Dict {"content": "...", "start_line": n} (virtual content like TAGS)
-
-            sorted_items: List[Tuple[int, str, str, Any]] = []
-            for name, val in sections.items():
-                if isinstance(val, dict):
-                    v_dict = cast(Dict[str, Any], val)
-                    if "start_line" in v_dict:
-                        sl = v_dict["start_line"]
-                        if isinstance(sl, int):
-                            sorted_items.append((sl, "virtual", str(name), v_dict))
-                    elif "range" in v_dict:
-                        rv = v_dict["range"]
-                        if isinstance(rv, list):
-                            rv_list = cast(List[Any], rv)
-                            if len(rv_list) >= 1:
-                                sorted_items.append(
-                                    (int(rv_list[0]), "range", str(name), v_dict)
-                                )
-                elif isinstance(val, list):
-                    v_list = cast(List[Any], val)
-                    if len(v_list) == 2:
-                        sorted_items.append(
-                            (int(v_list[0]), "range", str(name), v_list)
+                content = "".join(lines)
+                # Drift Check: If content hash doesn't match, line numbers might be wrong!
+                is_drifted = self.check_drift(file_path, content)
+                if is_drifted:
+                    logger.warning(
+                        f"Transparency drift detected for {file_path}! Attempting instant auto-recovery..."
+                    )
+                    recovered_metadata = self.recover_alignment(file_path, content)
+                    if recovered_metadata:
+                        logger.info(f"Successfully recovered transparency alignment for {file_path} before restoring markers!")
+                        metadata = recovered_metadata
+                        is_drifted = False  # Clear drifted status since we've recovered
+                    else:
+                        logger.error(
+                            f"Could not recover transparency alignment for {file_path}. Entry has been invalidated. Cannot restore markers."
                         )
+                        return False
 
-            # Sort by start line DESCENDING so insertions don't affect earlier indices
-            sorted_items.sort(key=lambda x: x[0], reverse=True)
-
-            for start_line, item_type, name, data in sorted_items:
-                start_idx: int = int(start_line) - 1
-                end_idx = 0  # Will be calculated below
-
-                try:
-                    # Skip if this specific marker is already present
+                # Explode sections into flat individual marker insertion tasks
+                insertions: List[Dict[str, Any]] = []
+                for name, val in sections.items():
+                    # Skip if this specific marker is already present in clean content
                     if f"---{name}_START---" in content:
                         logger.debug(
                             f"Marker {name} already present in {file_path}. Skipping."
                         )
                         continue
 
-                    if item_type == "range":
-                        # Calculate default end_idx
-                        if isinstance(data, dict):
-                            d_dict = cast(Dict[str, Any], data)
-                            orig_end_line: int = int(d_dict["range"][1])
-                        else:
-                            orig_end_line = int(data[1])
+                    if isinstance(val, dict):
+                        v_dict = cast(Dict[str, Any], val)
+                        if "start_line" in v_dict:
+                            sl = v_dict["start_line"]
+                            if isinstance(sl, int):
+                                start_idx = sl - 1
+                                if name == "TAGS":
+                                    tags_content = str(v_dict.get("content", ""))
+                                    if tags_content:
+                                        insertions.append({
+                                            "idx": start_idx,
+                                            "priority": 500,
+                                            "content": "---TAGS_END---\n"
+                                        })
+                                        insertions.append({
+                                            "idx": start_idx,
+                                            "priority": 400,
+                                            "content": tags_content + "\n"
+                                        })
+                                        insertions.append({
+                                            "idx": start_idx,
+                                            "priority": 300,
+                                            "content": "---TAGS_START---\n"
+                                        })
+                        elif "range" in v_dict:
+                            rv = v_dict["range"]
+                            if isinstance(rv, list) and len(rv) == 2:
+                                start_idx = int(rv[0]) - 1
+                                end_idx = int(rv[1]) - 1
 
-                        end_idx: int = orig_end_line - 1
+                                if is_drifted:
+                                    anchors = v_dict.get("anchors")
+                                    if isinstance(anchors, list) and len(anchors) == 2:
+                                        start_anchor = str(anchors[0])
+                                        end_anchor = str(anchors[1])
+                                        new_start = self._find_anchor(lines, start_anchor, start_idx)
+                                        new_end = self._find_anchor(lines, end_anchor, end_idx)
+                                        if new_start is not None and new_end is not None:
+                                            start_idx = new_start
+                                            end_idx = new_end + 1
+                                            logger.info(
+                                                f"Re-aligned section {name} via anchors to lines {start_idx+1}-{end_idx+1}"
+                                            )
 
-                        if is_drifted:
-                            anchors = None
-                            if isinstance(data, dict):
-                                anchors = cast(Dict[str, Any], data).get("anchors")
+                                range_len = end_idx - start_idx
+                                insertions.append({
+                                    "idx": end_idx,
+                                    "priority": 1000 + range_len,
+                                    "content": f"---{name}_END---\n"
+                                })
+                                insertions.append({
+                                    "idx": start_idx,
+                                    "priority": 100 - range_len,
+                                    "content": f"---{name}_START---\n"
+                                })
+                    elif isinstance(val, list) and len(val) == 2:
+                        start_idx = int(val[0]) - 1
+                        end_idx = int(val[1]) - 1
+                        range_len = end_idx - start_idx
+                        insertions.append({
+                            "idx": end_idx,
+                            "priority": 1000 + range_len,
+                            "content": f"---{name}_END---\n"
+                        })
+                        insertions.append({
+                            "idx": start_idx,
+                            "priority": 100 - range_len,
+                            "content": f"---{name}_START---\n"
+                        })
 
-                            if isinstance(anchors, list):
-                                a_list = cast(List[Any], anchors)
-                                if len(a_list) == 2:
-                                    start_anchor: str = str(a_list[0])
-                                    end_anchor: str = str(a_list[1])
-                                    # Search for anchors in a window around the original positions
-                                    new_start = self._find_anchor(
-                                        lines, start_anchor, start_idx
-                                    )
-                                    new_end = self._find_anchor(lines, end_anchor, end_idx)
+                # Sort descending by (idx, priority) so insertions happen from bottom-up
+                insertions.sort(key=lambda x: (x["idx"], x["priority"]), reverse=True)
 
-                                    if new_start is not None and new_end is not None:
-                                        start_idx = new_start
-                                        end_idx = (
-                                            new_end + 1
-                                        )  # End marker goes AFTER the anchor line
-                                        logger.info(
-                                            f"Re-aligned section {name} via anchors to lines {start_idx+1}-{end_idx+1}"
-                                        )
+                # Perform the insertions in order
+                for ins in insertions:
+                    try:
+                        idx = min(len(lines), max(0, ins["idx"]))
+                        lines.insert(idx, ins["content"])
+                    except Exception as e_inner:
+                        logger.error(
+                            f"Error inserting marker in {file_path}: {e_inner}"
+                        )
+                        continue
 
-                    if item_type == "virtual" and name == "TAGS":
-                        tags_content: str = ""
-                        if isinstance(data, dict):
-                            tags_content = str(
-                                cast(Dict[str, Any], data).get("content", "")
-                            )
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.writelines(lines)
 
-                        if tags_content:
-                            # Clamp indices to current file size
-                            idx = min(len(lines), max(0, start_idx))
-                            # Insert TAGS block (End, then Content, then Start)
-                            lines.insert(idx, "---TAGS_END---\n")
-                            lines.insert(idx, tags_content + "\n")
-                            lines.insert(idx, "---TAGS_START---\n")
+                logger.info(f"Restored markers for {file_path}")
+                return True
 
-                    elif item_type == "range":
-                        # Clamp indices to current file size
-                        s_idx = min(len(lines), max(0, start_idx))
-                        e_idx = min(len(lines), max(0, int(end_idx)))
-
-                        # Insert END marker first, then START marker (End first to avoid shifting Start)
-                        # Wait, if we are at the same line, order matters.
-                        # But since we are iterating DESCENDING, we should be fine if we do End then Start.
-                        lines.insert(e_idx, f"---{name}_END---\n")
-                        lines.insert(s_idx, f"---{name}_START---\n")
-                except Exception as e_inner:
-                    logger.error(
-                        f"Error restoring section {name} ({type}) in {file_path}: {e_inner}"
-                    )
-                    continue
-
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.writelines(lines)
-
-            logger.info(f"Restored markers for {file_path}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to restore markers for {file_path}: {e}")
-            return False
+            except Exception as e:
+                logger.error(f"Failed to restore markers for {file_path}: {e}")
+                return False
 
     def _find_anchor(
         self, lines: List[str], anchor: str, original_idx: int
@@ -782,7 +901,7 @@ class TransparencyManager:
         Returns:
             True if markers were removed and registered, False otherwise.
         """
-        with self._lock:
+        with self._update_context():
             norm_path = normalize_path(file_path)
 
             # Safety Check: Do not operate on excluded files or directories
@@ -811,102 +930,101 @@ class TransparencyManager:
             if not os.path.exists(file_path):
                 return False
 
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
 
-            # 1. Identify all markers and sections
-            sections: Dict[str, Tuple[int, int]] = {}
-            for i, line in enumerate(lines):
-                stripped = line.strip()
-                if stripped.startswith("---") and stripped.endswith("_START---"):
-                    section_name = stripped[3:-9]
-                    # Find end
-                    for j in range(i + 1, len(lines)):
-                        if lines[j].strip() == f"---{section_name}_END---":
-                            sections[section_name] = (i, j)
-                            break
+                # 1. Identify all markers and sections
+                sections: Dict[str, Tuple[int, int]] = {}
+                for i, line in enumerate(lines):
+                    stripped = line.strip()
+                    if stripped.startswith("---") and stripped.endswith("_START---"):
+                        section_name = stripped[3:-9]
+                        # Find end
+                        for j in range(i + 1, len(lines)):
+                            if lines[j].strip() == f"---{section_name}_END---":
+                                sections[section_name] = (i, j)
+                                break
 
-            if not sections:
-                logger.debug(f"No markers found in {file_path}")
+                if not sections:
+                    logger.debug(f"No markers found in {file_path}")
+                    return False
+
+                # 2. Identify indices to remove
+                indices_to_remove: Set[int] = set()
+                for range_pair in sections.values():
+                    i_val, j_val = range_pair
+                    indices_to_remove.add(int(i_val))
+                    indices_to_remove.add(int(j_val))
+
+                # Special handling for TAGS: also remove content
+                tags_content: Optional[str] = None
+                if "TAGS" in sections:
+                    tags_range = sections["TAGS"]
+                    s_idx, e_idx = tags_range
+                    for idx in range(s_idx + 1, e_idx):
+                        indices_to_remove.add(idx)
+                    tags_content = "".join(lines[s_idx + 1 : e_idx]).strip()
+
+                # 3. Calculate new content and adjusted indices
+                sorted_remove = sorted(list(indices_to_remove))
+                new_lines = [l for i, l in enumerate(lines) if i not in indices_to_remove]
+                new_content = "".join(new_lines)
+
+                adjusted_sections: Dict[str, Any] = {}
+                for name, range_indices in sections.items():
+                    start_idx, end_idx = range_indices
+                    # Calculate new indices by subtracting removed lines strictly BEFORE them
+                    m_before_start = sum(1 for m in sorted_remove if m < start_idx)
+                    m_before_end = sum(1 for m in sorted_remove if m < end_idx)
+
+                    new_start: int = start_idx - m_before_start
+                    new_end: int = end_idx - m_before_end
+
+                    if name == "TAGS" and tags_content is not None:
+                        adjusted_sections["TAGS"] = {
+                            "content": tags_content,
+                            "start_line": new_start + 1,
+                        }
+                    else:
+                        # Record anchors (content of first and last lines of the section)
+                        # to allow re-alignment if the file is edited while clean.
+                        start_anchor: str = (
+                            new_lines[new_start].strip()
+                            if new_start < len(new_lines)
+                            else ""
+                        )
+                        # end_idx in clean file is new_end. Last line of content is new_end - 1.
+                        end_anchor: str = (
+                            new_lines[new_end - 1].strip()
+                            if new_end > 0 and new_end <= len(new_lines)
+                            else ""
+                        )
+
+                        adjusted_sections[name] = {
+                            "range": [new_start + 1, new_end + 1],
+                            "anchors": [start_anchor, end_anchor],
+                        }
+
+                # 4. Save file first, then update registry
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+
+                self.update_file_metadata(file_path, adjusted_sections, new_content)
+
+                logger.info(f"Removed and virtualized markers for {file_path}")
+                return True
+
+            except Exception as e:
+                logger.error(f"Failed to remove markers for {file_path}: {e}")
                 return False
-
-            # 2. Identify indices to remove
-            indices_to_remove: Set[int] = set()
-            for range_pair in sections.values():
-                i_val, j_val = range_pair
-                indices_to_remove.add(int(i_val))
-                indices_to_remove.add(int(j_val))
-
-            # Special handling for TAGS: also remove content
-            tags_content: Optional[str] = None
-            if "TAGS" in sections:
-                tags_range = sections["TAGS"]
-                s_idx, e_idx = tags_range
-                for idx in range(s_idx + 1, e_idx):
-                    indices_to_remove.add(idx)
-                tags_content = "".join(lines[s_idx + 1 : e_idx]).strip()
-
-            # 3. Calculate new content and adjusted indices
-            sorted_remove = sorted(list(indices_to_remove))
-            new_lines = [l for i, l in enumerate(lines) if i not in indices_to_remove]
-            new_content = "".join(new_lines)
-
-            adjusted_sections: Dict[str, Any] = {}
-            for name, range_indices in sections.items():
-                start_idx, end_idx = range_indices
-                # Calculate new indices by subtracting removed lines strictly BEFORE them
-                m_before_start = sum(1 for m in sorted_remove if m < start_idx)
-                m_before_end = sum(1 for m in sorted_remove if m < end_idx)
-
-                new_start: int = start_idx - m_before_start
-                new_end: int = end_idx - m_before_end
-
-                if name == "TAGS" and tags_content is not None:
-                    adjusted_sections["TAGS"] = {
-                        "content": tags_content,
-                        "start_line": new_start + 1,
-                    }
-                else:
-                    # Record anchors (content of first and last lines of the section)
-                    # to allow re-alignment if the file is edited while clean.
-                    start_anchor: str = (
-                        new_lines[new_start].strip()
-                        if new_start < len(new_lines)
-                        else ""
-                    )
-                    # end_idx in clean file is new_end. Last line of content is new_end - 1.
-                    end_anchor: str = (
-                        new_lines[new_end - 1].strip()
-                        if new_end > 0 and new_end <= len(new_lines)
-                        else ""
-                    )
-
-                    adjusted_sections[name] = {
-                        "range": [new_start + 1, new_end + 1],
-                        "anchors": [start_anchor, end_anchor],
-                    }
-
-            # 4. Update registry and save file
-            self.update_file_metadata(file_path, adjusted_sections, new_content)
-
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(new_content)
-
-            logger.info(f"Removed and virtualized markers for {file_path}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to remove markers for {file_path}: {e}")
-            return False
 
     def invalidate_entry(self, file_path: str) -> None:
         """Invalidates/deletes the transparency metadata for a file."""
-        with self._lock:
+        with self._update_context():
             norm_path = normalize_path(file_path)
             if norm_path in self._registry["files"]:
                 del self._registry["files"][norm_path]
-                self._save()
                 logger.warning(f"Invalidated and removed drifted transparency entry for {file_path}")
 
     def recover_alignment(self, file_path: str, current_content: str) -> Optional[Dict[str, Any]]:
@@ -917,7 +1035,7 @@ class TransparencyManager:
         If unrecoverable, places a lock on the entry that is dependent upon the next
         analyze project run to realign it.
         """
-        with self._lock:
+        with self._update_context():
             norm_path = normalize_path(file_path)
             metadata = self.get_raw_file_metadata(file_path)
             if not metadata:
@@ -1118,7 +1236,7 @@ class TransparencyManager:
             Number of successfully realigned files.
         """
         realigned_count = 0
-        with self._lock:
+        with self._update_context():
             locked_paths = [
                 path for path, entry in self._registry["files"].items()
                 if entry.get("locked")
@@ -1296,9 +1414,6 @@ class TransparencyManager:
                 self._registry["files"][norm_path] = entry
                 realigned_count += 1
                 logger.info(f"Successfully realigned drifted transparency entry for {file_path} using project symbol map!")
-
-            if realigned_count > 0:
-                self._save()
 
         return realigned_count
 
