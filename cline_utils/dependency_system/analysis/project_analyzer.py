@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
@@ -461,24 +462,14 @@ def analyze_project(
 
         # Realign locked transparency registry entries using the new symbol map
         try:
-            from cline_utils.dependency_system.io.transparency_manager import (
-                get_transparency_manager,
-            )
-
+            from cline_utils.dependency_system.io.transparency_manager import get_transparency_manager
             tm = get_transparency_manager()
             realigned_count = tm.realign_locked_entries(merged_symbol_map)
             if realigned_count > 0:
-                logger.info(
-                    f"Successfully realigned {realigned_count} drifted transparency entries."
-                )
-                analysis_results["symbol_map_generation"][
-                    "realigned_count"
-                ] = realigned_count
+                logger.info(f"Successfully realigned {realigned_count} drifted transparency entries.")
+                analysis_results["symbol_map_generation"]["realigned_count"] = realigned_count
         except Exception as e:
-            logger.error(
-                f"Failed to realign locked transparency entries during project analysis: {e}",
-                exc_info=True,
-            )
+            logger.error(f"Failed to realign locked transparency entries during project analysis: {e}", exc_info=True)
     except Exception as e:
         logger.error(f"Failed to merge symbol maps: {e}", exc_info=True)
         analysis_results["symbol_map_generation"]["status"] = "error"
@@ -727,6 +718,30 @@ def analyze_project(
         all_project_ast_links = consolidated_links
 
     if all_project_ast_links:
+        def _rotate_file_atomically(
+            src: str,
+            dst: str,
+            max_retries: int = 5,
+            base_delay: float = 0.05,
+        ) -> None:
+            last_err: Optional[OSError] = None
+            for attempt in range(max_retries):
+                try:
+                    os.replace(src, dst)
+                    return
+                except OSError as err:
+                    last_err = err
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2**attempt)
+                        logger.warning(
+                            f"AST links rotation retry {attempt + 1}/{max_retries} "
+                            f"('{src}' -> '{dst}'): {err}. "
+                            f"Retrying in {delay}s."
+                        )
+                        time.sleep(delay)
+            if last_err is not None:
+                raise last_err
+
         try:
             core_dir = os.path.dirname(
                 os.path.abspath(key_manager.__file__)
@@ -741,7 +756,7 @@ def analyze_project(
 
             if os.path.exists(current_ast_links_path):
                 try:
-                    shutil.move(current_ast_links_path, old_ast_links_path)
+                    _rotate_file_atomically(current_ast_links_path, old_ast_links_path)
                     logger.debug(
                         f"Renamed existing '{AST_VERIFIED_LINKS_FILENAME}' to '{OLD_AST_VERIFIED_LINKS_FILENAME}'."
                     )
@@ -913,22 +928,16 @@ def analyze_project(
                     # Cast trackers_section.values() to avoid 'Unknown' group type
                     for group in cast(Dict[str, Any], trackers_section).values():
                         if isinstance(group, dict):
-                            all_tracker_paths.extend(
-                                [str(v) for v in cast(Dict[str, Any], group).values()]
-                            )
+                            all_tracker_paths.extend([str(v) for v in cast(Dict[str, Any], group).values()])
                         elif isinstance(group, list):
-                            all_tracker_paths.extend(
-                                [str(v) for v in cast(List[Any], group)]
-                            )
+                            all_tracker_paths.extend([str(v) for v in cast(List[Any], group)])
 
             for t_path_entry in all_tracker_paths:
                 # If path is already absolute, use it; otherwise join with project_root
                 if os.path.isabs(t_path_entry):
                     t_path_abs = normalize_path(t_path_entry)
                 else:
-                    t_path_abs = normalize_path(
-                        os.path.join(project_root, t_path_entry)
-                    )
+                    t_path_abs = normalize_path(os.path.join(project_root, t_path_entry))
                 if os.path.exists(t_path_abs):
                     try:
                         structured_data = read_tracker_file_structured(

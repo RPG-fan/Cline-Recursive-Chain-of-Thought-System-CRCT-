@@ -560,10 +560,7 @@ class CacheManager:
         """Recursively revive objects from their JSON-safe representation (Legacy)."""
         if isinstance(obj, dict):
             obj_dict = cast(Dict[str, Any], obj)
-            if (
-                obj_dict.get("__type__") == "bytes"
-                and obj_dict.get("encoding") == "hex"
-            ):
+            if obj_dict.get("__type__") == "bytes" and obj_dict.get("encoding") == "hex":
                 try:
                     data_val = obj_dict.get("data", "")
                     if isinstance(data_val, str):
@@ -1306,8 +1303,11 @@ try:
         return f"excluded_dirs:{os.path.getmtime(path) if os.path.exists(path) else 'missing'}"
 
     @cached("excluded_dirs", key_func=_excluded_dirs_key)
-    def _get_excluded_dirs_cached(self: ConfigManager) -> List[str]:
+    def _get_excluded_dirs_cached_internal(self: ConfigManager) -> List[str]:
         return _orig_get_excluded_dirs(self)
+
+    def _get_excluded_dirs_cached(self: ConfigManager) -> List[str]:
+        return list(_get_excluded_dirs_cached_internal(self))
 
     ConfigManager.get_excluded_dirs = _get_excluded_dirs_cached
 
@@ -1319,8 +1319,11 @@ try:
         return f"excluded_extensions:{os.path.getmtime(path) if os.path.exists(path) else 'missing'}"
 
     @cached("excluded_extensions", key_func=_excluded_extensions_key)
-    def _get_excluded_extensions_cached(self: ConfigManager) -> List[str]:
+    def _get_excluded_extensions_cached_internal(self: ConfigManager) -> List[str]:
         return _orig_get_excluded_extensions(self)
+
+    def _get_excluded_extensions_cached(self: ConfigManager) -> List[str]:
+        return list(_get_excluded_extensions_cached_internal(self))
 
     ConfigManager.get_excluded_extensions = _get_excluded_extensions_cached
 
@@ -1332,8 +1335,11 @@ try:
         return f"excluded_paths:{os.path.getmtime(path) if os.path.exists(path) else 'missing'}"
 
     @cached("excluded_paths", key_func=_excluded_paths_key)
-    def _get_excluded_paths_cached(self: ConfigManager) -> List[str]:
+    def _get_excluded_paths_cached_internal(self: ConfigManager) -> List[str]:
         return _orig_get_excluded_paths(self)
+
+    def _get_excluded_paths_cached(self: ConfigManager) -> List[str]:
+        return list(_get_excluded_paths_cached_internal(self))
 
     ConfigManager.get_excluded_paths = _get_excluded_paths_cached
 
@@ -1342,22 +1348,17 @@ try:
 
     def _code_roots_key(self: ConfigManager) -> str:
         pr = get_project_root_cached()
-        rules_path = os.path.join(pr, ".clinerules", "default-rules.md")
-        folder_path = os.path.join(pr, ".clinerules")
-        mtime = (
-            os.path.getmtime(rules_path)
-            if os.path.exists(rules_path)
-            else (
-                os.path.getmtime(folder_path)
-                if os.path.exists(folder_path)
-                else "missing"
-            )
-        )
+        rules_path = os.path.join(pr, '.clinerules', 'default-rules.md')
+        folder_path = os.path.join(pr, '.clinerules')
+        mtime = os.path.getmtime(rules_path) if os.path.exists(rules_path) else (os.path.getmtime(folder_path) if os.path.exists(folder_path) else 'missing')
         return f"code_roots:{mtime}"
 
     @cached("code_roots", key_func=_code_roots_key)
-    def _get_code_root_directories_cached(self: ConfigManager) -> List[str]:
+    def _get_code_root_directories_cached_internal(self: ConfigManager) -> List[str]:
         return _orig_get_code_root_directories(self)
+
+    def _get_code_root_directories_cached(self: ConfigManager) -> List[str]:
+        return list(_get_code_root_directories_cached_internal(self))
 
     ConfigManager.get_code_root_directories = _get_code_root_directories_cached
 
@@ -1366,24 +1367,20 @@ try:
 
     def _doc_dirs_key(self: ConfigManager) -> str:
         pr = get_project_root_cached()
-        rules_path = os.path.join(pr, ".clinerules", "default-rules.md")
-        folder_path = os.path.join(pr, ".clinerules")
-        mtime = (
-            os.path.getmtime(rules_path)
-            if os.path.exists(rules_path)
-            else (
-                os.path.getmtime(folder_path)
-                if os.path.exists(folder_path)
-                else "missing"
-            )
-        )
+        rules_path = os.path.join(pr, '.clinerules', 'default-rules.md')
+        folder_path = os.path.join(pr, '.clinerules')
+        mtime = os.path.getmtime(rules_path) if os.path.exists(rules_path) else (os.path.getmtime(folder_path) if os.path.exists(folder_path) else 'missing')
         return f"doc_dirs:{mtime}"
 
     @cached("doc_dirs", key_func=_doc_dirs_key)
-    def _get_doc_directories_cached(self: ConfigManager) -> List[str]:
+    def _get_doc_directories_cached_internal(self: ConfigManager) -> List[str]:
         return _orig_get_doc_directories(self)
 
+    def _get_doc_directories_cached(self: ConfigManager) -> List[str]:
+        return list(_get_doc_directories_cached_internal(self))
+
     ConfigManager.get_doc_directories = _get_doc_directories_cached
+
 
     # Register observer callback on the ConfigManager singleton to invalidate cache on config save
     def _config_save_callback(config_path: str):

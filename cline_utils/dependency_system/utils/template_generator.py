@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
@@ -222,6 +223,30 @@ def _archive_and_get_cycle_number(
                 f"Updated final coverage metrics in {checklist_filename_in_root} before archiving."
             )
 
+            def _rotate_file_atomically(
+                src: str,
+                dst: str,
+                max_retries: int = 5,
+                base_delay: float = 0.05,
+            ) -> None:
+                last_err: Optional[OSError] = None
+                for attempt in range(max_retries):
+                    try:
+                        os.replace(src, dst)
+                        return
+                    except OSError as err:
+                        last_err = err
+                        if attempt < max_retries - 1:
+                            delay = base_delay * (2**attempt)
+                            logger.warning(
+                                f"Checklist archiving retry {attempt + 1}/{max_retries} "
+                                f"('{src}' -> '{dst}'): {err}. "
+                                f"Retrying in {delay}s."
+                            )
+                            time.sleep(delay)
+                if last_err is not None:
+                    raise last_err
+
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             checklist_filename_base = os.path.splitext(checklist_filename_in_root)[0]
             archive_filename = f"{checklist_filename_base}_{timestamp}_cycle{last_cycle_number if last_cycle_number > 0 else 'unknown'}.md"
@@ -229,7 +254,7 @@ def _archive_and_get_cycle_number(
                 os.path.join(archive_dir_abs, archive_filename)
             )
             os.makedirs(archive_dir_abs, exist_ok=True)
-            shutil.move(current_checklist_path, archive_filepath)
+            _rotate_file_atomically(current_checklist_path, archive_filepath)
             logger.info(f"Archived updated checklist to: {archive_filepath}")
             return last_cycle_number + 1
         except Exception as e:

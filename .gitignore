@@ -5,3 +5,5 @@
 .kilocodemodes
 docs/**
 .comment_backup/
+.agent/**
+.clinerules.config.json

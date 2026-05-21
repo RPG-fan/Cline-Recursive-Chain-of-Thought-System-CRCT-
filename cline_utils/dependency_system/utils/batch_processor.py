@@ -188,8 +188,7 @@ class BatchProcessor:
         final_time = time.time() - self.start_time
         logger.debug(f"Processed {self.total_items} items in {final_time:.2f} seconds")
 
-        # Filter out potential None values if errors occurred and weren't replaced
-        # Or raise an error if None is found, depending on desired strictness
+        # Count non-None results to identify processing failures while preserving None placeholders for index alignment
         final_results = [res for res in results if res is not None]
         if len(results) != self.total_items:
             logger.critical(
@@ -198,7 +197,7 @@ class BatchProcessor:
 
         if any(res is None for res in results):
             logger.warning(
-                f"Some items failed processing ({len(results) - len(final_results)} errors). Results list contains None placeholders for failed items at corresponding indices to preserve alignment."
+                f"Some items failed processing ({len(results) - len(final_results)} errors). Results list contains None placeholders for failed items at corresponding indices to preserve 1-to-1 index correlation."
             )
 
         # Make sure final newline is printed after progress bar
@@ -213,7 +212,7 @@ class BatchProcessor:
         self,
         items: List[T],
         processor_func: Callable[..., R],
-        collector_func: Callable[[List[R]], Any],
+        collector_func: Callable[[List[Optional[R]]], Any],
         **kwargs: Any,
     ) -> Any:
         """
@@ -392,7 +391,7 @@ def process_items(
 def process_with_collector(
     items: List[T],
     processor_func: Callable[..., R],
-    collector_func: Callable[[List[R]], Any],
+    collector_func: Callable[[List[Optional[R]]], Any],
     max_workers: Optional[int] = None,
     batch_size: Optional[int] = None,
     show_progress: bool = True,

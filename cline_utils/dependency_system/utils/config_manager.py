@@ -5,6 +5,7 @@ Configuration module for dependency tracking system.
 Handles reading and writing configuration settings.
 """
 
+import copy
 import glob
 import json
 import logging
@@ -331,7 +332,7 @@ class ConfigManager:
             ("environment", DEFAULT_CONFIG["environment"]),
         ]:
             if key not in self._config:
-                self._config[key] = default_value
+                self._config[key] = copy.deepcopy(default_value)
 
         # Apply environment variable overrides
         self._apply_environment_overrides()
@@ -366,7 +367,7 @@ class ConfigManager:
     ) -> Any:
         """Gets a setting from the 'recovery' section of the config."""
         recovery_settings = self.config.get(
-            "recovery", DEFAULT_CONFIG.get("recovery", {})
+            "recovery", copy.deepcopy(DEFAULT_CONFIG.get("recovery", {}))
         )
 
         # Determine the ultimate default value
@@ -376,7 +377,7 @@ class ConfigManager:
         if default_override is not None:
             ultimate_default = default_override
         else:
-            ultimate_default = DEFAULT_CONFIG.get("recovery", {}).get(setting_name)
+            ultimate_default = copy.deepcopy(DEFAULT_CONFIG.get("recovery", {}).get(setting_name))
 
         return recovery_settings.get(setting_name, ultimate_default)
 
@@ -445,7 +446,7 @@ class ConfigManager:
     def _load_and_merge_config(self) -> None:
         """Load configuration from file and deep merge with defaults."""
         # Start with a deep copy of the defaults
-        final_config = json.loads(json.dumps(DEFAULT_CONFIG))  # Simple deep copy
+        final_config = copy.deepcopy(DEFAULT_CONFIG)
 
         user_config = self._load_user_config_file()
         if user_config:
@@ -538,7 +539,7 @@ class ConfigManager:
         Returns:
             List of excluded directory names
         """
-        return self.config.get("excluded_dirs", DEFAULT_CONFIG["excluded_dirs"])
+        return self.config.get("excluded_dirs", copy.deepcopy(DEFAULT_CONFIG["excluded_dirs"]))
 
     def get_excluded_extensions(self) -> List[str]:
         """
@@ -548,7 +549,7 @@ class ConfigManager:
             List of excluded file extensions
         """
         return self.config.get(
-            "excluded_extensions", DEFAULT_CONFIG["excluded_extensions"]
+            "excluded_extensions", copy.deepcopy(DEFAULT_CONFIG["excluded_extensions"])
         )
 
     def get_excluded_paths(self) -> List[str]:
@@ -560,11 +561,11 @@ class ConfigManager:
         """
         # Retrieve excluded_paths from config, defaulting to DEFAULT_CONFIG value
         excluded_paths_config = self.config.get(
-            "excluded_paths", DEFAULT_CONFIG["excluded_paths"]
+            "excluded_paths", copy.deepcopy(DEFAULT_CONFIG["excluded_paths"])
         )
         excluded_file_patterns = self.config.get(
             "excluded_file_patterns",
-            DEFAULT_CONFIG.get("excluded_file_patterns", []),
+            copy.deepcopy(DEFAULT_CONFIG.get("excluded_file_patterns", [])),
         )  # Get file patterns, default to empty list if not set
 
         excluded_paths = []
@@ -606,7 +607,7 @@ class ConfigManager:
         """
         # Use instance-level cache to avoid repeated config lookups
         if threshold_type not in self._threshold_cache:
-            thresholds = self.config.get("thresholds", DEFAULT_CONFIG["thresholds"])
+            thresholds = self.config.get("thresholds", copy.deepcopy(DEFAULT_CONFIG["thresholds"]))
             self._threshold_cache[threshold_type] = thresholds.get(threshold_type, 0.65)
         return self._threshold_cache[threshold_type]
 
@@ -622,7 +623,7 @@ class ConfigManager:
         """
         # Use instance-level cache
         if model_type not in self._model_name_cache:
-            models = self.config.get("models", DEFAULT_CONFIG["models"])
+            models = self.config.get("models", copy.deepcopy(DEFAULT_CONFIG["models"]))
             self._model_name_cache[model_type] = models.get(
                 model_type, "all-mpnet-base-v2"
             )
@@ -642,13 +643,13 @@ class ConfigManager:
         # Use instance-level cache
         cache_key = (path_type, default_path)
         if cache_key not in self._path_cache:
-            paths = self.config.get("paths", DEFAULT_CONFIG["paths"])
+            paths = self.config.get("paths", copy.deepcopy(DEFAULT_CONFIG["paths"]))
             path = paths.get(
                 path_type,
                 (
                     default_path
                     if default_path
-                    else DEFAULT_CONFIG["paths"].get(path_type, "")
+                    else copy.deepcopy(DEFAULT_CONFIG["paths"]).get(path_type, "")
                 ),
             )
             if path_type == "embeddings_dir":
@@ -746,7 +747,7 @@ class ConfigManager:
         """Get the allowed dependency characters from configuration."""
         # Correctly fetch from the config dictionary, falling back to default
         return self.config.get(
-            "allowed_dependency_chars", DEFAULT_CONFIG["allowed_dependency_chars"]
+            "allowed_dependency_chars", copy.deepcopy(DEFAULT_CONFIG["allowed_dependency_chars"])
         )
 
     def update_config(self, updates: Dict[str, Any]) -> bool:
@@ -900,7 +901,7 @@ class ConfigManager:
                 ),
                 skip_disk_estimation=self.get_resource_setting(
                     "skip_disk_estimation", False
-                ),
+                )
             )
             project_root = get_project_root()
             results = validator.validate_system_resources(str(project_root))
@@ -1011,7 +1012,7 @@ class ConfigManager:
                 ),
                 skip_disk_estimation=self.get_resource_setting(
                     "skip_disk_estimation", False
-                ),
+                )
             )
             results = validator.validate_system_resources(project_path)
             self._resource_validation_results = results
