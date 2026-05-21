@@ -672,6 +672,28 @@ class TransparencyManager:
                         if key in existing:
                             del existing[key]
 
+    def bulk_restore_markers(self, file_paths: List[str]) -> Dict[str, bool]:
+        """
+        Restores physical markers to multiple files in bulk,
+        saving the registry exactly once at the end.
+        """
+        results: Dict[str, bool] = {}
+        with self._update_context():
+            for path in file_paths:
+                results[path] = self.restore_markers(path)
+        return results
+
+    def bulk_remove_markers(self, file_paths: List[str]) -> Dict[str, bool]:
+        """
+        Removes physical markers from multiple files in bulk,
+        saving the registry exactly once at the end.
+        """
+        results: Dict[str, bool] = {}
+        with self._update_context():
+            for path in file_paths:
+                results[path] = self.remove_markers(path)
+        return results
+
     def check_drift(self, file_path: str, current_content: str) -> bool:
         """
         Checks if the file content has drifted from the recorded checksum.
@@ -744,12 +766,12 @@ class TransparencyManager:
                 # Drift Check: If content hash doesn't match, line numbers might be wrong!
                 is_drifted = self.check_drift(file_path, content)
                 if is_drifted:
-                    logger.warning(
+                    logger.debug(
                         f"Transparency drift detected for {file_path}! Attempting instant auto-recovery..."
                     )
                     recovered_metadata = self.recover_alignment(file_path, content)
                     if recovered_metadata:
-                        logger.info(f"Successfully recovered transparency alignment for {file_path} before restoring markers!")
+                        logger.debug(f"Successfully recovered transparency alignment for {file_path} before restoring markers!")
                         metadata = recovered_metadata
                         is_drifted = False  # Clear drifted status since we've recovered
                     else:
@@ -1448,18 +1470,17 @@ def read_file_transparently(
 
     # Check for drift
     if metadata and manager.check_drift(file_path, content):
-        import logging
-        logging.getLogger(__name__).warning(
+        logger.debug(
             f"Transparency drift detected for {file_path}. Attempting instant auto-recovery..."
         )
         recovered_metadata = manager.recover_alignment(file_path, content)
         if recovered_metadata:
-            logging.getLogger(__name__).info(
+            logger.debug(
                 f"Successfully recovered transparency alignment for {file_path}!"
             )
             metadata = recovered_metadata
         else:
-            logging.getLogger(__name__).error(
+            logger.error(
                 f"Could not recover transparency alignment for {file_path}. Entry has been invalidated."
             )
             metadata = None

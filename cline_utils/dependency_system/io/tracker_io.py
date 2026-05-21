@@ -1430,6 +1430,7 @@ def update_tracker(
     apply_ast_overrides: bool = True,
     return_update: bool = False,
     tracker_cache: Optional[Dict[str, Dict[str, Any]]] = None,
+    path_migration_info: Optional[PathMigrationInfo] = None,
 ) -> Optional[
     Dict[str, Any]
 ]:  # Returns Dict if return_update is True, else writes directly.
@@ -2133,22 +2134,23 @@ def update_tracker(
                 )
         # End of read attempts loop
 
-    try:
-        path_migration_info = build_path_migration_map(
-            load_old_global_key_map() if use_old_map_for_migration else None,
-            path_to_key_info,
-        )
-    except ValueError as ve_migmap:
-        logger.critical(
-            f"Path Migration Map build failed due to inconsistent global maps: {ve_migmap}. Aborting update for '{output_file_basename}'."
-        )
-        return None
-    except Exception as e_migmap_other:
-        logger.critical(
-            f"Unexpected error building migration map for '{output_file_basename}': {e_migmap_other}. Aborting update.",
-            exc_info=True,
-        )
-        return None
+    if path_migration_info is None:
+        try:
+            path_migration_info = build_path_migration_map(
+                load_old_global_key_map() if use_old_map_for_migration else None,
+                path_to_key_info,
+            )
+        except ValueError as ve_migmap:
+            logger.critical(
+                f"Path Migration Map build failed due to inconsistent global maps: {ve_migmap}. Aborting update for '{output_file_basename}'."
+            )
+            return None
+        except Exception as e_migmap_other:
+            logger.critical(
+                f"Unexpected error building migration map for '{output_file_basename}': {e_migmap_other}. Aborting update.",
+                exc_info=True,
+            )
+            return None
 
     if not tracker_exists_and_is_sound:  # Create new or rebuild from scratch
         logger.info(
@@ -3103,6 +3105,7 @@ def prepare_tracker_update(
     use_old_map_for_migration: bool = True,
     apply_ast_overrides: bool = True,
     tracker_cache: Optional[Dict[str, Dict[str, Any]]] = None,
+    path_migration_info: Optional[PathMigrationInfo] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Prepares a tracker update in memory by calling update_tracker in return_update mode.
@@ -3122,6 +3125,7 @@ def prepare_tracker_update(
         apply_ast_overrides=apply_ast_overrides,
         return_update=True,
         tracker_cache=tracker_cache,
+        path_migration_info=path_migration_info,
     )
 
 

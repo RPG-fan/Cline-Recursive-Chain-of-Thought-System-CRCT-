@@ -365,9 +365,7 @@ def command_handler_analyze_file(args: argparse.Namespace) -> int:
             print(json.dumps(results, indent=2))
         return 0
     except BinaryFileError as e:
-        print(
-            f"\n[ANALYSIS ERROR] Binary file detected: {e.file_path} (size: {e.file_size} bytes)"
-        )
+        print(f"\n[ANALYSIS ERROR] Binary file detected: {e.file_path} (size: {e.file_size} bytes)")
         print("Text analysis is not supported for binary files.")
         return 1
     except EncodingError as e:
@@ -531,43 +529,27 @@ def command_handler_analyze_project(args: argparse.Namespace) -> int:
             else 1
         )
     except MemoryLimitError as e:
-        logger.error(
-            f"Memory limit exceeded: {e.message}", extra={"details": e.details}
-        )
+        logger.error(f"Memory limit exceeded: {e.message}", extra={"details": e.details})
         print(f"\n[FATAL ERROR] Memory Limit Exceeded!")
-        print(
-            f"Current Memory: {e.current_mb:.1f} MB (Required: {e.required_mb:.1f} MB)"
-        )
-        print(
-            "Please free up system resources or increase memory allocation in config."
-        )
+        print(f"Current Memory: {e.current_mb:.1f} MB (Required: {e.required_mb:.1f} MB)")
+        print("Please free up system resources or increase memory allocation in config.")
         return 1
     except DiskSpaceError as e:
-        logger.error(
-            f"Disk space insufficient: {e.message}", extra={"details": e.details}
-        )
+        logger.error(f"Disk space insufficient: {e.message}", extra={"details": e.details})
         print(f"\n[FATAL ERROR] Disk Space Insufficient!")
         print(f"Path: {e.path}")
-        print(
-            f"Current Space: {e.current_mb:.1f} MB (Required: {e.required_mb:.1f} MB)"
-        )
+        print(f"Current Space: {e.current_mb:.1f} MB (Required: {e.required_mb:.1f} MB)")
         print("Please clean up disk space and try again.")
         return 1
     except ResourceValidationError as e:
-        logger.error(
-            f"Resource validation failed: {e.message}", extra={"details": e.details}
-        )
+        logger.error(f"Resource validation failed: {e.message}", extra={"details": e.details})
         print(f"\n[FATAL ERROR] Resource Validation Failed: {e.message}")
         return 1
     except ModelError as e:
         logger.error(f"AI Model Error: {e.message}", extra={"details": e.details})
-        print(
-            f"\n[AI MODEL ERROR] Model '{e.model_name}' failed during '{e.error_type}':"
-        )
+        print(f"\n[AI MODEL ERROR] Model '{e.model_name}' failed during '{e.error_type}':")
         print(f"Details: {e.message}")
-        print(
-            "Please check your LLM provider status, api keys, or local model runner connection."
-        )
+        print("Please check your LLM provider status, api keys, or local model runner connection.")
         return 1
     except TrackerIOError as e:
         logger.error(f"Tracker I/O Error: {e.message}", extra={"details": e.details})
@@ -584,9 +566,7 @@ def command_handler_analyze_project(args: argparse.Namespace) -> int:
         print(f"Details: {e.message}")
         return 1
     except ProjectAnalyzerError as e:
-        logger.error(
-            f"Project Analyzer Error: {e.message}", extra={"details": e.details}
-        )
+        logger.error(f"Project Analyzer Error: {e.message}", extra={"details": e.details})
         print(f"\n[ANALYZER ERROR] {e.message}")
         return 1
     except Exception as e:
@@ -2390,6 +2370,7 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                 return_update=True,
                 force_apply_suggestions=True,
                 apply_ast_overrides=False,
+                path_migration_info=path_migration_info,
             )
             if not update_data:
                 continue
@@ -2645,6 +2626,7 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
         accumulated_updates=cast(
             List[Any], getattr(args, "accumulated_tracker_updates", [])
         ),
+        path_migration_info=path_migration_info,
     )
 
     args.limit -= total_processed
@@ -2701,91 +2683,92 @@ def handle_reconcile_transparency(args: argparse.Namespace) -> int:
         return 0
 
     reconciled_count = 0
-    for file_path in all_files:
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
+    with manager._update_context():
+        for file_path in all_files:
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
 
-            # Find markers and calculate shifts
-            sections: Dict[str, Tuple[int, int]] = {}
-            for i, line in enumerate(lines):
-                stripped = line.strip()
-                if stripped.startswith("---") and stripped.endswith("_START---"):
-                    section_name = stripped[3:-9]
-                    # Find end
-                    for j in range(i + 1, len(lines)):
-                        if lines[j].strip() == f"---{section_name}_END---":
-                            sections[section_name] = (i, j)
-                            break
+                # Find markers and calculate shifts
+                sections: Dict[str, Tuple[int, int]] = {}
+                for i, line in enumerate(lines):
+                    stripped = line.strip()
+                    if stripped.startswith("---") and stripped.endswith("_START---"):
+                        section_name = stripped[3:-9]
+                        # Find end
+                        for j in range(i + 1, len(lines)):
+                            if lines[j].strip() == f"---{section_name}_END---":
+                                sections[section_name] = (i, j)
+                                break
 
-            # Dispatch based on transform
-            if args.transform == "restore":
-                if manager.restore_markers(file_path):
+                # Dispatch based on transform
+                if args.transform == "restore":
+                    if manager.restore_markers(file_path):
+                        logger.info(
+                            f"  [RESTORED] {os.path.relpath(file_path, project_root)}: Markers re-inserted from registry."
+                        )
+                        reconciled_count += 1
+                    else:
+                        logger.debug(
+                            f"  [SKIP RESTORE] {os.path.relpath(file_path, project_root)}: No registry data or already tagged."
+                        )
+                    continue
+
+                if args.transform == "remove":
+                    if manager.remove_markers(file_path):
+                        logger.info(
+                            f"  [REMOVED MARKERS] {os.path.relpath(file_path, project_root)}: Markers moved to registry."
+                        )
+                        reconciled_count += 1
+                    else:
+                        logger.debug(
+                            f"  [SKIP REMOVE] {os.path.relpath(file_path, project_root)}: No markers found or already removed."
+                        )
+                    continue
+
+                # For other transforms (html, register), we need to find existing markers
+                if not sections:
+                    continue
+
+                if args.transform == "html":
+                    # Convert to HTML comments
+                    new_lines = list(lines)
+                    for name, (start_idx, end_idx) in sections.items():
+                        new_lines[start_idx] = f"<!-- ---{name}_START--- -->\n"
+                        new_lines[end_idx] = f"<!-- ---{name}_END--- -->\n"
+
+                    content = "".join(new_lines)
+                    # Register with markers present (but commented out)
+                    registry_sections: Dict[str, Any] = {
+                        name: (start_idx + 1, end_idx + 1)
+                        for name, (start_idx, end_idx) in sections.items()
+                    }
+                    manager.update_file_metadata(file_path, registry_sections, content)
+
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write(content)
+
                     logger.info(
-                        f"  [RESTORED] {os.path.relpath(file_path, project_root)}: Markers re-inserted from registry."
+                        f"  [HTML COMMENTS] {os.path.relpath(file_path, project_root)}: {len(sections)} sections registered."
                     )
-                    reconciled_count += 1
-                else:
-                    logger.debug(
-                        f"  [SKIP RESTORE] {os.path.relpath(file_path, project_root)}: No registry data or already tagged."
-                    )
-                continue
 
-            if args.transform == "remove":
-                if manager.remove_markers(file_path):
+                else:
+                    # Just register with current markers
+                    content = "".join(lines)
+                    registry_sections: Dict[str, Any] = {
+                        name: (start_idx + 1, end_idx + 1)
+                        for name, (start_idx, end_idx) in sections.items()
+                    }
+                    manager.update_file_metadata(file_path, registry_sections, content)
                     logger.info(
-                        f"  [REMOVED MARKERS] {os.path.relpath(file_path, project_root)}: Markers moved to registry."
+                        f"  [REGISTERED] {os.path.relpath(file_path, project_root)}: {len(sections)} sections found."
                     )
-                    reconciled_count += 1
-                else:
-                    logger.debug(
-                        f"  [SKIP REMOVE] {os.path.relpath(file_path, project_root)}: No markers found or already removed."
-                    )
-                continue
 
-            # For other transforms (html, register), we need to find existing markers
-            if not sections:
-                continue
+                reconciled_count += 1
 
-            if args.transform == "html":
-                # Convert to HTML comments
-                new_lines = list(lines)
-                for name, (start_idx, end_idx) in sections.items():
-                    new_lines[start_idx] = f"<!-- ---{name}_START--- -->\n"
-                    new_lines[end_idx] = f"<!-- ---{name}_END--- -->\n"
-
-                content = "".join(new_lines)
-                # Register with markers present (but commented out)
-                registry_sections: Dict[str, Any] = {
-                    name: (start_idx + 1, end_idx + 1)
-                    for name, (start_idx, end_idx) in sections.items()
-                }
-                manager.update_file_metadata(file_path, registry_sections, content)
-
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(content)
-
-                logger.info(
-                    f"  [HTML COMMENTS] {os.path.relpath(file_path, project_root)}: {len(sections)} sections registered."
-                )
-
-            else:
-                # Just register with current markers
-                content = "".join(lines)
-                registry_sections: Dict[str, Any] = {
-                    name: (start_idx + 1, end_idx + 1)
-                    for name, (start_idx, end_idx) in sections.items()
-                }
-                manager.update_file_metadata(file_path, registry_sections, content)
-                logger.info(
-                    f"  [REGISTERED] {os.path.relpath(file_path, project_root)}: {len(sections)} sections found."
-                )
-
-            reconciled_count += 1
-
-        except Exception as e:
-            print(f"  Error processing {file_path}: {e}")
-            logger.error(f"Reconciliation error for {file_path}: {e}", exc_info=True)
+            except Exception as e:
+                print(f"  Error processing {file_path}: {e}")
+                logger.error(f"Reconciliation error for {file_path}: {e}", exc_info=True)
 
     print(f"\nSuccessfully reconciled transparency for {reconciled_count} files.")
     return 0
@@ -3279,11 +3262,8 @@ def main():
                                     maps_added = result.get("maps_added")
                                     maps_updated = result.get("maps_updated")
                                     maps_count = (
-                                        maps_added if isinstance(maps_added, int) else 0
-                                    ) + (
-                                        maps_updated
-                                        if isinstance(maps_updated, int)
-                                        else 0
+                                        (maps_added if isinstance(maps_added, int) else 0)
+                                        + (maps_updated if isinstance(maps_updated, int) else 0)
                                     )
                                     if maps_count > 0:
                                         files_with_maps.add(path)
@@ -3294,9 +3274,7 @@ def main():
                                 paths_to_virtualize, clear_if_absent=False
                             )
                         if files_processed:
-                            manager.bulk_prune_stale_virtual_maps(
-                                files_processed, files_with_maps
-                            )
+                            manager.bulk_prune_stale_virtual_maps(files_processed, files_with_maps)
                         if virtualized:
                             logger.info(
                                 "Virtualized CONNECTION_MAP comments for "

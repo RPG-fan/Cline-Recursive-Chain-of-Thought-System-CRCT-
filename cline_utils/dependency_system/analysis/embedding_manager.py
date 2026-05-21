@@ -347,10 +347,7 @@ def _download_with_retry(
                         downloaded += len(chunk)
 
                         if tracker:
-                            tracker.update(
-                                len(chunk),
-                                description=f"{downloaded}/{total_size} bytes",
-                            )
+                            tracker.update(len(chunk), description=f"{downloaded}/{total_size} bytes")
                         elif total_size > 0:
                             progress = (downloaded / total_size) * 100
                             print(
@@ -369,13 +366,9 @@ def _download_with_retry(
                 return True
 
         except urllib.error.HTTPError as e:
-            logger.warning(
-                f"Download HTTP error (status {e.code}) for {description}: {e.reason}"
-            )
+            logger.warning(f"Download HTTP error (status {e.code}) for {description}: {e.reason}")
             if e.code in (400, 401, 403, 404):
-                logger.error(
-                    f"Permanent HTTP error {e.code} encountered. Aborting download."
-                )
+                logger.error(f"Permanent HTTP error {e.code} encountered. Aborting download.")
                 if tracker:
                     cast(Any, tracker).__exit__(type(e), e, e.__traceback__)
                 if os.path.exists(path):
@@ -386,15 +379,11 @@ def _download_with_retry(
                 return False
 
             if attempt < max_retries - 1:
-                delay = min(
-                    30.0, initial_delay * (2**attempt) + random.uniform(0.0, 1.0)
-                )
+                delay = min(30.0, initial_delay * (2**attempt) + random.uniform(0.0, 1.0))
                 logger.info(f"Retrying transient HTTP error in {delay:.2f} seconds...")
                 time.sleep(delay)
             else:
-                logger.error(
-                    f"Failed to download {description} after {max_retries} attempts due to HTTP errors."
-                )
+                logger.error(f"Failed to download {description} after {max_retries} attempts due to HTTP errors.")
                 if tracker:
                     cast(Any, tracker).__exit__(type(e), e, e.__traceback__)
                 if os.path.exists(path):
@@ -405,19 +394,13 @@ def _download_with_retry(
                 return False
 
         except Exception as e:
-            logger.warning(
-                f"Download attempt {attempt + 1} failed for {description}: {e}"
-            )
+            logger.warning(f"Download attempt {attempt + 1} failed for {description}: {e}")
             if attempt < max_retries - 1:
-                delay = min(
-                    30.0, initial_delay * (2**attempt) + random.uniform(0.0, 1.0)
-                )
+                delay = min(30.0, initial_delay * (2**attempt) + random.uniform(0.0, 1.0))
                 logger.info(f"Retrying in {delay:.2f} seconds...")
                 time.sleep(delay)
             else:
-                logger.error(
-                    f"Failed to download {description} after {max_retries} attempts."
-                )
+                logger.error(f"Failed to download {description} after {max_retries} attempts.")
                 if tracker:
                     cast(Any, tracker).__exit__(type(e), e, e.__traceback__)
                 if os.path.exists(path):
@@ -2994,6 +2977,22 @@ def generate_embeddings(
         f"Generating embeddings for {len(files_to_process)} files using Symbol Essence..."
     )
 
+    # 2.5. Transparency Pre-alignment / Pre-recovery Phase
+    # Perform all drift checks and realignment/recovery in a single context block
+    # to avoid sequential lock acquisition and repeated atomic disk writes.
+    try:
+        from cline_utils.dependency_system.io.transparency_manager import get_transparency_manager
+        tm_manager = get_transparency_manager()
+        logger.info("Performing pre-alignment and drift checks on transparency registry in batch...")
+        with tm_manager._update_context():
+            for key_info in files_to_process:
+                # Trigger read_file_transparently which does check_drift and auto-recovery inside our single context!
+                # Since we are inside _update_context, any recovery or invalidation will modify self._registry in-memory
+                # and only write to disk ONCE at the end.
+                read_file_transparently(key_info.norm_path)
+    except Exception as e:
+        logger.error(f"Failed during transparency pre-alignment phase: {e}", exc_info=True)
+
     # 3. Processing Phase
     # Pre-calculate token counts and sort to optimize model loading
     tokenizer = _get_tokenizer()
@@ -3002,46 +3001,74 @@ def generate_embeddings(
 
     processing_queue: List[Dict[str, Any]] = []
 
-    with PhaseTracker(
-        total=len(files_to_process), phase_name="Preparing Embeddings"
-    ) as prep_tracker:
-        for key_info in files_to_process:
-            file_path = key_info.norm_path
-            rel_path = os.path.relpath(file_path, project_root)
-            prep_tracker.set_description(f"Reading {os.path.basename(rel_path)}")
+    # Parallelize the file reading, SES generation, and token counting.
+    import concurrent.futures
 
+    def process_file_prep(key_info_obj: KeyInfo) -> Optional[Dict[str, Any]]:
+        try:
+            fp = key_info_obj.norm_path
+            rp = os.path.relpath(fp, project_root)
+            
             text_to_embed = _get_text_content_for_embedding(
-                file_path, symbol_map, project_root
+                fp, symbol_map, project_root
             )
 
             if not text_to_embed.strip():
-                prep_tracker.update()
-                continue
+                return None
 
             # Count tokens
-            ses_token_count = _count_tokens(text_to_embed, tokenizer)
+            ses_tc = _count_tokens(text_to_embed, tokenizer)
 
             # Count Full Context tokens (for raw file content)
-            full_token_count = 0
-
-            full_content = read_file_content_safely(file_path)
+            full_tc = 0
+            full_content = read_file_content_safely(fp)
             if full_content:
-                full_token_count = _count_tokens(full_content, tokenizer)
+                full_tc = _count_tokens(full_content, tokenizer)
 
-            final_token_counts[key_info.key_string] = {
-                "ses_tokens": ses_token_count,
-                "full_tokens": full_token_count,
+            return {
+                "key_info": key_info_obj,
+                "text": text_to_embed,
+                "tokens": ses_tc,
+                "rel_path": rp,
+                "ses_token_count": ses_tc,
+                "full_token_count": full_tc
             }
+        except Exception as ex:
+            logger.error(f"Error preparing embedding for {key_info_obj.norm_path}: {ex}")
+            return None
 
-            processing_queue.append(
-                {
-                    "key_info": key_info,
-                    "text": text_to_embed,
-                    "tokens": ses_token_count,
-                    "rel_path": rel_path,
-                }
-            )
-            prep_tracker.update()
+    with PhaseTracker(
+        total=len(files_to_process), phase_name="Preparing Embeddings"
+    ) as prep_tracker:
+        num_workers = min(16, os.cpu_count() or 4)
+        logger.info(f"Preparing embeddings concurrently using {num_workers} threads...")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all tasks
+            future_to_file = {
+                executor.submit(process_file_prep, ki): ki for ki in files_to_process
+            }
+            
+            # Gather results as they complete
+            for future in concurrent.futures.as_completed(future_to_file):
+                ki = future_to_file[future]
+                rp_path = os.path.relpath(ki.norm_path, project_root)
+                prep_tracker.set_description(f"Loaded {os.path.basename(rp_path)}")
+                
+                result = future.result()
+                if result:
+                    # Update token counts dictionary
+                    final_token_counts[result["key_info"].key_string] = {
+                        "ses_tokens": result["ses_token_count"],
+                        "full_tokens": result["full_token_count"],
+                    }
+                    processing_queue.append({
+                        "key_info": result["key_info"],
+                        "text": result["text"],
+                        "tokens": result["tokens"],
+                        "rel_path": result["rel_path"],
+                    })
+                prep_tracker.update()
 
     # Sort by token count (ascending) to grow context window monotonically
     # Sort by tokens to optimize model window

@@ -9,7 +9,7 @@ from typing import Callable, Dict, List, Tuple, Optional, Any
 
 from cline_utils.dependency_system.analysis.local_llm_processor import LocalLLMProcessor
 from cline_utils.dependency_system.core.key_manager import KeyInfo
-from cline_utils.dependency_system.io.tracker_io import update_tracker
+from cline_utils.dependency_system.io.tracker_io import update_tracker, PathMigrationInfo
 from cline_utils.dependency_system.utils.template_generator import (
     add_code_doc_dependency_to_checklist,
 )
@@ -45,6 +45,7 @@ def background_commit(
     b_tracker_type: str,
     b_suggestions: Dict[str, List[Tuple[str, str]]],
     b_accumulated_updates: Optional[List[Any]] = None,
+    b_path_migration_info: Optional[PathMigrationInfo] = None,
 ) -> None:
     try:
         update_data = update_tracker(
@@ -55,6 +56,7 @@ def background_commit(
             return_update=True,
             force_apply_suggestions=True,
             apply_ast_overrides=False,
+            path_migration_info=b_path_migration_info,
         )
         if update_data:
             t_update = None
@@ -153,6 +155,7 @@ class PlaceholderResolver:
         tracker_type: str,
         prepare_func: Callable[[str, str, str, str], PreparedPair],
         accumulated_updates: Optional[List[Any]] = None,
+        path_migration_info: Optional[PathMigrationInfo] = None,
     ) -> int:
         """
         Processes a list of dependency verification tasks through the local LLM.
@@ -227,6 +230,7 @@ class PlaceholderResolver:
                     tracker_type,
                     suggestions_copy,
                     accumulated_updates,
+                    path_migration_info,
                 )
                 commit_futures.append(future)
                 batch_suggestions.clear()
@@ -291,6 +295,7 @@ class PlaceholderResolver:
                 tracker_type,
                 suggestions_copy,
                 accumulated_updates,
+                path_migration_info,
             )
             commit_futures.append(future)
 

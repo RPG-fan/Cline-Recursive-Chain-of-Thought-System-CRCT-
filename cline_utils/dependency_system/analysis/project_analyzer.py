@@ -1057,6 +1057,7 @@ def analyze_project(
                         force_apply_suggestions=False,
                         use_old_map_for_migration=has_old_map,
                         tracker_cache=tracker_cache,
+                        path_migration_info=path_migration_info,
                     )
 
                     if prepared_data:
@@ -1121,6 +1122,7 @@ def analyze_project(
                 force_apply_suggestions=False,
                 use_old_map_for_migration=has_old_map,
                 tracker_cache=tracker_cache,
+                path_migration_info=path_migration_info,
             )
 
             if prepared_data:
@@ -1166,6 +1168,7 @@ def analyze_project(
             force_apply_suggestions=False,
             use_old_map_for_migration=has_old_map,
             tracker_cache=tracker_cache,
+            path_migration_info=path_migration_info,
         )
 
         if prepared_data:

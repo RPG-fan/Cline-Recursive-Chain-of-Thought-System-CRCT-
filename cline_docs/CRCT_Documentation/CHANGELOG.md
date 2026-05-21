@@ -5,6 +5,19 @@ All notable changes to the Cline Recursive Chain-of-Thought System (CRCT) will b
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.0] - 2026-05-21
+
+### Added
+- **Platform-Agnostic Cross-Process Locking**: Implemented a robust file-based lock (`CrossProcessLock`) leveraging standard Windows `msvcrt` and POSIX `fcntl` APIs, handling 0-byte locking safely.
+- **Coordinated VRAM Allocation Registry**: Created a dynamic, shared registry (`vram_registry.json`) under the cross-process lock to prevent resource contention and OOMs across concurrent worker processes, including automatic process liveness checks and zombie allocation pruning.
+- **Comprehensive Unit Testing**: Added robust test suites (`test_calculate_hash.py`, `test_cross_process_lock.py`, and `test_vram_process_coordination.py`) covering all new hashing and locking mechanics.
+
+### Changed
+- **Stable Content Hashing Normalization**: Overhauled the hash generation logic in `calculate_hash.py` to strip and normalize carriage returns, varying indent styles, comment prefixes, and empty lines, ensuring stable hashes across development environments.
+- **Transactional Bulk Operations**: Optimized `TransparencyManager` and `dependency_processor` by introducing batch marker transactions (`bulk_restore_markers`, `bulk_remove_markers`), running all alignments and checks in memory and writing to disk exactly once at the end of the transaction.
+- **Parallel Embedding Preparation**: Accelerated `embedding_manager.py` by multithreading file reads, Symbol Essence generation, and tokenization (up to 16 threads), and integrated transparency batching to bypass lock overhead.
+- **Calculated Path Migration Pass-Through**: Passed down pre-computed `path_migration_info` straight through `PlaceholderResolver` and project analyzer to save redundant computational passes.
+
 ## [8.5.0] - 2026-05-17
 
 ### Added
