@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Any, Dict, Optional
 from cline_utils.dependency_system.utils.cache_manager import cached
 
@@ -56,23 +57,24 @@ def strip_auto_generated_blocks(
 
     # 1. Strip Station Header (bounded by markers)
     if prefix == "<!--":
-        start_marker = "<!-- STATION_HEADER_START"
-        end_marker = "STATION_HEADER_END -->"
+        start_pattern = re.compile(r'<!--\s*(?:---\s*)?STATION_HEADER_START.*')
+        end_pattern = re.compile(r'.*?STATION_HEADER_END\s*(?:---\s*)?(?:\[AUTO\]\s*)?-->')
     else:
-        start_marker = f"{prefix} STATION_HEADER_START"
-        end_marker = f"{prefix} STATION_HEADER_END"
+        escaped_prefix = re.escape(prefix)
+        start_pattern = re.compile(rf'{escaped_prefix}\s*(?:---\s*)?STATION_HEADER_START.*')
+        end_pattern = re.compile(rf'{escaped_prefix}\s*(?:---\s*)?STATION_HEADER_END.*')
 
     lines = content.splitlines(keepends=True)
     new_lines = []
     in_station_block = False
 
     for line in lines:
-        if start_marker in line:
+        if start_pattern.search(line):
             in_station_block = True
             if preserve_lines:
                 new_lines.append("\n")  # Preserve line number
             continue
-        if end_marker in line:
+        if end_pattern.search(line):
             in_station_block = False
             if preserve_lines:
                 new_lines.append("\n")  # Preserve line number

@@ -517,3 +517,34 @@ def test_bulk_prune_stale_virtual_maps(tmp_path: Path):
     assert "connection_maps" not in meta_b
     assert meta_c is not None
     assert "connection_maps" not in meta_c
+
+
+def test_transparency_find_source_line_js_arrow_and_dynamic_methods():
+    content = (
+        "// --- CONNECTION_MAP: 1B(target_func:7) {d} --- arrow_func [AUTO]\n"
+        "const arrow_func = () => {\n"
+        "    pass\n"
+        "}\n"
+        "// --- CONNECTION_MAP: 1B(target_func:7) {d} --- class_method [AUTO]\n"
+        "    async class_method(arg) {\n"
+        "        pass\n"
+        "    }\n"
+        "// --- CONNECTION_MAP: 1B(target_func:7) {d} --- object_method [AUTO]\n"
+        "    object_method: async (x) => {\n"
+        "        pass\n"
+        "    }\n"
+    )
+
+    records = extract_connection_map_metadata(content)
+
+    assert len(records) == 3
+
+    assert records[0]["source_symbol"] == "arrow_func"
+    assert records[0]["source_line"] == 2
+
+    assert records[1]["source_symbol"] == "class_method"
+    assert records[1]["source_line"] == 6
+
+    assert records[2]["source_symbol"] == "object_method"
+    assert records[2]["source_line"] == 10
+

@@ -4,6 +4,7 @@ import gc
 import logging
 import os
 import re
+import threading
 from typing import Any, List, Optional, Tuple
 
 import torch
@@ -26,6 +27,8 @@ class LocalLLMProcessor:
     # Empirical constant for VRAM estimation: ~125MB of VRAM consumed per offloaded GPU layer
     # for the Qwen3-4B-Instruct-2507-Q8_0.gguf model. Scales linearly with layer count.
     MB_PER_LAYER = 125
+
+    _lock = threading.Lock()
 
     def __init__(self, model_path: str, n_ctx: int = 2048):
         super().__init__()
@@ -77,108 +80,109 @@ class LocalLLMProcessor:
         # Clamp to maximum allowed context
         n_ctx = min(n_ctx, self.max_n_ctx)
 
-        if self._model is not None:
-            current = self.current_n_ctx
-            # Calculate if we should reload (either direction)
-            if current >= n_ctx:
-                # Current context is sufficient - check if we should shrink
-                # Only shrink if the difference is significant (exceeds threshold)
-                excess_ratio = (current - n_ctx) / current if current > 0 else 0
-                if excess_ratio <= shrink_threshold:
-                    # Not enough savings to justify reload, keep current
-                    return self._model
-                # Significant savings - reload with smaller context
-                logger.info(
-                    f"Reloading model to reduce n_ctx from {current} to {n_ctx} "
-                    f"(saving {excess_ratio*100:.1f}% context)"
-                )
-            else:
-                # Need more context - must reload
-                logger.info(
-                    f"Reloading model to increase n_ctx from {current} to {n_ctx}"
-                )
+        with self._lock:
+            if self._model is not None:
+                current = self.current_n_ctx
+                # Calculate if we should reload (either direction)
+                if current >= n_ctx:
+                    # Current context is sufficient - check if we should shrink
+                    # Only shrink if the difference is significant (exceeds threshold)
+                    excess_ratio = (current - n_ctx) / current if current > 0 else 0
+                    if excess_ratio <= shrink_threshold:
+                        # Not enough savings to justify reload, keep current
+                        return self._model
+                    # Significant savings - reload with smaller context
+                    logger.info(
+                        f"Reloading model to reduce n_ctx from {current} to {n_ctx} "
+                        f"(saving {excess_ratio*100:.1f}% context)"
+                    )
+                else:
+                    # Need more context - must reload
+                    logger.info(
+                        f"Reloading model to increase n_ctx from {current} to {n_ctx}"
+                    )
 
-            self.close(pause_for_vram=True)
+                self._close_internal(pause_for_vram=True)
 
-        if Llama is None:
-            raise ImportError("llama-cpp-python is not installed.")
+            if Llama is None:
+                raise ImportError("llama-cpp-python is not installed.")
 
-        # --- Dynamic GPU/CPU Splitting ---
-        if n_gpu_layers is None:
-            n_gpu_layers = -1
-            try:
-                validator = ResourceValidator()
-                gpu_stats = validator.validate_gpu()
-                if gpu_stats.get("gpu_available"):
-                    vram_available_mb = gpu_stats.get("vram_available_mb", 0.0)
-                    if vram_available_mb > 0:
-                        MB_PER_LAYER = self.MB_PER_LAYER
-
-                        # Empirical estimation parameters
-                        # 16-bit KV cache estimate: tokens * 2 (K) * 2 (V) * 32 (hidden_dim/layers approx)
-                        # For 4B/7B models, it's roughly 120MB per 1k tokens.
-                        context_memory_mb = (n_ctx / 1024) * 120
-                        # Add a safety buffer (10% of total VRAM or min 500MB)
-                        safety_buffer_mb = max(500, vram_available_mb * 0.10)
-
-                        available_for_layers = (
-                            vram_available_mb - context_memory_mb - safety_buffer_mb
-                        )
-
-                        if available_for_layers > 0:
-                            n_gpu_layers = int(available_for_layers // MB_PER_LAYER)
-                            # Cap at 36 layers (typical for 4B/7B models)
-                            n_gpu_layers = min(n_gpu_layers, 36)
-
-                            # Safety check: if ratio is too low, don't offload to avoid thrashing
-                            vram_ratio = available_for_layers / vram_available_mb
-                            if vram_ratio < 0.05:
-                                n_gpu_layers = 0
-
-                            logger.info(
-                                f"Dynamic VRAM check: {vram_available_mb:.1f}MB free. "
-                                f"Est. Context: {context_memory_mb:.1f}MB, Reserve: {safety_buffer_mb:.1f}MB. "
-                                f"Ratio: {vram_ratio:.2f}. "
-                                f"Assigning {n_gpu_layers} layers to GPU."
-                            )
-                        else:
-                            n_gpu_layers = 0
-                            logger.info(
-                                "Insufficient VRAM for GPU offloading. Using CPU."
-                            )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to dynamically calculate VRAM layer split: {e}. Defaulting to full GPU offload."
-                )
+            # --- Dynamic GPU/CPU Splitting ---
+            if n_gpu_layers is None:
                 n_gpu_layers = -1
+                try:
+                    validator = ResourceValidator()
+                    gpu_stats = validator.validate_gpu()
+                    if gpu_stats.get("gpu_available"):
+                        vram_available_mb = gpu_stats.get("vram_available_mb", 0.0)
+                        if vram_available_mb > 0:
+                            MB_PER_LAYER = self.MB_PER_LAYER
 
-        # Record VRAM baseline before loading to allow for exact verification during close()
-        if torch.cuda.is_available():
-            try:
-                torch.cuda.synchronize()
-                free_bytes, _ = torch.cuda.mem_get_info(0)
-                self._vram_baseline_mb = free_bytes / (1024 * 1024)
-                logger.debug(
-                    f"VRAM baseline recorded: {self._vram_baseline_mb:.1f} MB free before load."
-                )
-            except Exception as e:
-                logger.debug(f"Failed to record VRAM baseline: {e}")
+                            # Empirical estimation parameters
+                            # 16-bit KV cache estimate: tokens * 2 (K) * 2 (V) * 32 (hidden_dim/layers approx)
+                            # For 4B/7B models, it's roughly 120MB per 1k tokens.
+                            context_memory_mb = (n_ctx / 1024) * 120
+                            # Add a safety buffer (10% of total VRAM or min 500MB)
+                            safety_buffer_mb = max(500, vram_available_mb * 0.10)
 
-        logger.info(
-            f"Loading local LLM from {self.model_path} with n_ctx={n_ctx} and n_gpu_layers={n_gpu_layers}..."
-        )
-        self._model = Llama(
-            model_path=self.model_path,
-            n_ctx=n_ctx,
-            n_gpu_layers=n_gpu_layers,
-            verbose=False,
-            type_k=8,
-            type_v=8,
-            flash_attn=True,
-        )
-        self.current_n_ctx = n_ctx
-        self._current_n_gpu_layers = n_gpu_layers
-        return self._model
+                            available_for_layers = (
+                                vram_available_mb - context_memory_mb - safety_buffer_mb
+                            )
+
+                            if available_for_layers > 0:
+                                n_gpu_layers = int(available_for_layers // MB_PER_LAYER)
+                                # Cap at 36 layers (typical for 4B/7B models)
+                                n_gpu_layers = min(n_gpu_layers, 36)
+
+                                # Safety check: if ratio is too low, don't offload to avoid thrashing
+                                vram_ratio = available_for_layers / vram_available_mb
+                                if vram_ratio < 0.05:
+                                    n_gpu_layers = 0
+
+                                logger.info(
+                                    f"Dynamic VRAM check: {vram_available_mb:.1f}MB free. "
+                                    f"Est. Context: {context_memory_mb:.1f}MB, Reserve: {safety_buffer_mb:.1f}MB. "
+                                    f"Ratio: {vram_ratio:.2f}. "
+                                    f"Assigning {n_gpu_layers} layers to GPU."
+                                )
+                            else:
+                                n_gpu_layers = 0
+                                logger.info(
+                                    "Insufficient VRAM for GPU offloading. Using CPU."
+                                )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to dynamically calculate VRAM layer split: {e}. Defaulting to full GPU offload."
+                    )
+                    n_gpu_layers = -1
+
+            # Record VRAM baseline before loading to allow for exact verification during close()
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.synchronize()
+                    free_bytes, _ = torch.cuda.mem_get_info(0)
+                    self._vram_baseline_mb = free_bytes / (1024 * 1024)
+                    logger.debug(
+                        f"VRAM baseline recorded: {self._vram_baseline_mb:.1f} MB free before load."
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to record VRAM baseline: {e}")
+
+            logger.info(
+                f"Loading local LLM from {self.model_path} with n_ctx={n_ctx} and n_gpu_layers={n_gpu_layers}..."
+            )
+            self._model = Llama(
+                model_path=self.model_path,
+                n_ctx=n_ctx,
+                n_gpu_layers=n_gpu_layers,
+                verbose=False,
+                type_k=8,
+                type_v=8,
+                flash_attn=True,
+            )
+            self.current_n_ctx = n_ctx
+            self._current_n_gpu_layers = n_gpu_layers
+            return self._model
 
     def get_token_count(self, text: str) -> int:
         """Get exact token count using the model's tokenizer."""
@@ -207,13 +211,17 @@ class LocalLLMProcessor:
         """
         prompt_tokens = self.get_token_count(prompt)
         required_ctx = prompt_tokens + max_tokens
-
+        
         model = self._load_model(required_ctx)
         if model is None:
             raise RuntimeError("Model was not loaded correctly.")
-
+            
         output = model(
-            prompt, max_tokens=max_tokens, stop=stop, temperature=temperature, echo=echo
+            prompt,
+            max_tokens=max_tokens,
+            stop=stop,
+            temperature=temperature,
+            echo=echo
         )
         return str(output["choices"][0]["text"].strip())
 
@@ -620,6 +628,10 @@ Return ONLY the reformatted output.
             pause_for_vram: If True, adds a brief synchronization delay to ensure
                            VRAM state is stabilized for subsequent re-validation.
         """
+        with self._lock:
+            self._close_internal(pause_for_vram)
+
+    def _close_internal(self, pause_for_vram: bool = False):
         if self._model is not None:
             # Force cleanup of internal llama-cpp-python resources if possible
             if hasattr(self._model, "__del__"):
@@ -652,9 +664,7 @@ Return ONLY the reformatted output.
                     logger.debug(
                         f"Waiting for VRAM to return to baseline: {self._vram_baseline_mb:.1f} MB"
                     )
-                    validator.wait_for_vram_release(
-                        target_free_mb=self._vram_baseline_mb
-                    )
+                    validator.wait_for_vram_release(target_free_mb=self._vram_baseline_mb)
                 else:
                     # Fallback: layer-count estimate (existing behavior)
                     expected_freed_mb = self._current_n_gpu_layers * self.MB_PER_LAYER

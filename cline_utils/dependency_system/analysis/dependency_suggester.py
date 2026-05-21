@@ -135,8 +135,8 @@ def _find_and_parse_tsconfig(
     Returns:
         Tuple of (config_file_path, parsed_data_dict) or None if not found/parsed.
     """
-    current_dir = normalize_path(start_dir)
-    project_root_norm = normalize_path(project_root_val)
+    current_dir = normalize_path(os.path.realpath(os.path.normpath(start_dir)))
+    project_root_norm = normalize_path(os.path.realpath(os.path.normpath(project_root_val)))
     config_filenames = ["tsconfig.json", "jsconfig.json"]
     while True:
         for filename in config_filenames:
@@ -160,7 +160,7 @@ def _find_and_parse_tsconfig(
             project_root_norm
         ):
             break
-        parent_dir = os.path.dirname(current_dir)
+        parent_dir = normalize_path(os.path.realpath(os.path.normpath(os.path.dirname(current_dir))))
         if parent_dir == current_dir:
             break
         current_dir = parent_dir

@@ -252,10 +252,15 @@ def prepare_normalization(
             original_content
         )
         if not crct_key or not tracker_ref:
+            filename = os.path.basename(filepath)
+            if not crct_key:
+                crct_key = f"[FILL: CRCT key for {filename}]"
+            if not tracker_ref:
+                tracker_ref = f"[FILL: path to tracker for {filename}]"
             print(
-                f"Skipping {rel_path}: Missing valid STATION_HEADER with CRCT_KEY and TRACKER_REF."
+                f"Bootstrapping {rel_path} with placeholder STATION_HEADER fields."
             )
-            return None
+
 
         # Extract existing context and overview to leverage in prompting
         existing_context = ""
@@ -607,9 +612,6 @@ def normalize_docs_batch(
                     .title()
                 )
 
-            _, _, crct_key, tracker_ref = parse_station_header(original_content)
-            if not crct_key or not tracker_ref:
-                continue
 
             existing_context = ""
             existing_overview = ""
