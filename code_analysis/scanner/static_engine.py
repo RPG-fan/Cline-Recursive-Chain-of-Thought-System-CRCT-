@@ -7,7 +7,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 # Tree-sitter configuration
 _has_tree_sitter = False
@@ -271,12 +271,15 @@ def scan_file(filepath: str) -> List[Dict[str, Any]]:
     return issues
 
 
-def get_unused_items() -> List[Dict[str, Any]]:
+def get_unused_items(project_root: Optional[str] = None) -> List[Dict[str, Any]]:
     """Parse pyright output for unused items."""
     unused: List[Dict[str, Any]] = []
-    if os.path.exists(PYRIGHT_OUTPUT):
+    target_path = (
+        os.path.join(project_root, PYRIGHT_OUTPUT) if project_root else PYRIGHT_OUTPUT
+    )
+    if os.path.exists(target_path):
         try:
-            with open(PYRIGHT_OUTPUT, "r", encoding="utf-8") as f:
+            with open(target_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if "generalDiagnostics" in data:
                     for diag in data["generalDiagnostics"]:

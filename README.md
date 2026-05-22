@@ -67,13 +67,13 @@ Welcome to the **Cline Recursive Chain-of-Thought System (CRCT)**, a framework d
 - **VRAM**: 8GB+ (NVIDIA GPU) for optimal Qwen3-4B model performance
 - **RAM**: 16GB+ for large projects
 - **Disk**: 8GB+ for models and embeddings
-- **Python**: 3.8+
+- **Python**: 3.9+
 - **Node.js**: 16+ (for mermaid-cli visualization)
 
 ### Minimum
 - **RAM**: 4GB (CPU-only mode with reduced batch sizes)
 - **Disk**: 500MB+ (lightweight models)
-- **Python**: 3.8+
+- **Python**: 3.9+
 
 *The system automatically adapts to available hardware.*
 

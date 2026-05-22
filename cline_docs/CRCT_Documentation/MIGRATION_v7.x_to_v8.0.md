@@ -48,7 +48,7 @@ Version 8.0 represents a significant architectural evolution of the CRCT system.
 Before upgrading, ensure:
 
 - [ ] **Backup current work** - Commit all changes to version control
-- [ ] **Check Python version** - Requires Python 3.8+
+- [ ] **Check Python version** - Requires Python 3.9+
 - [ ] **Verify disk space** - Need ~2GB for models and embeddings
 - [ ] **Check internet connection** - Required for model downloads
 - [ ] **Fix syntax errors** - Run linter on Python files

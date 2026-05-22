@@ -167,7 +167,7 @@ def main():
             seen[key] = it
     all_issues = list(seen.values())
 
-    unused_items = get_unused_items()
+    unused_items = get_unused_items(project_root)
 
     # ---- comment index ----
     print("Building comment index...")

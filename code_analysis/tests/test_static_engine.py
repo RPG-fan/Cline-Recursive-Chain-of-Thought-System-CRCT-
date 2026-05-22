@@ -1,7 +1,8 @@
 from unittest.mock import patch, mock_open
+import os
 
 from code_analysis.scanner.static_engine import scan_file
-from code_analysis.scanner.static_engine import get_unused_items
+from code_analysis.scanner.static_engine import get_unused_items, PYRIGHT_OUTPUT
 
 def test_get_unused_items_open_exception(capsys):
     """Test get_unused_items when open raises an exception."""
@@ -22,6 +23,17 @@ def test_get_unused_items_invalid_json(capsys):
             assert "Error parsing pyright output:" in captured.out
             assert "Expecting value" in captured.out
 
+def test_get_unused_items_with_project_root():
+    """Test get_unused_items with project_root argument."""
+    project_root = "/fake/root"
+    expected_path = os.path.join(project_root, PYRIGHT_OUTPUT)
+    
+    with patch("code_analysis.scanner.static_engine.os.path.exists") as mock_exists:
+        with patch("code_analysis.scanner.static_engine.open", mock_open(read_data='{"generalDiagnostics": []}')) as mock_file:
+            get_unused_items(project_root=project_root)
+            
+            mock_exists.assert_called_with(expected_path)
+            mock_file.assert_called_with(expected_path, "r", encoding="utf-8")
 
 def test_scan_file_no_tree_sitter_one_line_stub():
     """Test scan_file without tree-sitter when encountering a one-line stub."""

@@ -64,6 +64,10 @@ def test_main_happy_path(
     mock_walk.assert_called_once()
     mock_scan_file.assert_called_once()
     mock_runtime_only_findings.assert_called_once()
+    
+    # Verify get_unused_items was called with project_root
+    from code_analysis.report_generator import project_root
+    mock_get_unused_items.assert_called_once_with(project_root)
 
     # export_json and format_markdown should be called with 2 issues (1 from scan, 1 from runtime)
     # and the unused items

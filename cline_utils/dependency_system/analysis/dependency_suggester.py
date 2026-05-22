@@ -14,7 +14,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
-from cline_utils.dependency_system.core import key_manager
+from cline_utils.dependency_system.core import key_manager, resolve_state_path
 
 # Import only from lower-level modules
 from cline_utils.dependency_system.core.key_manager import KeyInfo
@@ -35,6 +35,18 @@ KEY_MANAGER_DIR = os.path.dirname(os.path.abspath(key_manager.__file__))
 
 
 logger = logging.getLogger(__name__)
+
+def strip_json_comments(json_str: str) -> str:
+    """
+    Strip standard multi-line and single-line comments from a JSON string.
+    """
+    # Strip multi-line comments /* ... */
+    pattern = r"/\*.*?\*/"
+    json_str = re.sub(pattern, "", json_str, flags=re.DOTALL)
+    # Strip single-line comments // ...
+    json_str = re.sub(r"//.*", "", json_str)
+    return json_str
+
 
 # Caches for structural dependency analysis moved to cache_manager
 
@@ -68,25 +80,16 @@ _js_import_resolution_ledger: Dict[Tuple[str, str, str, str], Optional[str]] = {
 
 def _get_symbol_map_path() -> str:
     """Robustly determines the path to project_symbol_map.json."""
+    from cline_utils.dependency_system.core import resolve_state_path
     try:
         # Use import to find the directory of key_manager.py
         import cline_utils.dependency_system.core.key_manager as km
-
-        return normalize_path(
-            os.path.join(
-                os.path.dirname(os.path.abspath(km.__file__)),
-                _PROJECT_SYMBOL_MAP_FILENAME_LOCAL,
-            )
-        )
+        _core_dir = os.path.dirname(os.path.abspath(km.__file__))
+        return normalize_path(resolve_state_path(_PROJECT_SYMBOL_MAP_FILENAME_LOCAL, _core_dir))
     except Exception:
         # Fallback relative to this file
-        return normalize_path(
-            os.path.join(
-                os.path.dirname(os.path.dirname(__file__)),
-                "core",
-                _PROJECT_SYMBOL_MAP_FILENAME_LOCAL,
-            )
-        )
+        _core_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "core")
+        return normalize_path(resolve_state_path(_PROJECT_SYMBOL_MAP_FILENAME_LOCAL, _core_dir))
 
 
 # _OLD_PROJECT_SYMBOL_MAP_FILENAME_LOCAL = "project_symbol_map_old.json" # Not used by load, only by save
@@ -160,9 +163,11 @@ def _find_and_parse_tsconfig(
                 logger.debug(f"Found config file for JS/TS: {config_path}")
                 try:
                     with open(config_path, "r", encoding="utf-8") as f:
-                        data: Dict[str, Any] = json.load(f)
+                        content = f.read()
+                    clean_content = strip_json_comments(content)
+                    data: Dict[str, Any] = json.loads(clean_content)
                     logger.debug(
-                        f"Successfully parsed {config_path} using standard json parser."
+                        f"Successfully parsed {config_path} using standard json parser (comments stripped)."
                     )
                     return config_path, data
                 except Exception as e:
@@ -1924,13 +1929,7 @@ def _get_ast_links_path_suggester(
     project_root: str, *args: Any, **kwargs: Any
 ) -> List[str]:
     return [
-        os.path.join(
-            project_root,
-            "cline_utils",
-            "dependency_system",
-            "core",
-            "ast_verified_links.json",
-        )
+        resolve_state_path("ast_verified_links.json", KEY_MANAGER_DIR)
     ]
 
 
@@ -1946,13 +1945,7 @@ def _load_ast_verified_links(project_root: str) -> List[Dict[str, str]]:
     Load AST-verified links from project_analyzer for structural evidence
     """
     try:
-        ast_links_path = os.path.join(
-            project_root,
-            "cline_utils",
-            "dependency_system",
-            "core",
-            "ast_verified_links.json",
-        )
+        ast_links_path = resolve_state_path("ast_verified_links.json", KEY_MANAGER_DIR)
         if os.path.exists(ast_links_path):
             with open(ast_links_path, "r", encoding="utf-8") as f:
                 return json.load(f)

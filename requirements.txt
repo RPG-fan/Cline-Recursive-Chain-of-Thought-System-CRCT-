@@ -16,6 +16,7 @@ llama-cpp-python
 pytest
 huggingface_hub
 bitsandbytes
+pyright
 # For CUDA GPU support
 # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 # pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu130

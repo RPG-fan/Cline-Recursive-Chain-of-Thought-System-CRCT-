@@ -50,6 +50,7 @@ from cline_utils.dependency_system.io.tracker_io import (
     get_tracker_path,
     is_path_in_doc_roots,
 )
+from cline_utils.dependency_system.io.transparency_manager import read_file_transparently
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.path_utils import normalize_path
 
@@ -837,7 +838,10 @@ def process_file(
     station_start, station_end = get_station_markers(prefix)
 
     try:
-        source = file_path.read_text(encoding="utf-8")
+        source, _ = read_file_transparently(str(file_path), include_connection_maps=True)
+        if source is None:
+            # Fallback to direct read if transparency layer fails to return content
+            source = file_path.read_text(encoding="utf-8")
         rel_path = os.path.relpath(file_path, project_root).replace("\\", "/")
     except Exception as exc:
         result["error"] = f"Read error: {exc}"
