@@ -698,9 +698,10 @@ def _unload_model():
 # --- SES (Symbol Essence String) Logic ---
 def _load_project_symbol_map() -> Dict[str, Dict[str, Any]]:
     """Loads the project_symbol_map.json."""
+    from cline_utils.dependency_system.core import resolve_state_path
     try:
         core_dir = os.path.dirname(os.path.abspath(key_manager_module.__file__))
-        map_path = normalize_path(os.path.join(core_dir, PROJECT_SYMBOL_MAP_FILENAME))
+        map_path = normalize_path(resolve_state_path(PROJECT_SYMBOL_MAP_FILENAME, core_dir))
         if os.path.exists(map_path):
             with open(map_path, "r", encoding="utf-8") as f:
                 return json.load(f)

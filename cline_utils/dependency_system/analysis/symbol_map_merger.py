@@ -118,12 +118,13 @@ def merge_runtime_and_ast(
 
 
 def load_runtime_symbols(project_root: str) -> Dict[str, Dict[str, Any]]:
-    """Load runtime_symbols.json from core directory."""
-    project_root = get_project_root()
-
-    runtime_path = os.path.join(
-        project_root, "cline_utils", "dependency_system", "core", "runtime_symbols.json"
+    """Load runtime_symbols.json from core/state directory."""
+    from cline_utils.dependency_system.core import resolve_state_path
+    
+    core_dir = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "core"
     )
+    runtime_path = resolve_state_path("runtime_symbols.json", core_dir)
 
     if not os.path.exists(runtime_path):
         logger.warning(f"Runtime symbols file not found: {runtime_path}")

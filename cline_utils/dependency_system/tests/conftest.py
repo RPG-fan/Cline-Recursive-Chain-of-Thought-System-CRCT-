@@ -13,6 +13,9 @@ def sandbox_dependency_system(tmp_path: Path) -> Generator[None, None, None]:
     # Create isolated directories inside the pytest tmp_path
     sandbox_core_dir = tmp_path / "sandbox_core"
     sandbox_core_dir.mkdir(parents=True, exist_ok=True)
+    
+    state_dir = sandbox_core_dir / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
 
     sandbox_cache_dir = tmp_path / "sandbox_cache"
     sandbox_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -50,8 +53,9 @@ def sandbox_dependency_system(tmp_path: Path) -> Generator[None, None, None]:
         cm.cache_manager.caches.clear()
 
     # 4. Sandbox transparency_manager registry path
+    # Use resolve_state_path internally via mocking tm.REGISTRY_PATH
     sandbox_registry_path = os.path.join(
-        str(sandbox_core_dir), "transparency_registry.json"
+        str(state_dir), "transparency_registry.json"
     )
     tm.REGISTRY_PATH = sandbox_registry_path
     # Override TransparencyManager.__init__ default registry_path value

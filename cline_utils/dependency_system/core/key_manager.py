@@ -20,6 +20,7 @@ from cline_utils.dependency_system.utils.path_utils import (
     get_project_root,
     normalize_path,
 )
+from cline_utils.dependency_system.core import resolve_state_path
 
 logger = logging.getLogger(__name__)
 
@@ -636,13 +637,10 @@ def generate_keys(
     try:
         # Get the directory where this script (key_manager.py) resides
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        current_map_path = normalize_path(
-            os.path.join(script_dir, GLOBAL_KEY_MAP_FILENAME)
-        )
-        old_map_path = normalize_path(
-            os.path.join(script_dir, OLD_GLOBAL_KEY_MAP_FILENAME)
-        )
-        os.makedirs(script_dir, exist_ok=True)  # Ensure directory exists
+        
+        current_map_path = normalize_path(resolve_state_path(GLOBAL_KEY_MAP_FILENAME, script_dir))
+        old_map_path = normalize_path(resolve_state_path(OLD_GLOBAL_KEY_MAP_FILENAME, script_dir))
+        os.makedirs(os.path.dirname(current_map_path), exist_ok=True)  # Ensure directory exists
 
         # Step 1: Load the PREVIOUS map BEFORE renaming so we read the right file.
         # (os.replace overwrites old_map_path, so reading after the rename would
@@ -711,7 +709,7 @@ def load_global_key_map() -> Optional[Dict[str, KeyInfo]]:
     map_path: str = ""
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        map_path = normalize_path(os.path.join(script_dir, GLOBAL_KEY_MAP_FILENAME))
+        map_path = normalize_path(resolve_state_path(GLOBAL_KEY_MAP_FILENAME, script_dir))
 
         if not os.path.exists(map_path):
             logger.error(
@@ -764,7 +762,7 @@ def load_old_global_key_map() -> Optional[Dict[str, KeyInfo]]:
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         map_path = normalize_path(
-            os.path.join(script_dir, OLD_GLOBAL_KEY_MAP_FILENAME)
+            resolve_state_path(OLD_GLOBAL_KEY_MAP_FILENAME, script_dir)
         )  # Target old map
         if not os.path.exists(map_path):
             logger.warning(
@@ -801,7 +799,9 @@ def load_tracker_map() -> List[str]:
     """
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        path = normalize_path(os.path.join(script_dir, TRACKER_MAP_FILENAME))
+        from cline_utils.dependency_system.core import resolve_state_path
+        
+        path = normalize_path(resolve_state_path(TRACKER_MAP_FILENAME, script_dir))
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -827,9 +827,11 @@ def save_tracker_map(tracker_paths: List[str]):
     """
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        path = normalize_path(os.path.join(script_dir, TRACKER_MAP_FILENAME))
-        # Ensure directory exists (though it should as key_manager is there)
-        os.makedirs(script_dir, exist_ok=True)
+        from cline_utils.dependency_system.core import resolve_state_path
+        
+        path = normalize_path(resolve_state_path(TRACKER_MAP_FILENAME, script_dir))
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(sorted(list(set(tracker_paths))), f, indent=2)
         logger.info(f"Successfully saved tracker map to: {path}")

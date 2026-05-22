@@ -79,11 +79,14 @@ MANUAL_FOREIGN_PINS_META_KEY = "manual_foreign_pins_json"
 
 def _get_core_dir_for_ast_links() -> Optional[str]:
     try:
+        from cline_utils.dependency_system.core import resolve_state_path
         _key_manager_module_for_path = __import__(
             "cline_utils.dependency_system.core.key_manager", fromlist=[""]
         )
-        return os.path.dirname(os.path.abspath(_key_manager_module_for_path.__file__))
-    except ImportError:
+        _core_dir = os.path.dirname(os.path.abspath(_key_manager_module_for_path.__file__))
+        _ast_path = resolve_state_path(AST_VERIFIED_LINKS_FILENAME, _core_dir)
+        return os.path.dirname(_ast_path)
+    except (ImportError, AttributeError):
         logger.error(
             "TrackerIO: Could not determine core directory for AST links file. Path may be incorrect."
         )

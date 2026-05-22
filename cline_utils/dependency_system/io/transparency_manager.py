@@ -35,9 +35,9 @@ _CONNECTION_MAP_ENTRY_RE = re.compile(
 )
 
 # Registry location
-REGISTRY_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), "core", "transparency_registry.json"
-)
+from cline_utils.dependency_system.core import resolve_state_path
+_core_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "core")
+REGISTRY_PATH = resolve_state_path("transparency_registry.json", _core_dir)
 
 
 def _coerce_line(value: Any) -> Optional[int]:

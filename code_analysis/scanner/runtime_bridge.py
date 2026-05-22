@@ -16,40 +16,11 @@ from code_analysis.scanner import heuristics
 # Constants
 # ---------------------------------------------------------------------------
 RUNTIME_SYMBOLS_PATH = os.path.join(
-    "cline_utils", "dependency_system", "core", "runtime_symbols.json"
+    "cline_utils", "dependency_system", "core", "state", "runtime_symbols.json"
 )
 PROJECT_SYMBOL_MAP_PATH = os.path.join(
-    "cline_utils", "dependency_system", "core", "project_symbol_map.json"
+    "cline_utils", "dependency_system", "core", "state", "project_symbol_map.json"
 )
-
-
-# ===========================================================================
-# Internal helpers
-# ===========================================================================
-
-
-def _record_ref(
-    ref_name: str,
-    file_path: str,
-    active_classes: Set[str],
-    all_methods: Dict[str, Set[str]],
-    refs: Dict[str, Set[str]],
-) -> None:
-    """Register *ref_name* as referenced from *file_path*.
-
-    If *ref_name* is a bare method name that belongs to one or more classes,
-    and those classes are active in the calling file (defined or imported),
-    the fully-qualified ``ClassName.method_name`` form is also registered so
-    that caller lookups on the FQN return the correct result.
-
-    All dependencies are received as explicit parameters so this function is
-    safe to call from any context without closure-capture side-effects.
-    """
-    refs[ref_name].add(file_path)
-    if ref_name in all_methods:
-        for cls_name in all_methods[ref_name]:
-            if cls_name in active_classes:
-                refs[f"{cls_name}.{ref_name}"].add(file_path)
 
 
 # ===========================================================================
@@ -116,8 +87,8 @@ class RuntimeIndex:
 
     def _build(self):
         self._all_methods = defaultdict(set)  # method_name -> set(Class_name)
-        self._file_defined_classes = defaultdict(set)  # file_path -> set(Class_name)
-
+        self._file_defined_classes = defaultdict(set) # file_path -> set(Class_name)
+        
         for raw_path, finfo in self.raw.items():
             fp = self.norm(raw_path)
             classes_val = finfo.get("classes") or []
@@ -153,7 +124,7 @@ class RuntimeIndex:
 
             # Determine active classes in this file
             active_classes = set(self._file_defined_classes[file_path])
-
+            
             # Add imported classes
             imports_list = finfo.get("imports") or []
             for imp in imports_list:
@@ -166,6 +137,14 @@ class RuntimeIndex:
                         if cls_name in imp:
                             active_classes.add(cls_name)
 
+            # Helper to record a reference (using fully qualified names where active)
+            def _record_ref(ref_name: str):
+                self._refs[ref_name].add(file_path)
+                if ref_name in self._all_methods:
+                    for cls_name in self._all_methods[ref_name]:
+                        if cls_name in active_classes:
+                            self._refs[f"{cls_name}.{ref_name}"].add(file_path)
+
             # Functions
             fns = cast(List[Any], finfo.get("functions") or [])
             for fn_any in fns:
@@ -175,12 +154,12 @@ class RuntimeIndex:
                     attrs = cast(List[Any], fn.get("attribute_accesses") or [])
                     for ref in attrs:
                         if isinstance(ref, str):
-                            _record_ref(ref, file_path, active_classes, self._all_methods, self._refs)
+                            _record_ref(ref)
                     scope = cast(Dict[str, Any], fn.get("scope_references") or {})
                     g_list = cast(List[Any], scope.get("globals") or [])
                     for g in g_list:
                         if isinstance(g, str):
-                            _record_ref(g, file_path, active_classes, self._all_methods, self._refs)
+                            _record_ref(g)
 
             # Classes (and their methods)
             classes_val = cast(List[Any], finfo.get("classes") or [])
@@ -205,14 +184,14 @@ class RuntimeIndex:
                             )
                             for ref in m_attrs:
                                 if isinstance(ref, str):
-                                    _record_ref(ref, file_path, active_classes, self._all_methods, self._refs)
+                                    _record_ref(ref)
                             it_scope = cast(
                                 Dict[str, Any], meth.get("scope_references") or {}
                             )
                             m_gs = cast(List[Any], it_scope.get("globals") or [])
                             for g in m_gs:
                                 if isinstance(g, str):
-                                    _record_ref(g, file_path, active_classes, self._all_methods, self._refs)
+                                    _record_ref(g)
 
             # Calls
             calls_list = cast(List[Any], finfo.get("calls") or [])
@@ -223,7 +202,7 @@ class RuntimeIndex:
                 elif isinstance(call, str):
                     n = call
                 if n:
-                    _record_ref(n, file_path, active_classes, self._all_methods, self._refs)
+                    _record_ref(n)
 
             # Imports
             imports_list = cast(List[Any], finfo.get("imports") or [])
@@ -237,7 +216,7 @@ class RuntimeIndex:
                 elif isinstance(imp, str):
                     inm = imp
                 if inm:
-                    _record_ref(inm, file_path, active_classes, self._all_methods, self._refs)
+                    _record_ref(inm)
 
     def symbol_at(self, file_path: str, line: int) -> Optional[Dict[str, Any]]:
         """Return the smallest symbol whose line range encloses *line*."""

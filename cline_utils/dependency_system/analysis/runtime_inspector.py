@@ -17,9 +17,7 @@ from types import CodeType, FunctionType, ModuleType
 from typing import Any, Optional, cast
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 JSONDict = dict[str, Any]
@@ -32,13 +30,8 @@ def get_type_annotations(obj: object) -> JSONDict:
     """Extract parameter and return type annotations."""
     try:
         return {
-            "parameters": {
-                k: str(v)
-                for k, v in typing.get_type_hints(
-                    cast(Any, obj), include_extras=True
-                ).items()
-            },
-            "return_type": str(inspect.signature(cast(Any, obj)).return_annotation),
+            'parameters': {k: str(v) for k, v in typing.get_type_hints(cast(Any, obj), include_extras=True).items()},
+            'return_type': str(inspect.signature(cast(Any, obj)).return_annotation)
         }
     except Exception:
         return {}
@@ -53,15 +46,11 @@ def get_source_context(obj: object, code_roots: list[str]) -> JSONDict:
         source_file = inspect.getsourcefile(cast(Any, obj))
         if not source_file:
             return {}
-
+        
         # Normalize and validate against code roots
-        from cline_utils.dependency_system.utils.path_utils import (
-            normalize_path,
-            is_subpath,
-        )
-
+        from cline_utils.dependency_system.utils.path_utils import normalize_path, is_subpath
         norm_source = normalize_path(source_file)
-
+        
         # Check if file is within any code root
         in_code_roots = False
         for code_root in code_roots:
@@ -69,18 +58,18 @@ def get_source_context(obj: object, code_roots: list[str]) -> JSONDict:
             if norm_source == norm_root or is_subpath(norm_source, norm_root):
                 in_code_roots = True
                 break
-
+        
         if not in_code_roots:
             logger.debug(f"Skipping source outside code roots: {norm_source}")
             return {}
-
+        
         source_lines, start_line = inspect.getsourcelines(cast(Any, obj))
         # Strip line endings to prevent escape artifacts in JSON (improves embedding quality)
-        clean_source_lines = [line.rstrip("\n").rstrip("\r") for line in source_lines]
+        clean_source_lines = [line.rstrip('\n').rstrip('\r') for line in source_lines]
         return {
-            "file": norm_source,
-            "line_range": (start_line, start_line + len(source_lines)),
-            "source_lines": clean_source_lines,
+            'file': norm_source,
+            'line_range': (start_line, start_line + len(source_lines)),
+            'source_lines': clean_source_lines
         }
     except Exception:
         return {}
@@ -89,7 +78,7 @@ def get_source_context(obj: object, code_roots: list[str]) -> JSONDict:
 def get_module_exports(module: ModuleType) -> dict[str, str]:
     """Identify all exported symbols and their origins."""
     exports: dict[str, str] = {}
-    exported_names = getattr(module, "__all__", None)
+    exported_names = getattr(module, '__all__', None)
     if isinstance(exported_names, (list, tuple, set)):
         normalized_export_names: list[str] = []
         for raw_name in cast(list[object], list(cast(Any, exported_names))):
@@ -110,11 +99,8 @@ def get_inheritance_info(cls: type[Any], code_roots: list[str]) -> JSONDict:
     Extract inheritance hierarchy and method resolution order.
     Only includes bases/mro that are within code roots.
     """
-    from cline_utils.dependency_system.utils.path_utils import (
-        normalize_path,
-        is_subpath,
-    )
-
+    from cline_utils.dependency_system.utils.path_utils import normalize_path, is_subpath
+    
     try:
         bases: StringList = []
         for base in cls.__bases__:
@@ -124,15 +110,15 @@ def get_inheritance_info(cls: type[Any], code_roots: list[str]) -> JSONDict:
                     norm_base_file = normalize_path(base_file)
                     # Check if base is in code roots
                     in_roots = any(
-                        norm_base_file == normalize_path(root)
-                        or is_subpath(norm_base_file, normalize_path(root))
+                        norm_base_file == normalize_path(root) or 
+                        is_subpath(norm_base_file, normalize_path(root))
                         for root in code_roots
                     )
                     if in_roots:
-                        bases.append(base.__module__ + "." + base.__qualname__)
+                        bases.append(base.__module__ + '.' + base.__qualname__)
             except (TypeError, AttributeError):
                 pass
-
+        
         mro: StringList = []
         for c in inspect.getmro(cls)[1:]:  # Skip self
             try:
@@ -140,16 +126,19 @@ def get_inheritance_info(cls: type[Any], code_roots: list[str]) -> JSONDict:
                 if c_file:
                     norm_c_file = normalize_path(c_file)
                     in_roots = any(
-                        norm_c_file == normalize_path(root)
-                        or is_subpath(norm_c_file, normalize_path(root))
+                        norm_c_file == normalize_path(root) or 
+                        is_subpath(norm_c_file, normalize_path(root))
                         for root in code_roots
                     )
                     if in_roots:
-                        mro.append(c.__module__ + "." + c.__qualname__)
+                        mro.append(c.__module__ + '.' + c.__qualname__)
             except (TypeError, AttributeError):
                 pass
-
-        return {"bases": bases, "mro": mro}
+        
+        return {
+            'bases': bases,
+            'mro': mro
+        }
     except Exception:
         return {}
 
@@ -159,11 +148,8 @@ def get_closure_dependencies(func: FunctionType, code_roots: list[str]) -> list[
     Identify variables captured in function closures.
     Only includes modules within code roots.
     """
-    from cline_utils.dependency_system.utils.path_utils import (
-        normalize_path,
-        is_subpath,
-    )
-
+    from cline_utils.dependency_system.utils.path_utils import normalize_path, is_subpath
+    
     deps: set[str] = set()
     if inspect.isfunction(func) and func.__closure__:
         for cell in func.__closure__:
@@ -176,8 +162,8 @@ def get_closure_dependencies(func: FunctionType, code_roots: list[str]) -> list[
                         if module_file:
                             norm_module_file = normalize_path(module_file)
                             in_roots = any(
-                                norm_module_file == normalize_path(root)
-                                or is_subpath(norm_module_file, normalize_path(root))
+                                norm_module_file == normalize_path(root) or 
+                                is_subpath(norm_module_file, normalize_path(root))
                                 for root in code_roots
                             )
                             if in_roots:
@@ -240,7 +226,10 @@ def get_scope_references(func: FunctionType) -> dict[str, list[str]]:
     """Extract global and nonlocal variable references."""
     try:
         code: CodeType = func.__code__
-        return {"globals": list(code.co_names), "nonlocals": list(code.co_freevars)}
+        return {
+            'globals': list(code.co_names),
+            'nonlocals': list(code.co_freevars)
+        }
     except Exception:
         return {}
 
@@ -314,10 +303,7 @@ def iter_declared_methods(cls: type[Any]) -> Iterator[tuple[str, FunctionType]]:
 
 def _resolve_project_root(file_path: str, code_roots: list[str]) -> str:
     """Best-effort project root for subprocess PYTHONPATH (must expose cline_utils)."""
-    search_starts = [
-        os.path.abspath(file_path),
-        os.path.dirname(os.path.abspath(__file__)),
-    ]
+    search_starts = [os.path.abspath(file_path), os.path.dirname(os.path.abspath(__file__))]
     search_starts.extend(os.path.abspath(root) for root in code_roots)
 
     for start in search_starts:
@@ -566,9 +552,7 @@ def _cli_inspect_module() -> None:
         sys.exit(1)
 
 
-def get_module_info(
-    file_path: str, module_name: str, code_roots: list[str]
-) -> JSONDict:
+def get_module_info(file_path: str, module_name: str, code_roots: list[str]) -> JSONDict:
     """
     Import a module in an isolated subprocess and extract symbol information.
 
@@ -651,9 +635,7 @@ def main():
         from cline_utils.dependency_system.utils.config_manager import ConfigManager
         from cline_utils.dependency_system.utils.path_utils import normalize_path
     except ImportError as e:
-        logger.error(
-            f"Could not import ConfigManager: {e}. Ensure cline_utils is in python path."
-        )
+        logger.error(f"Could not import ConfigManager: {e}. Ensure cline_utils is in python path.")
         sys.exit(1)
 
     # Initialize ConfigManager
@@ -662,7 +644,7 @@ def main():
 
     try:
         config_manager = ConfigManager()
-
+        
         # Get configuration - code_roots are already normalized by config_manager
         code_roots = config_manager.get_code_root_directories()
         excluded_dirs = set(config_manager.get_excluded_dirs())
@@ -677,25 +659,20 @@ def main():
             if os.path.isabs(root_dir_rel):
                 absolute_code_roots.append(normalize_path(root_dir_rel))
             else:
-                absolute_code_roots.append(
-                    normalize_path(os.path.join(project_root, root_dir_rel))
-                )
+                absolute_code_roots.append(normalize_path(os.path.join(project_root, root_dir_rel)))
 
         logger.info(f"Absolute code roots for validation: {absolute_code_roots}")
 
-        # Save to cline_utils/dependency_system/core/runtime_symbols.json
-        core_dir = os.path.join(
-            project_root, "cline_utils", "dependency_system", "core"
-        )
-        os.makedirs(core_dir, exist_ok=True)
-        output_file = os.path.join(core_dir, "runtime_symbols.json")
+        # Save to cline_utils/dependency_system/core/state/runtime_symbols.json
+        from cline_utils.dependency_system.core import resolve_state_path
+        _core_dir_for_save = os.path.join(project_root, "cline_utils", "dependency_system", "core")
+        output_file = resolve_state_path("runtime_symbols.json", _core_dir_for_save)
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
         all_symbols: dict[str, JSONDict] = {}
 
         if not code_roots:
-            logger.warning(
-                "No code roots defined in configuration. Skipping runtime inspection."
-            )
+            logger.warning("No code roots defined in configuration. Skipping runtime inspection.")
             sys.exit(0)
 
         # Process each root
@@ -705,7 +682,7 @@ def main():
                 root_dir = root_dir_rel
             else:
                 root_dir = os.path.join(project_root, root_dir_rel)
-
+            
             root_dir = normalize_path(root_dir)
 
             if not os.path.exists(root_dir):
@@ -745,7 +722,7 @@ def main():
                     module_name = rel_path.replace(os.sep, ".").replace(".py", "")
 
                     logger.info(f"Inspecting {module_name}...")
-
+                    
                     # Pass absolute_code_roots to get_module_info for validation
                     info = get_module_info(file_path, module_name, absolute_code_roots)
                     if info:
@@ -759,7 +736,6 @@ def main():
 
     finally:
         os.chdir(original_cwd)
-
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == _INSPECT_MODULE_CLI_FLAG:

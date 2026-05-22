@@ -47,7 +47,7 @@ def get_cache_path() -> str:
     from .. import core
 
     core_dir = os.path.dirname(os.path.abspath(core.__file__))
-    return os.path.join(core_dir, VALIDATION_CACHE_FILE)
+    return core.resolve_state_path(VALIDATION_CACHE_FILE, core_dir)
 
 
 def _load_validation_cache() -> Optional[Dict[str, Any]]:

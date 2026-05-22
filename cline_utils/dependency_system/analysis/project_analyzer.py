@@ -16,7 +16,7 @@ from cline_utils.dependency_system.analysis.dependency_suggester import (
     suggest_dependencies,
 )
 from cline_utils.dependency_system.analysis.embedding_manager import generate_embeddings
-from cline_utils.dependency_system.core import key_manager
+from cline_utils.dependency_system.core import key_manager, resolve_state_path
 from cline_utils.dependency_system.core.key_manager import KeyInfo
 from cline_utils.dependency_system.io import tracker_io
 from cline_utils.dependency_system.utils.batch_processor import (
@@ -229,14 +229,9 @@ def analyze_project(
     existing_dependency_state: Dict[Tuple[str, str], Tuple[str, Set[str]]] = {}
     try:
         # Load tracker paths from tracker_map.json
+        core_dir = os.path.dirname(os.path.abspath(key_manager.__file__))
         tracker_map_path = normalize_path(
-            os.path.join(
-                project_root,
-                "cline_utils",
-                "dependency_system",
-                "core",
-                "tracker_map.json",
-            )
+            resolve_state_path("tracker_map.json", core_dir)
         )
         if os.path.exists(tracker_map_path):
             with open(tracker_map_path, "r", encoding="utf-8") as f:
@@ -445,9 +440,8 @@ def analyze_project(
                 )
 
         # Save merged map with backup
-        core_dir = os.path.dirname(os.path.abspath(key_manager.__file__))
         symbol_map_path = normalize_path(
-            os.path.join(core_dir, PROJECT_SYMBOL_MAP_FILENAME)
+            resolve_state_path(PROJECT_SYMBOL_MAP_FILENAME, core_dir)
         )
         save_merged_symbol_map(merged_symbol_map, symbol_map_path, backup_old=True)
 
@@ -747,12 +741,12 @@ def analyze_project(
                 os.path.abspath(key_manager.__file__)
             )  # Assuming key_manager is imported
             current_ast_links_path = normalize_path(
-                os.path.join(core_dir, AST_VERIFIED_LINKS_FILENAME)
+                resolve_state_path(AST_VERIFIED_LINKS_FILENAME, core_dir)
             )
             old_ast_links_path = normalize_path(
-                os.path.join(core_dir, OLD_AST_VERIFIED_LINKS_FILENAME)
+                resolve_state_path(OLD_AST_VERIFIED_LINKS_FILENAME, core_dir)
             )
-            os.makedirs(core_dir, exist_ok=True)
+            os.makedirs(os.path.dirname(current_ast_links_path), exist_ok=True)
 
             if os.path.exists(current_ast_links_path):
                 try:
@@ -793,7 +787,7 @@ def analyze_project(
         # Optionally, ensure an empty file or remove old if no data
         core_dir = os.path.dirname(os.path.abspath(key_manager.__file__))
         current_ast_links_path = normalize_path(
-            os.path.join(core_dir, AST_VERIFIED_LINKS_FILENAME)
+            resolve_state_path(AST_VERIFIED_LINKS_FILENAME, core_dir)
         )
         if not os.path.exists(
             current_ast_links_path
@@ -908,9 +902,10 @@ def analyze_project(
 
     # Get all tracker paths from tracker_map.json
     try:
-        # Assuming tracker_map.json is in the same directory as key_manager
         core_dir = os.path.dirname(os.path.abspath(key_manager.__file__))
-        tracker_map_path = os.path.join(core_dir, "tracker_map.json")
+        tracker_map_path = normalize_path(
+            resolve_state_path("tracker_map.json", core_dir)
+        )
         if os.path.exists(tracker_map_path):
             with open(tracker_map_path, "r", encoding="utf-8") as f:
                 tracker_map = json.load(f)

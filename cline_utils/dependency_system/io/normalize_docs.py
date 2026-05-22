@@ -36,13 +36,15 @@ MAX_INPUT_TOKENS = 30000  # 30k tokens max input
 
 
 def load_transparency_registry(project_root: str) -> set[str]:
-    registry_path = os.path.join(
+    from cline_utils.dependency_system.core import resolve_state_path
+    
+    core_dir = os.path.join(
         project_root,
         "cline_utils",
         "dependency_system",
         "core",
-        "transparency_registry.json",
     )
+    registry_path = resolve_state_path("transparency_registry.json", core_dir)
     if not os.path.isfile(registry_path):
         print(f"Warning: Transparency registry not found at {registry_path}")
         return set()
