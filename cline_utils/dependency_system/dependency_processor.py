@@ -92,6 +92,7 @@ from cline_utils.dependency_system.utils.visualize_dependencies import (
     generate_dependency_diagram,
     render_mermaid_to_image,
 )
+from cline_utils.dependency_system.utils.viz.models import NativeLayoutConfig
 
 # --- Exception Imports ---
 from cline_utils.dependency_system.core.exceptions_enhanced import (
@@ -365,7 +366,9 @@ def command_handler_analyze_file(args: argparse.Namespace) -> int:
             print(json.dumps(results, indent=2))
         return 0
     except BinaryFileError as e:
-        print(f"\n[ANALYSIS ERROR] Binary file detected: {e.file_path} (size: {e.file_size} bytes)")
+        print(
+            f"\n[ANALYSIS ERROR] Binary file detected: {e.file_path} (size: {e.file_size} bytes)"
+        )
         print("Text analysis is not supported for binary files.")
         return 1
     except EncodingError as e:
@@ -529,27 +532,43 @@ def command_handler_analyze_project(args: argparse.Namespace) -> int:
             else 1
         )
     except MemoryLimitError as e:
-        logger.error(f"Memory limit exceeded: {e.message}", extra={"details": e.details})
+        logger.error(
+            f"Memory limit exceeded: {e.message}", extra={"details": e.details}
+        )
         print(f"\n[FATAL ERROR] Memory Limit Exceeded!")
-        print(f"Current Memory: {e.current_mb:.1f} MB (Required: {e.required_mb:.1f} MB)")
-        print("Please free up system resources or increase memory allocation in config.")
+        print(
+            f"Current Memory: {e.current_mb:.1f} MB (Required: {e.required_mb:.1f} MB)"
+        )
+        print(
+            "Please free up system resources or increase memory allocation in config."
+        )
         return 1
     except DiskSpaceError as e:
-        logger.error(f"Disk space insufficient: {e.message}", extra={"details": e.details})
+        logger.error(
+            f"Disk space insufficient: {e.message}", extra={"details": e.details}
+        )
         print(f"\n[FATAL ERROR] Disk Space Insufficient!")
         print(f"Path: {e.path}")
-        print(f"Current Space: {e.current_mb:.1f} MB (Required: {e.required_mb:.1f} MB)")
+        print(
+            f"Current Space: {e.current_mb:.1f} MB (Required: {e.required_mb:.1f} MB)"
+        )
         print("Please clean up disk space and try again.")
         return 1
     except ResourceValidationError as e:
-        logger.error(f"Resource validation failed: {e.message}", extra={"details": e.details})
+        logger.error(
+            f"Resource validation failed: {e.message}", extra={"details": e.details}
+        )
         print(f"\n[FATAL ERROR] Resource Validation Failed: {e.message}")
         return 1
     except ModelError as e:
         logger.error(f"AI Model Error: {e.message}", extra={"details": e.details})
-        print(f"\n[AI MODEL ERROR] Model '{e.model_name}' failed during '{e.error_type}':")
+        print(
+            f"\n[AI MODEL ERROR] Model '{e.model_name}' failed during '{e.error_type}':"
+        )
         print(f"Details: {e.message}")
-        print("Please check your LLM provider status, api keys, or local model runner connection.")
+        print(
+            "Please check your LLM provider status, api keys, or local model runner connection."
+        )
         return 1
     except TrackerIOError as e:
         logger.error(f"Tracker I/O Error: {e.message}", extra={"details": e.details})
@@ -566,7 +585,9 @@ def command_handler_analyze_project(args: argparse.Namespace) -> int:
         print(f"Details: {e.message}")
         return 1
     except ProjectAnalyzerError as e:
-        logger.error(f"Project Analyzer Error: {e.message}", extra={"details": e.details})
+        logger.error(
+            f"Project Analyzer Error: {e.message}", extra={"details": e.details}
+        )
         print(f"\n[ANALYZER ERROR] {e.message}")
         return 1
     except Exception as e:
@@ -1126,6 +1147,33 @@ def handle_clear_caches(args: argparse.Namespace) -> int:
         return 0
     except Exception as e:
         logger.exception(f"Error clearing caches: {e}")
+        print(f"Error: {e}")
+        return 1
+
+
+def handle_build_context(args: argparse.Namespace) -> int:
+    """Handles the CLI request to build a targeted LLM context package."""
+    try:
+        from pathlib import Path
+        from cline_utils.dependency_system.io.context_packager import ContextPackager
+
+        packager = ContextPackager()
+        target_keys = [k.strip() for k in args.keys.split(",")]
+
+        payload = packager.build_package(
+            target_keys=target_keys, max_tokens=args.max_tokens, routing_mode=args.mode
+        )
+
+        if args.output:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(payload, encoding="utf-8")
+            print(f"Context package successfully written to {output_path}")
+        else:
+            print(payload)
+        return 0
+    except Exception as e:
+        logger.exception(f"Error building context package: {e}")
         print(f"Error: {e}")
         return 1
 
@@ -1780,9 +1828,9 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
         f"CLI: visualize-dependencies called. Focus Keys: {focus_keys_list_cli or 'Project Overview'}"
     )
 
-    if output_format_cli == "svg":
+    if output_format_cli == "svg" and getattr(args, "backend", None) is None:
         backend_cli = "native"
-    if backend_cli not in {"mermaid", "native"}:
+    if backend_cli not in {"mermaid", "native", "isometric", "threejs"}:
         print(f"Error: Unsupported visualization backend '{backend_cli}'.")
         return 1
 
@@ -1828,6 +1876,10 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
         print(f"Error loading data needed for visualization: {e}", file=sys.stderr)
         return 1
 
+    render_stage_cli = getattr(args, "render_stage", None)
+    if render_stage_cli is None:
+        render_stage_cli = 1 if backend_cli == "isometric" else 5
+
     diagram_string_generated = generate_dependency_diagram(
         focus_keys_list_input=focus_keys_list_cli,
         global_path_to_key_info_map=current_global_map_cli,
@@ -1836,6 +1888,7 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
         config_manager_instance=config_cli,
         backend=backend_cli,
         render=False,
+        native_config=NativeLayoutConfig(render_stage=render_stage_cli),
     )
 
     if diagram_string_generated is None:
@@ -1888,11 +1941,29 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
             max_len = 50
             if len(safe_keys_str) > max_len:
                 safe_keys_str = safe_keys_str[:max_len] + "_etc"
-            ext = "svg" if backend_cli == "native" else output_format_cli
-            default_filename = f"focus_{safe_keys_str}_dependencies.{ext}"
+            if backend_cli == "threejs":
+                ext = "html"
+                suffix = "_threejs"
+            else:
+                ext = (
+                    "svg"
+                    if backend_cli in {"native", "isometric"}
+                    else output_format_cli
+                )
+                suffix = "_isometric" if backend_cli == "isometric" else ""
+            default_filename = f"focus_{safe_keys_str}_dependencies{suffix}.{ext}"
         else:
-            ext = "svg" if backend_cli == "native" else output_format_cli
-            default_filename = f"project_overview_dependencies.{ext}"
+            if backend_cli == "threejs":
+                ext = "html"
+                suffix = "_threejs"
+            else:
+                ext = (
+                    "svg"
+                    if backend_cli in {"native", "isometric"}
+                    else output_format_cli
+                )
+                suffix = "_isometric" if backend_cli == "isometric" else ""
+            default_filename = f"project_overview_dependencies{suffix}.{ext}"
 
         memory_dir_rel = config_cli.get_path("memory_dir", "cline_docs")
         default_output_dir_rel = os.path.join(memory_dir_rel, "dependency_diagrams")
@@ -2768,7 +2839,9 @@ def handle_reconcile_transparency(args: argparse.Namespace) -> int:
 
             except Exception as e:
                 print(f"  Error processing {file_path}: {e}")
-                logger.error(f"Reconciliation error for {file_path}: {e}", exc_info=True)
+                logger.error(
+                    f"Reconciliation error for {file_path}: {e}", exc_info=True
+                )
 
     print(f"\nSuccessfully reconciled transparency for {reconciled_count} files.")
     return 0
@@ -2895,6 +2968,30 @@ def main():
         help="Force fresh resource validation, bypassing cache",
     )
     analyze_project_parser.set_defaults(func=command_handler_analyze_project)
+
+    # --- Context Packager Commands ---
+    build_context_parser = subparsers.add_parser(
+        "build-context",
+        help="Build a token-optimized context package for an LLM task centering around target keys.",
+    )
+    build_context_parser.add_argument(
+        "--keys",
+        required=True,
+        help="Comma-separated list of target keymaps (e.g. 1A1,2B4)",
+    )
+    build_context_parser.add_argument(
+        "--max-tokens", type=int, help="Maximum token budget for the context package."
+    )
+    build_context_parser.add_argument(
+        "--mode",
+        choices=["auto", "local", "cloud"],
+        default="auto",
+        help="Routing mode to enforce token safety ceilings (local, cloud, auto).",
+    )
+    build_context_parser.add_argument(
+        "--output", help="Path to save the generated context Markdown file."
+    )
+    build_context_parser.set_defaults(func=handle_build_context)
 
     # --- Grid Manipulation Commands ---
     compress_parser = subparsers.add_parser("compress", help="Compress RLE string")
@@ -3048,9 +3145,16 @@ def main():
     )
     visualize_parser.add_argument(
         "--backend",
-        choices=["mermaid", "native"],
+        choices=["mermaid", "native", "isometric", "threejs"],
         default=None,
         help="Rendering backend. Defaults to native when --format svg is used.",
+    )
+    visualize_parser.add_argument(
+        "--render-stage",
+        type=int,
+        choices=[1, 2, 3, 4, 5],
+        default=None,
+        help="Native render stage. For isometric: 1 islands, 2 pipes, 3 local stubs.",
     )
     visualize_parser.add_argument(
         "--output",
@@ -3255,15 +3359,18 @@ def main():
                         files_with_maps: Set[str] = set()
                         paths_to_virtualize: List[str] = []
                         for result in results:
-                            if isinstance(result, dict):
+                            if result:
                                 path = result.get("path")
                                 if isinstance(path, str):
                                     files_processed.add(path)
                                     maps_added = result.get("maps_added")
                                     maps_updated = result.get("maps_updated")
                                     maps_count = (
-                                        (maps_added if isinstance(maps_added, int) else 0)
-                                        + (maps_updated if isinstance(maps_updated, int) else 0)
+                                        maps_added if isinstance(maps_added, int) else 0
+                                    ) + (
+                                        maps_updated
+                                        if isinstance(maps_updated, int)
+                                        else 0
                                     )
                                     if maps_count > 0:
                                         files_with_maps.add(path)
@@ -3274,7 +3381,9 @@ def main():
                                 paths_to_virtualize, clear_if_absent=False
                             )
                         if files_processed:
-                            manager.bulk_prune_stale_virtual_maps(files_processed, files_with_maps)
+                            manager.bulk_prune_stale_virtual_maps(
+                                files_processed, files_with_maps
+                            )
                         if virtualized:
                             logger.info(
                                 "Virtualized CONNECTION_MAP comments for "
