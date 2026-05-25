@@ -18,9 +18,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
+import psutil
 
+from .. import core
 from ..core.exceptions_enhanced import DiskSpaceError, MemoryLimitError, log_and_reraise
-from ..utils.path_utils import normalize_path
+from ..utils.cache_manager import normalize_path_cached as normalize_path
 
 # Try to import torch for VRAM management
 try:
@@ -44,7 +46,6 @@ DEFAULT_CACHE_TTL_SECONDS = 604800  # 7 days (hardware resources rarely change)
 
 def get_cache_path() -> str:
     """Get path to validation cache file."""
-    from .. import core
 
     core_dir = os.path.dirname(os.path.abspath(core.__file__))
     return core.resolve_state_path(VALIDATION_CACHE_FILE, core_dir)
@@ -162,17 +163,24 @@ class ResourceValidator:
     RECOMMENDED_MEMORY_MB = 2048
     RECOMMENDED_DISK_SPACE_MB = 500
 
-    def __init__(self, strict_mode: bool = False, skip_disk_estimation: bool = False):
+    def __init__(
+        self,
+        strict_mode: bool = False,
+        skip_disk_estimation: bool = False,
+        excluded_dirs: Optional[List[str]] = None,
+    ):
         """
         Initialize resource validator.
 
         Args:
             strict_mode: If True, fail on warnings. If False, only fail on critical issues.
             skip_disk_estimation: If True, skip disk estimation and space validation.
+            excluded_dirs: List of directory names to exclude during disk estimation scans.
         """
         super().__init__()
         self.strict_mode = strict_mode
         self.skip_disk_estimation = skip_disk_estimation
+        self._excluded_dirs = excluded_dirs
         self.validation_results: Dict[str, Any] = {}
 
     def validate_system_resources(
@@ -325,8 +333,6 @@ class ResourceValidator:
     def _validate_memory(self) -> Dict[str, Any]:
         """Validate system memory availability."""
         try:
-            import psutil
-
             memory = psutil.virtual_memory()
             available_mb = memory.available / (1024 * 1024)
             total_mb = memory.total / (1024 * 1024)
@@ -456,7 +462,9 @@ class ResourceValidator:
         """Validate disk space for project analysis."""
         try:
             if self.skip_disk_estimation:
-                logger.info("Disk space estimation and validation skipped via configuration")
+                logger.info(
+                    "Disk space estimation and validation skipped via configuration"
+                )
                 return {
                     "sufficient": True,
                     "free_space_mb": 999999.0,
@@ -541,8 +549,6 @@ class ResourceValidator:
     def _validate_cpu(self) -> Dict[str, Any]:
         """Validate CPU availability."""
         try:
-            import psutil
-
             cores: int = psutil.cpu_count(logical=False) or 1  # Physical cores
             logical_cores: int = (
                 psutil.cpu_count(logical=True) or 1
@@ -796,21 +802,36 @@ class ResourceValidator:
             if not project_dir.exists():
                 return 200  # Conservative estimate
 
-            try:
-                from .config_manager import ConfigManager
-                config_mgr = ConfigManager()
-                excluded_dirs = set(config_mgr.get_excluded_dirs())
-            except Exception:
-                # Fallback if config manager is not fully initialized
+            if self._excluded_dirs is not None:
+                excluded_dirs = set(self._excluded_dirs)
+            else:
                 excluded_dirs = {
-                    "__pycache__", ".git", ".svn", ".hg", ".vscode", ".idea", 
-                    "venv", "env", ".venv", "node_modules", "build", "dist", 
-                    "target", "out", "tmp", "temp", "tests", "__tests__", "embeddings"
+                    "__pycache__",
+                    ".git",
+                    ".svn",
+                    ".hg",
+                    ".vscode",
+                    ".idea",
+                    "venv",
+                    "env",
+                    ".venv",
+                    "node_modules",
+                    "build",
+                    "dist",
+                    "target",
+                    "out",
+                    "tmp",
+                    "temp",
+                    "tests",
+                    "__tests__",
+                    "embeddings",
                 }
 
             total_size_bytes = 0
             file_count = 0
-            max_scan_files = 10000  # Cap the scan at 10,000 files to prevent endless scan
+            max_scan_files = (
+                10000  # Cap the scan at 10,000 files to prevent endless scan
+            )
             max_depth = 8  # Limit recursive depth for estimation purposes
 
             def _scan_dir(dir_path: str, current_depth: int) -> None:
@@ -991,6 +1012,7 @@ class CrossProcessLock:
     """
 
     def __init__(self, lockfile_path: str):
+        super().__init__()
         self.lockfile_path = lockfile_path
         self._fd: Optional[int] = None
 
@@ -1003,12 +1025,11 @@ class CrossProcessLock:
         while True:
             try:
                 # Open with read-write and create
-                self._fd = os.open(
-                    self.lockfile_path, os.O_RDWR | os.O_CREAT
-                )
+                self._fd = os.open(self.lockfile_path, os.O_RDWR | os.O_CREAT)
 
                 if sys.platform == "win32":
                     import msvcrt
+
                     # Ensure the file contains at least 1 byte so locking 1 byte is safe
                     if os.lseek(self._fd, 0, os.SEEK_END) == 0:
                         os.write(self._fd, b"\0")
@@ -1024,6 +1045,7 @@ class CrossProcessLock:
                         self._fd = None
                 else:
                     import fcntl
+
                     try:
                         # Exclusive lock, non-blocking
                         fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1052,6 +1074,7 @@ class CrossProcessLock:
             try:
                 if sys.platform == "win32":
                     import msvcrt
+
                     try:
                         os.lseek(self._fd, 0, os.SEEK_SET)
                         msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
@@ -1059,6 +1082,7 @@ class CrossProcessLock:
                         pass
                 else:
                     import fcntl
+
                     try:
                         fcntl.flock(self._fd, fcntl.LOCK_UN)
                     except Exception:
@@ -1084,14 +1108,16 @@ class CrossProcessLock:
 def is_pid_alive(pid: int) -> bool:
     """Check if a process is still running."""
     try:
-        import psutil
         return psutil.pid_exists(pid)
     except ImportError:
         if sys.platform == "win32":
             import ctypes
+
             kernel32 = ctypes.windll.kernel32
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            h_process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            h_process = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
             if h_process:
                 kernel32.CloseHandle(h_process)
                 return True
@@ -1102,7 +1128,6 @@ def is_pid_alive(pid: int) -> bool:
                 return True
             except OSError:
                 return False
-
 
 
 class AllocationStatus(Enum):
@@ -1268,7 +1293,6 @@ class VRAMResourceManager:
             )
             del registry[alloc_id]
 
-
     def _get_physical_vram_gb(self) -> float:
         """Get total physical VRAM in GB."""
         if not TORCH_AVAILABLE or torch is None or not torch.cuda.is_available():
@@ -1314,8 +1338,7 @@ class VRAMResourceManager:
         free_vram = self._get_available_vram_gb()
         reserved = self.get_reserved_vram_gb()
         total_allocated = sum(
-            float(alloc.get("size_gb", 0.0))
-            for alloc in registry.values()
+            float(alloc.get("size_gb", 0.0)) for alloc in registry.values()
         )
         self._total_allocated_gb = total_allocated
         available = free_vram - reserved - total_allocated
@@ -1346,7 +1369,9 @@ class VRAMResourceManager:
                     finally:
                         lock.release()
                 else:
-                    logger.warning("Could not acquire cross-process lock for VRAM query, using cached/local state")
+                    logger.warning(
+                        "Could not acquire cross-process lock for VRAM query, using cached/local state"
+                    )
             except Exception as e:
                 logger.warning(f"Error checking cross-process VRAM availability: {e}")
 
@@ -1438,23 +1463,25 @@ class VRAMResourceManager:
                     try:
                         registry = self._load_registry()
                         self._prune_dead_allocations(registry)
-                        
+
                         # Calculate available VRAM using the loaded registry
                         available = self._get_available_for_allocation_locked(registry)
-                        
+
                         # Check if we can allocate (adding safety buffer)
                         if available >= (size_gb + self._safety_buffer_gb):
                             # Grant allocation
                             allocation.status = AllocationStatus.GRANTED
                             allocation.granted_at = time.time()
-                            
+
                             # Add to local allocations
                             with self._allocation_lock:
                                 self._active_allocations[allocation_id] = allocation
                                 self._total_allocated_gb += size_gb
                                 self._stats["granted"] += 1
-                                self._peak_allocated_gb = max(self._peak_allocated_gb, self._total_allocated_gb)
-                            
+                                self._peak_allocated_gb = max(
+                                    self._peak_allocated_gb, self._total_allocated_gb
+                                )
+
                             # Add to cross-process registry
                             registry[allocation_id] = {
                                 "allocation_id": allocation_id,
@@ -1471,16 +1498,16 @@ class VRAMResourceManager:
                     finally:
                         lock.release()
                 else:
-                    logger.warning("Could not acquire cross-process lock for VRAM allocation")
+                    logger.warning(
+                        "Could not acquire cross-process lock for VRAM allocation"
+                    )
             except Exception as e:
                 logger.error(f"Error requesting cross-process allocation: {e}")
 
             # If we reached here, allocation was not granted in this turn
             if not blocking:
                 self._stats["denied"] += 1
-                logger.debug(
-                    f"VRAM allocation denied: {size_gb:.2f}GB"
-                )
+                logger.debug(f"VRAM allocation denied: {size_gb:.2f}GB")
                 return False, None
 
             # Blocking mode: check timeout
@@ -1500,7 +1527,7 @@ class VRAMResourceManager:
                     wait_time = min(poll_interval, remaining)
                 else:
                     wait_time = poll_interval
-                
+
                 if wait_time > 0:
                     self._condition.wait(timeout=wait_time)
 
@@ -1536,7 +1563,7 @@ class VRAMResourceManager:
             True if released successfully, False if not found
         """
         released_global = False
-        
+
         lock = CrossProcessLock(self._lockfile_path)
         try:
             if lock.acquire(timeout=10.0):
@@ -1549,7 +1576,9 @@ class VRAMResourceManager:
                 finally:
                     lock.release()
             else:
-                logger.warning(f"Could not acquire cross-process lock to release allocation {allocation_id}")
+                logger.warning(
+                    f"Could not acquire cross-process lock to release allocation {allocation_id}"
+                )
         except Exception as e:
             logger.error(f"Error releasing allocation in cross-process registry: {e}")
 
@@ -1590,7 +1619,7 @@ class VRAMResourceManager:
         """
         global_allocated_gb = 0.0
         global_active_count = 0
-        
+
         lock = CrossProcessLock(self._lockfile_path)
         try:
             if lock.acquire(timeout=5.0):
@@ -1598,16 +1627,17 @@ class VRAMResourceManager:
                     registry = self._load_registry()
                     self._prune_dead_allocations(registry)
                     self._save_registry(registry)
-                    
+
                     global_allocated_gb = sum(
-                        float(alloc.get("size_gb", 0.0))
-                        for alloc in registry.values()
+                        float(alloc.get("size_gb", 0.0)) for alloc in registry.values()
                     )
                     global_active_count = len(registry)
                 finally:
                     lock.release()
             else:
-                logger.warning("Could not acquire cross-process lock for stats, using fallback local tracking")
+                logger.warning(
+                    "Could not acquire cross-process lock for stats, using fallback local tracking"
+                )
                 global_allocated_gb = self._total_allocated_gb
                 global_active_count = len(self._active_allocations)
         except Exception as e:
@@ -1691,22 +1721,22 @@ class VRAMResourceManager:
         """
         wait_start = time.time()
         poll_interval = 0.2
-        
+
         while True:
             if self.get_available_for_allocation() >= required_gb:
                 return True
-                
+
             elapsed = time.time() - wait_start
             if timeout is not None and elapsed >= timeout:
                 return False
-                
+
             with self._condition:
                 if timeout is not None:
                     remaining = timeout - elapsed
                     wait_time = min(poll_interval, remaining)
                 else:
                     wait_time = poll_interval
-                
+
                 if wait_time > 0:
                     self._condition.wait(timeout=wait_time)
 
@@ -1902,49 +1932,6 @@ class VRAMBatchScheduler:
 # =============================================================================
 # Convenience functions
 # =============================================================================
-
-
-def quick_resource_check(project_path: str) -> bool:
-    """Quick check if basic resources are available for analysis."""
-    try:
-        validator = ResourceValidator(strict_mode=False)
-        results = validator.validate_system_resources(project_path)
-        return results["valid"]
-    except Exception:
-        return False  # If validation fails, be conservative
-
-
-def validate_and_get_optimal_settings(project_path: str) -> Dict[str, Any]:
-    """Validate resources and return optimal analysis settings."""
-    validator = ResourceValidator(strict_mode=False)
-    results = validator.validate_system_resources(project_path)
-
-    settings = {
-        "use_streaming": True,
-        "batch_size": 32,
-        "chunk_size": 8192,
-        "enable_parallel": True,
-        "memory_efficient": False,
-    }
-
-    # Adjust settings based on available resources
-    memory_check = results.get("resource_check", {}).get("memory", {})
-    available_mb = memory_check.get("available_mb", 0)
-
-    if available_mb < 1024:
-        settings.update(
-            {"use_streaming": True, "batch_size": 16, "memory_efficient": True}
-        )
-    elif available_mb < 2048:
-        settings.update({"batch_size": 24})
-
-    # CPU-based adjustments
-    cpu_check = results.get("resource_check", {}).get("cpu", {})
-    cores = cpu_check.get("cores", 1)
-    if cores < 2:
-        settings["enable_parallel"] = False
-
-    return settings
 
 
 def get_vram_manager() -> VRAMResourceManager:

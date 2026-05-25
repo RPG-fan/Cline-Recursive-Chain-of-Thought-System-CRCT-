@@ -11,9 +11,11 @@ from cline_utils.dependency_system.utils.resource_validator import (
     _load_validation_cache,
     _save_validation_cache,
     _is_cache_valid,
-    validate_and_get_optimal_settings,
     MemoryLimitError,
     CACHE_VERSION,
+)
+from cline_utils.dependency_system.utils.resource_helper import (
+    validate_and_get_optimal_settings,
 )
 
 # Mock data
@@ -30,7 +32,12 @@ def validator() -> ResourceValidator:
 def mock_psutil() -> Generator[MagicMock, None, None]:
     mock = MagicMock()
     with patch.dict("sys.modules", {"psutil": mock}):
-        yield mock
+        with patch(
+            "cline_utils.dependency_system.utils.resource_validator.psutil",
+            mock,
+            create=True,
+        ):
+            yield mock
 
 
 @pytest.fixture
@@ -193,8 +200,11 @@ class TestResourceValidatorMemory:
             validator._validate_memory()
 
     def test_validate_memory_fallback(self, validator: ResourceValidator) -> None:
-        # Force ImportError for psutil
-        with patch.dict("sys.modules", {"psutil": None}):
+        # Force ImportError for psutil by raising ImportError on virtual_memory call
+        with patch(
+            "cline_utils.dependency_system.utils.resource_validator.psutil.virtual_memory",
+            side_effect=ImportError("psutil not available"),
+        ):
             # Mock sys.platform to not be win32 to test generic fallback
             with patch("sys.platform", "linux"):
                 result = validator._validate_memory()

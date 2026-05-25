@@ -10,10 +10,9 @@ import glob
 import json
 import logging
 import os
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 from .path_utils import get_project_root, normalize_path
-from .resource_validator import ResourceValidator
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -161,7 +160,7 @@ DEFAULT_CONFIG = {
     "visualization": {
         "auto_generate_on_analyze": True,  # Enable auto-generation by default
         "auto_diagram_output_dir": None,  # Default to None, meaning derive from memory_dir
-        "backend": "mermaid",  # Use "native" to generate direct SVG diagrams
+        "backend": "mermaid",  # Use "native" or "isometric" to generate direct SVG diagrams
         # If user sets this (e.g., "my_diagrams"), it overrides the default derivation
     },
     "recovery": {
@@ -261,6 +260,12 @@ DEFAULT_CONFIG = {
             "SKIP_DISK_ESTIMATION",
         ],
     },
+    # Context Packager settings
+    "context_packager": {
+        "local_max_tokens": 20000,
+        "cloud_max_tokens": 100000,
+        "default_mode": "auto",
+    },
 }
 
 # Define character priorities (Higher number = higher priority) - Centralized definition
@@ -314,25 +319,29 @@ class ConfigManager:
         # Instance-level caches for frequently accessed values
         self._threshold_cache: Dict[str, float] = {}
         self._model_name_cache: Dict[str, str] = {}
-        self._path_cache: Dict[str, str] = {}
+        self._path_cache: Dict[Tuple[str, Optional[str]], str] = {}
         self._on_save_callbacks: List[Callable[[str], None]] = []
+        self._config_cache: Optional[Dict[str, Any]] = None
+        self._config_cache_key: Optional[str] = None
 
         self._load_and_merge_config()
 
         # Ensure defaults for all top-level keys if missing after load
-        for key, default_value in [
-            ("excluded_dirs", DEFAULT_CONFIG["excluded_dirs"]),
-            ("excluded_extensions", DEFAULT_CONFIG["excluded_extensions"]),
-            ("paths", DEFAULT_CONFIG["paths"]),
-            ("recovery", DEFAULT_CONFIG["recovery"]),
-            ("performance", DEFAULT_CONFIG["performance"]),
-            ("analysis", DEFAULT_CONFIG["analysis"]),
-            ("resources", DEFAULT_CONFIG["resources"]),
-            ("output", DEFAULT_CONFIG["output"]),
-            ("environment", DEFAULT_CONFIG["environment"]),
-        ]:
-            if key not in self._config:
-                self._config[key] = copy.deepcopy(default_value)
+        if self._config is not None:
+            for key, default_value in [
+                ("excluded_dirs", DEFAULT_CONFIG["excluded_dirs"]),
+                ("excluded_extensions", DEFAULT_CONFIG["excluded_extensions"]),
+                ("paths", DEFAULT_CONFIG["paths"]),
+                ("recovery", DEFAULT_CONFIG["recovery"]),
+                ("performance", DEFAULT_CONFIG["performance"]),
+                ("analysis", DEFAULT_CONFIG["analysis"]),
+                ("resources", DEFAULT_CONFIG["resources"]),
+                ("output", DEFAULT_CONFIG["output"]),
+                ("environment", DEFAULT_CONFIG["environment"]),
+                ("context_packager", DEFAULT_CONFIG["context_packager"]),
+            ]:
+                if key not in self._config:
+                    self._config[key] = copy.deepcopy(default_value)
 
         # Apply environment variable overrides
         self._apply_environment_overrides()
@@ -344,7 +353,7 @@ class ConfigManager:
 
     def register_on_save_callback(self, callback: Callable[[str], None]) -> None:
         """Register a callback to be executed when configuration is saved."""
-        if not hasattr(self, "_on_save_callbacks") or self._on_save_callbacks is None:
+        if not hasattr(self, "_on_save_callbacks"):
             self._on_save_callbacks = []
         self._on_save_callbacks.append(callback)
 
@@ -366,18 +375,18 @@ class ConfigManager:
         self, setting_name: str, default_override: Any = None
     ) -> Any:
         """Gets a setting from the 'recovery' section of the config."""
-        recovery_settings = self.config.get(
-            "recovery", copy.deepcopy(DEFAULT_CONFIG.get("recovery", {}))
-        )
+        recovery_settings = self.config.get("recovery", {})
+        if not isinstance(recovery_settings, dict):
+            recovery_settings = {}
 
-        # Determine the ultimate default value
-        # 1. Use default_override if provided
-        # 2. Else, use default from DEFAULT_CONFIG for this specific setting_name
-        # 3. Else, None (though our DEFAULT_CONFIG for recovery is complete)
         if default_override is not None:
             ultimate_default = default_override
         else:
-            ultimate_default = copy.deepcopy(DEFAULT_CONFIG.get("recovery", {}).get(setting_name))
+            recovery_defaults = DEFAULT_CONFIG.get("recovery")
+            if isinstance(recovery_defaults, dict):
+                ultimate_default = copy.deepcopy(recovery_defaults.get(setting_name))
+            else:
+                ultimate_default = None
 
         return recovery_settings.get(setting_name, ultimate_default)
 
@@ -393,10 +402,17 @@ class ConfigManager:
 
     def get_reranker_model_path(self) -> str:
         """Gets the path to the reranker model."""
-        reranker_path = self.config.get("embedding", {}).get(
-            "reranker_model_path", DEFAULT_CONFIG["embedding"]["reranker_model_path"]
-        )
-        return normalize_path(os.path.join(get_project_root(), reranker_path))
+        embedding_config = self.config.get("embedding", {})
+        if not isinstance(embedding_config, dict):
+            embedding_config = {}
+
+        embedding_defaults = DEFAULT_CONFIG.get("embedding")
+        default_path = "models/Qwen3-Reranker-0.6B"
+        if isinstance(embedding_defaults, dict):
+            default_path = embedding_defaults.get("reranker_model_path", default_path)
+
+        reranker_path = embedding_config.get("reranker_model_path", default_path)
+        return str(normalize_path(os.path.join(get_project_root(), str(reranker_path))))
 
     @property
     def config(self) -> Dict[str, Any]:
@@ -422,7 +438,7 @@ class ConfigManager:
             self._config_cache = self._config
             self._config_cache_key = cache_key
 
-        return self._config_cache
+        return self._config_cache or {}
 
     @property
     def config_path(self) -> str:
@@ -432,16 +448,12 @@ class ConfigManager:
         Returns:
             Path to the configuration file
         """
-
-        def _get_config_path(self) -> str:
-            if self._config_path is None:
-                project_root = get_project_root()
-                self._config_path = normalize_path(
-                    os.path.join(project_root, ".clinerules.config.json")
-                )
-            return self._config_path
-
-        return _get_config_path(self)
+        if self._config_path is None:
+            project_root = get_project_root()
+            self._config_path = str(
+                normalize_path(os.path.join(project_root, ".clinerules.config.json"))
+            )
+        return self._config_path
 
     def _load_and_merge_config(self) -> None:
         """Load configuration from file and deep merge with defaults."""
@@ -539,7 +551,9 @@ class ConfigManager:
         Returns:
             List of excluded directory names
         """
-        return self.config.get("excluded_dirs", copy.deepcopy(DEFAULT_CONFIG["excluded_dirs"]))
+        return self.config.get(
+            "excluded_dirs", copy.deepcopy(DEFAULT_CONFIG["excluded_dirs"])
+        )
 
     def get_excluded_extensions(self) -> List[str]:
         """
@@ -568,13 +582,13 @@ class ConfigManager:
             copy.deepcopy(DEFAULT_CONFIG.get("excluded_file_patterns", [])),
         )  # Get file patterns, default to empty list if not set
 
-        excluded_paths = []
+        excluded_paths: List[str] = []
         project_root = get_project_root()
 
         # 1. Explicitly excluded paths
         excluded_paths.extend(
             [
-                (
+                str(
                     normalize_path(os.path.join(project_root, p))
                     if not os.path.isabs(p)
                     else normalize_path(p)
@@ -586,12 +600,12 @@ class ConfigManager:
         # 2. Paths from excluded file patterns
         for pattern in excluded_file_patterns:
             # Construct the full pattern relative to the project root
-            full_pattern = normalize_path(
-                os.path.join(project_root, "**", pattern)
+            full_pattern = str(
+                normalize_path(os.path.join(project_root, "**", pattern))
             )  # Use '**' for recursion
             # Use glob with recursive=True to find matching paths
             matching_paths = glob.glob(full_pattern, recursive=True)
-            excluded_paths.extend([normalize_path(p) for p in matching_paths])
+            excluded_paths.extend([str(normalize_path(p)) for p in matching_paths])
 
         return excluded_paths
 
@@ -607,7 +621,9 @@ class ConfigManager:
         """
         # Use instance-level cache to avoid repeated config lookups
         if threshold_type not in self._threshold_cache:
-            thresholds = self.config.get("thresholds", copy.deepcopy(DEFAULT_CONFIG["thresholds"]))
+            thresholds = self.config.get(
+                "thresholds", copy.deepcopy(DEFAULT_CONFIG["thresholds"])
+            )
             self._threshold_cache[threshold_type] = thresholds.get(threshold_type, 0.65)
         return self._threshold_cache[threshold_type]
 
@@ -643,19 +659,25 @@ class ConfigManager:
         # Use instance-level cache
         cache_key = (path_type, default_path)
         if cache_key not in self._path_cache:
-            paths = self.config.get("paths", copy.deepcopy(DEFAULT_CONFIG["paths"]))
-            path = paths.get(
-                path_type,
-                (
-                    default_path
-                    if default_path
-                    else copy.deepcopy(DEFAULT_CONFIG["paths"]).get(path_type, "")
-                ),
+            paths = self.config.get("paths", {})
+            if not isinstance(paths, dict):
+                paths = {}
+
+            paths_defaults = DEFAULT_CONFIG.get("paths")
+            default_val_from_config = ""
+            if isinstance(paths_defaults, dict):
+                default_val_from_config = paths_defaults.get(path_type, "")
+
+            path_val = paths.get(
+                path_type, default_path if default_path else default_val_from_config
             )
+
             if path_type == "embeddings_dir":
-                path = normalize_path(os.path.join(get_project_root(), path))
+                path = str(
+                    normalize_path(os.path.join(get_project_root(), str(path_val)))
+                )
             else:
-                path = normalize_path(path)
+                path = str(normalize_path(str(path_val)))
             self._path_cache[cache_key] = path
         return self._path_cache[cache_key]
 
@@ -672,7 +694,7 @@ class ConfigManager:
         clinerules_path = (
             new_rules_path if os.path.exists(new_rules_path) else legacy_rules_path
         )
-        code_root_dirs = []
+        code_root_dirs: List[str] = []
         try:
             with open(clinerules_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
@@ -687,7 +709,7 @@ class ConfigManager:
                         # Normalize path *before* adding to list
                         path_part = line[1:].strip()  # Get content after '-'
                         if path_part:  # Ensure it's not just '-'
-                            code_root_dirs.append(normalize_path(path_part))
+                            code_root_dirs.append(str(normalize_path(path_part)))
                     elif line.startswith("["):
                         break  # Reached next section
         except FileNotFoundError:
@@ -714,7 +736,7 @@ class ConfigManager:
         clinerules_path = (
             new_rules_path if os.path.exists(new_rules_path) else legacy_rules_path
         )
-        doc_dirs = []
+        doc_dirs: List[str] = []
         try:
             with open(clinerules_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
@@ -729,7 +751,7 @@ class ConfigManager:
                         # Normalize path *before* adding to list
                         path_part = line[1:].strip()  # Get content after '-'
                         if path_part:  # Ensure it's not just '-'
-                            doc_dirs.append(normalize_path(path_part))
+                            doc_dirs.append(str(normalize_path(path_part)))
                     elif line.startswith("["):
                         break  # Reached next section
         except FileNotFoundError:
@@ -747,7 +769,8 @@ class ConfigManager:
         """Get the allowed dependency characters from configuration."""
         # Correctly fetch from the config dictionary, falling back to default
         return self.config.get(
-            "allowed_dependency_chars", copy.deepcopy(DEFAULT_CONFIG["allowed_dependency_chars"])
+            "allowed_dependency_chars",
+            copy.deepcopy(DEFAULT_CONFIG["allowed_dependency_chars"]),
         )
 
     def update_config(self, updates: Dict[str, Any]) -> bool:
@@ -778,7 +801,7 @@ class ConfigManager:
         """
         for k, v in u.items():
             if isinstance(v, dict) and k in d and isinstance(d[k], dict):
-                self._deep_update(d[k], v)
+                self._deep_update(d[k], cast(Dict[str, Any], v))
             else:
                 d[k] = v
 
@@ -830,8 +853,17 @@ class ConfigManager:
         output_settings = self.config.get("output", {})
         return output_settings.get(setting_name, default)
 
+    def get_context_packager_setting(
+        self, setting_name: str, default: Any = None
+    ) -> Any:
+        """Gets a setting from the 'context_packager' section of the config."""
+        packager_settings = self.config.get("context_packager", {})
+        return packager_settings.get(setting_name, default)
+
     def _apply_environment_overrides(self) -> None:
         """Apply environment variable overrides to configuration."""
+        if self._config is None:
+            return
         environment_config = self._config.get("environment", {})
 
         if not environment_config.get("allow_overrides", True):
@@ -895,13 +927,16 @@ class ConfigManager:
     def _apply_resource_adjustments(self) -> None:
         """Adjust configuration based on available system resources."""
         try:
+            from .resource_validator import ResourceValidator
+
             validator = ResourceValidator(
                 strict_mode=self.get_resource_setting(
                     "strict_resource_validation", False
                 ),
                 skip_disk_estimation=self.get_resource_setting(
                     "skip_disk_estimation", False
-                )
+                ),
+                excluded_dirs=self.get_excluded_dirs(),
             )
             project_root = get_project_root()
             results = validator.validate_system_resources(str(project_root))
@@ -916,6 +951,8 @@ class ConfigManager:
 
     def _apply_adjustments_from_results(self, results: Dict[str, Any]) -> None:
         """Apply configuration adjustments based on validation results."""
+        if self._config is None:
+            return
         try:
             # Memory-based adjustments
             memory_check = results.get("resource_check", {}).get("memory", {})
@@ -1006,13 +1043,16 @@ class ConfigManager:
             project_path = get_project_root()
 
         try:
+            from .resource_validator import ResourceValidator
+
             validator = ResourceValidator(
                 strict_mode=self.get_resource_setting(
                     "strict_resource_validation", False
                 ),
                 skip_disk_estimation=self.get_resource_setting(
                     "skip_disk_estimation", False
-                )
+                ),
+                excluded_dirs=self.get_excluded_dirs(),
             )
             results = validator.validate_system_resources(project_path)
             self._resource_validation_results = results
@@ -1067,7 +1107,7 @@ class ConfigManager:
 
     def get_optimization_recommendations(self) -> List[str]:
         """Get optimization recommendations based on current configuration and resources."""
-        recommendations = []
+        recommendations: List[str] = []
 
         # Memory-based recommendations
         if self._resource_validation_results:
