@@ -83,12 +83,12 @@ def is_protocol_class(sym: Dict[str, Any]) -> bool:
 
 
 def is_abstract_class(sym: Dict[str, Any], runtime_idx_class: Any = None) -> bool:
-    # We pass the class reference to avoid circular imports if needed, 
+    # We pass the class reference to avoid circular imports if needed,
     # but here we can just use the static method if we import it or pass the result.
     is_in_mro = False
     if runtime_idx_class:
         is_in_mro = runtime_idx_class.is_in_abstract_mro(sym)
-    
+
     return is_in_mro or source_mentions(sym, "(ABC", ", ABC", "abc.ABC")
 
 
@@ -117,6 +117,34 @@ def is_abstract_method(sym: Dict[str, Any]) -> bool:
 
 
 def is_data_container_class(sym: Dict[str, Any]) -> bool:
+    name = str(sym.get("name") or "").lower()
+    inheritance = cast(Dict[str, Any], sym.get("inheritance") or {})
+    bases = cast(List[str], inheritance.get("bases") or [])
+
+    # Check naming conventions
+    if any(
+        suffix in name
+        for suffix in ("template", "schema", "dto", "enum", "dict", "model")
+    ):
+        return True
+
+    # Check base class names
+    for base in bases:
+        base_lower = str(base).lower()
+        if any(
+            keyword in base_lower
+            for keyword in (
+                "template",
+                "schema",
+                "dto",
+                "enum",
+                "dict",
+                "model",
+                "basemodel",
+            )
+        ):
+            return True
+
     return inherits_from(
         sym,
         "BaseModel",

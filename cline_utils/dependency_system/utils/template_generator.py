@@ -3,7 +3,6 @@ import datetime
 import logging
 import os
 import re
-import shutil
 import time
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple

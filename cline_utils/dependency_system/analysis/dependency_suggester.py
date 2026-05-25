@@ -14,7 +14,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
-from cline_utils.dependency_system.core import key_manager, resolve_state_path
+from cline_utils.dependency_system.core import key_manager
 
 # Import only from lower-level modules
 from cline_utils.dependency_system.core.key_manager import KeyInfo
@@ -35,6 +35,7 @@ KEY_MANAGER_DIR = os.path.dirname(os.path.abspath(key_manager.__file__))
 
 
 logger = logging.getLogger(__name__)
+
 
 def strip_json_comments(json_str: str) -> str:
     """
@@ -74,22 +75,30 @@ _PROJECT_SYMBOL_MAP_FILENAME_LOCAL = "project_symbol_map.json"
 #
 # Key for JS ledger: (import_path, source_dir, project_root, tsconfig_path_or_empty)
 # Value: Optional[str] – the resolved tracked path, or None
-_py_import_resolution_ledger: Dict[Tuple[str, str, str, int], List[Tuple[str, bool]]] = {}
+_py_import_resolution_ledger: Dict[
+    Tuple[str, str, str, int], List[Tuple[str, bool]]
+] = {}
 _js_import_resolution_ledger: Dict[Tuple[str, str, str, str], Optional[str]] = {}
 
 
 def _get_symbol_map_path() -> str:
     """Robustly determines the path to project_symbol_map.json."""
     from cline_utils.dependency_system.core import resolve_state_path
+
     try:
         # Use import to find the directory of key_manager.py
         import cline_utils.dependency_system.core.key_manager as km
+
         _core_dir = os.path.dirname(os.path.abspath(km.__file__))
-        return normalize_path(resolve_state_path(_PROJECT_SYMBOL_MAP_FILENAME_LOCAL, _core_dir))
+        return normalize_path(
+            resolve_state_path(_PROJECT_SYMBOL_MAP_FILENAME_LOCAL, _core_dir)
+        )
     except Exception:
         # Fallback relative to this file
         _core_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "core")
-        return normalize_path(resolve_state_path(_PROJECT_SYMBOL_MAP_FILENAME_LOCAL, _core_dir))
+        return normalize_path(
+            resolve_state_path(_PROJECT_SYMBOL_MAP_FILENAME_LOCAL, _core_dir)
+        )
 
 
 # _OLD_PROJECT_SYMBOL_MAP_FILENAME_LOCAL = "project_symbol_map_old.json" # Not used by load, only by save
@@ -154,7 +163,9 @@ def _find_and_parse_tsconfig(
         Tuple of (config_file_path, parsed_data_dict) or None if not found/parsed.
     """
     current_dir = normalize_path(os.path.realpath(os.path.normpath(start_dir)))
-    project_root_norm = normalize_path(os.path.realpath(os.path.normpath(project_root_val)))
+    project_root_norm = normalize_path(
+        os.path.realpath(os.path.normpath(project_root_val))
+    )
     config_filenames = ["tsconfig.json", "jsconfig.json"]
     while True:
         for filename in config_filenames:
@@ -180,7 +191,9 @@ def _find_and_parse_tsconfig(
             project_root_norm
         ):
             break
-        parent_dir = normalize_path(os.path.realpath(os.path.normpath(os.path.dirname(current_dir))))
+        parent_dir = normalize_path(
+            os.path.realpath(os.path.normpath(os.path.dirname(current_dir)))
+        )
         if parent_dir == current_dir:
             break
         current_dir = parent_dir
@@ -1929,7 +1942,14 @@ def _get_ast_links_path_suggester(
     project_root: str, *args: Any, **kwargs: Any
 ) -> List[str]:
     return [
-        resolve_state_path("ast_verified_links.json", KEY_MANAGER_DIR)
+        os.path.join(
+            project_root,
+            "cline_utils",
+            "dependency_system",
+            "core",
+            "state",
+            "ast_verified_links.json",
+        )
     ]
 
 
@@ -1945,7 +1965,14 @@ def _load_ast_verified_links(project_root: str) -> List[Dict[str, str]]:
     Load AST-verified links from project_analyzer for structural evidence
     """
     try:
-        ast_links_path = resolve_state_path("ast_verified_links.json", KEY_MANAGER_DIR)
+        ast_links_path = os.path.join(
+            project_root,
+            "cline_utils",
+            "dependency_system",
+            "core",
+            "state",
+            "ast_verified_links.json",
+        )
         if os.path.exists(ast_links_path):
             with open(ast_links_path, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -2094,6 +2121,7 @@ def suggest_semantic_dependencies_path_based(
             # logger.debug("Global reranker scan limit reached (early check). Skipping semantic analysis.")
             return []
 
+    assigned_char_semantic: Optional[str] = None
     config = ConfigManager()
     promotion_threshold = config.get_threshold("reranker_promotion_threshold")
     embeddings_dir_rel = config.get_path(
@@ -2531,8 +2559,6 @@ def suggest_semantic_dependencies_path_based(
                                     )
                                     threshold_s_weak_semantic = threshold
 
-                                assigned_char_semantic: Optional[str] = None
-
                                 # HIGH CONFIDENCE: Promote to verified dependency character
                                 if rerank_score >= promotion_threshold:
                                     direction = _determine_dependency_direction(
@@ -2591,8 +2617,6 @@ def suggest_semantic_dependencies_path_based(
             else:  # code-code
                 threshold_S_strong_semantic = config.get_threshold("code_similarity")
                 threshold_s_weak_semantic = threshold
-
-            assigned_char_semantic: Optional[str] = None
 
             # HIGH CONFIDENCE: Promote to verified dependency character
             if confidence >= promotion_threshold:

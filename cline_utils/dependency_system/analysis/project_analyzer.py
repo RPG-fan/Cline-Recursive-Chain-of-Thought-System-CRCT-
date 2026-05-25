@@ -4,7 +4,6 @@ import fnmatch
 import json
 import logging
 import os
-import shutil
 import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -229,9 +228,15 @@ def analyze_project(
     existing_dependency_state: Dict[Tuple[str, str], Tuple[str, Set[str]]] = {}
     try:
         # Load tracker paths from tracker_map.json
-        core_dir = os.path.dirname(os.path.abspath(key_manager.__file__))
         tracker_map_path = normalize_path(
-            resolve_state_path("tracker_map.json", core_dir)
+            os.path.join(
+                project_root,
+                "cline_utils",
+                "dependency_system",
+                "core",
+                "state",
+                "tracker_map.json",
+            )
         )
         if os.path.exists(tracker_map_path):
             with open(tracker_map_path, "r", encoding="utf-8") as f:
@@ -439,6 +444,7 @@ def analyze_project(
                     f"  INFO: {len(validation_results['info'])} informational items"
                 )
 
+        core_dir = os.path.dirname(os.path.abspath(key_manager.__file__))
         # Save merged map with backup
         symbol_map_path = normalize_path(
             resolve_state_path(PROJECT_SYMBOL_MAP_FILENAME, core_dir)
@@ -456,14 +462,24 @@ def analyze_project(
 
         # Realign locked transparency registry entries using the new symbol map
         try:
-            from cline_utils.dependency_system.io.transparency_manager import get_transparency_manager
+            from cline_utils.dependency_system.io.transparency_manager import (
+                get_transparency_manager,
+            )
+
             tm = get_transparency_manager()
             realigned_count = tm.realign_locked_entries(merged_symbol_map)
             if realigned_count > 0:
-                logger.info(f"Successfully realigned {realigned_count} drifted transparency entries.")
-                analysis_results["symbol_map_generation"]["realigned_count"] = realigned_count
+                logger.info(
+                    f"Successfully realigned {realigned_count} drifted transparency entries."
+                )
+                analysis_results["symbol_map_generation"][
+                    "realigned_count"
+                ] = realigned_count
         except Exception as e:
-            logger.error(f"Failed to realign locked transparency entries during project analysis: {e}", exc_info=True)
+            logger.error(
+                f"Failed to realign locked transparency entries during project analysis: {e}",
+                exc_info=True,
+            )
     except Exception as e:
         logger.error(f"Failed to merge symbol maps: {e}", exc_info=True)
         analysis_results["symbol_map_generation"]["status"] = "error"
@@ -712,6 +728,7 @@ def analyze_project(
         all_project_ast_links = consolidated_links
 
     if all_project_ast_links:
+
         def _rotate_file_atomically(
             src: str,
             dst: str,
@@ -787,7 +804,7 @@ def analyze_project(
         # Optionally, ensure an empty file or remove old if no data
         core_dir = os.path.dirname(os.path.abspath(key_manager.__file__))
         current_ast_links_path = normalize_path(
-            resolve_state_path(AST_VERIFIED_LINKS_FILENAME, core_dir)
+            os.path.join(core_dir, "state", AST_VERIFIED_LINKS_FILENAME)
         )
         if not os.path.exists(
             current_ast_links_path
@@ -903,9 +920,7 @@ def analyze_project(
     # Get all tracker paths from tracker_map.json
     try:
         core_dir = os.path.dirname(os.path.abspath(key_manager.__file__))
-        tracker_map_path = normalize_path(
-            resolve_state_path("tracker_map.json", core_dir)
-        )
+        tracker_map_path = os.path.join(core_dir, "state", "tracker_map.json")
         if os.path.exists(tracker_map_path):
             with open(tracker_map_path, "r", encoding="utf-8") as f:
                 tracker_map = json.load(f)
@@ -923,16 +938,22 @@ def analyze_project(
                     # Cast trackers_section.values() to avoid 'Unknown' group type
                     for group in cast(Dict[str, Any], trackers_section).values():
                         if isinstance(group, dict):
-                            all_tracker_paths.extend([str(v) for v in cast(Dict[str, Any], group).values()])
+                            all_tracker_paths.extend(
+                                [str(v) for v in cast(Dict[str, Any], group).values()]
+                            )
                         elif isinstance(group, list):
-                            all_tracker_paths.extend([str(v) for v in cast(List[Any], group)])
+                            all_tracker_paths.extend(
+                                [str(v) for v in cast(List[Any], group)]
+                            )
 
             for t_path_entry in all_tracker_paths:
                 # If path is already absolute, use it; otherwise join with project_root
                 if os.path.isabs(t_path_entry):
                     t_path_abs = normalize_path(t_path_entry)
                 else:
-                    t_path_abs = normalize_path(os.path.join(project_root, t_path_entry))
+                    t_path_abs = normalize_path(
+                        os.path.join(project_root, t_path_entry)
+                    )
                 if os.path.exists(t_path_abs):
                     try:
                         structured_data = read_tracker_file_structured(
@@ -1319,7 +1340,7 @@ def analyze_project(
         visualization_backend = config.config.get("visualization", {}).get(
             "backend", "mermaid"
         )
-        if visualization_backend not in {"mermaid", "native"}:
+        if visualization_backend not in {"mermaid", "native", "isometric"}:
             logger.warning(
                 "Unknown visualization backend '%s'; falling back to Mermaid.",
                 visualization_backend,
@@ -1400,8 +1421,17 @@ def analyze_project(
             ) as diagram_tracker:
                 diagram_tracker.update(description="Generating project overview")
                 logger.debug("Generating project overview diagram...")
-                overview_ext = "svg" if visualization_backend == "native" else "mermaid"
-                overview_filename = f"project_overview_dependencies.{overview_ext}"
+                overview_ext = (
+                    "svg"
+                    if visualization_backend in {"native", "isometric"}
+                    else "mermaid"
+                )
+                overview_suffix = (
+                    "_isometric" if visualization_backend == "isometric" else ""
+                )
+                overview_filename = (
+                    f"project_overview_dependencies{overview_suffix}.{overview_ext}"
+                )
                 overview_path = os.path.join(
                     auto_diagram_output_dir_abs, overview_filename
                 )
@@ -1465,12 +1495,17 @@ def analyze_project(
                     )
                     logger.debug(f"Generating diagram for module: {module_key_str}...")
                     module_ext = (
-                        "svg" if visualization_backend == "native" else "mermaid"
+                        "svg"
+                        if visualization_backend in {"native", "isometric"}
+                        else "mermaid"
                     )
-                    module_diagram_filename = (
-                        f"module_{module_key_str}_dependencies.{module_ext}".replace(
-                            "/", "_"
-                        ).replace("\\", "_")
+                    module_suffix = (
+                        "_isometric" if visualization_backend == "isometric" else ""
+                    )
+                    module_diagram_filename = f"module_{module_key_str}_dependencies{module_suffix}.{module_ext}".replace(
+                        "/", "_"
+                    ).replace(
+                        "\\", "_"
                     )
                     module_diagram_path = os.path.join(
                         auto_diagram_output_dir_abs, module_diagram_filename

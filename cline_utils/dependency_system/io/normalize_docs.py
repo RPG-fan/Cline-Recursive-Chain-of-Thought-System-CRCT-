@@ -36,15 +36,14 @@ MAX_INPUT_TOKENS = 30000  # 30k tokens max input
 
 
 def load_transparency_registry(project_root: str) -> set[str]:
-    from cline_utils.dependency_system.core import resolve_state_path
-    
-    core_dir = os.path.join(
+    registry_path = os.path.join(
         project_root,
         "cline_utils",
         "dependency_system",
         "core",
+        "state",
+        "transparency_registry.json",
     )
-    registry_path = resolve_state_path("transparency_registry.json", core_dir)
     if not os.path.isfile(registry_path):
         print(f"Warning: Transparency registry not found at {registry_path}")
         return set()
@@ -259,10 +258,7 @@ def prepare_normalization(
                 crct_key = f"[FILL: CRCT key for {filename}]"
             if not tracker_ref:
                 tracker_ref = f"[FILL: path to tracker for {filename}]"
-            print(
-                f"Bootstrapping {rel_path} with placeholder STATION_HEADER fields."
-            )
-
+            print(f"Bootstrapping {rel_path} with placeholder STATION_HEADER fields.")
 
         # Extract existing context and overview to leverage in prompting
         existing_context = ""
@@ -613,7 +609,6 @@ def normalize_docs_batch(
                     .replace("_", " ")
                     .title()
                 )
-
 
             existing_context = ""
             existing_overview = ""

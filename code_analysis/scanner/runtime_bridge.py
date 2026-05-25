@@ -87,8 +87,8 @@ class RuntimeIndex:
 
     def _build(self):
         self._all_methods = defaultdict(set)  # method_name -> set(Class_name)
-        self._file_defined_classes = defaultdict(set) # file_path -> set(Class_name)
-        
+        self._file_defined_classes = defaultdict(set)  # file_path -> set(Class_name)
+
         for raw_path, finfo in self.raw.items():
             fp = self.norm(raw_path)
             classes_val = finfo.get("classes") or []
@@ -124,7 +124,7 @@ class RuntimeIndex:
 
             # Determine active classes in this file
             active_classes = set(self._file_defined_classes[file_path])
-            
+
             # Add imported classes
             imports_list = finfo.get("imports") or []
             for imp in imports_list:
@@ -217,6 +217,44 @@ class RuntimeIndex:
                     inm = imp
                 if inm:
                     _record_ref(inm)
+
+        # ---- Load pre-computed connection maps from transparency_registry.json ----
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+        registry_path = os.path.normpath(
+            os.path.join(
+                project_root,
+                "cline_utils",
+                "dependency_system",
+                "core",
+                "state",
+                "transparency_registry.json",
+            )
+        )
+        if os.path.exists(registry_path):
+            try:
+                print(
+                    f"[runtime] Loading pre-computed connection maps from: {registry_path}"
+                )
+                with open(registry_path, "r", encoding="utf-8") as f:
+                    reg_data = json.load(f)
+                files_dict = reg_data.get("files", {})
+                for fp, metadata in files_dict.items():
+                    if not isinstance(metadata, dict):
+                        continue
+                    norm_fp = self.norm(fp)
+                    conn_maps = metadata.get("connection_maps") or []
+                    for rec in conn_maps:
+                        if not isinstance(rec, dict):
+                            continue
+                        target_symbol = rec.get("target_symbol")
+                        if target_symbol:
+                            self._refs[target_symbol].add(norm_fp)
+            except Exception as e:
+                print(
+                    f"[runtime] Warning: Failed to load connection maps from transparency registry: {e}"
+                )
 
     def symbol_at(self, file_path: str, line: int) -> Optional[Dict[str, Any]]:
         """Return the smallest symbol whose line range encloses *line*."""
@@ -338,11 +376,41 @@ def _should_suppress_issue(issue: Dict[str, Any], ctx: Dict[str, Any]) -> bool:
     qualname = str(owning.get("qualname") or "")
     subtype = str(issue.get("subtype") or "")
     kind = str(owning.get("kind") or "")
+    file_path = str(issue.get("file") or "")
 
     sym_for_checks: Dict[str, Any] = {"inheritance": inheritance}
     if "." not in qualname and kind == "class":
         sym_for_checks["methods"] = []
 
+    # 1. Suppress stubs in test files or if the name indicates a mock/noop callback
+    is_test_file = (
+        "test_" in file_path.lower()
+        or "/tests/" in file_path.lower()
+        or "\\tests\\" in file_path.lower()
+    )
+    name_lower = (qualname or issue.get("content") or "").lower()
+    is_mock_or_noop = (
+        name_lower.startswith("mock")
+        or name_lower.startswith("test")
+        or "mock_" in name_lower
+        or "noop" in name_lower
+        or "dummy" in name_lower
+        or "callback" in name_lower
+        or name_lower.endswith("_cb")
+        or name_lower == "teardown"
+        or name_lower == "setup"
+    )
+    if is_test_file or is_mock_or_noop:
+        if subtype in {
+            "Empty/Stub Function",
+            "Empty/Stub Class",
+            "Bare Class",
+            "Concrete Stub Method",
+            "Async Stub",
+        }:
+            return True
+
+    # 2. Suppress abstract method/class stubs
     if ctx.get("abstract_method") or ctx.get("abstract_class"):
         if subtype in {
             "NotImplementedError",
@@ -353,17 +421,20 @@ def _should_suppress_issue(issue: Dict[str, Any], ctx: Dict[str, Any]) -> bool:
         }:
             return True
 
+    # 3. Suppress markers/exceptions
     if subtype == "Empty/Stub Class" and heuristics.is_marker_exception_class(
         sym_for_checks
     ):
         return True
 
-    if subtype == "Bare Class" and (
+    # 4. Suppress TypedDict/Enum data container classes (Bare and Empty/Stub Class)
+    if subtype in {"Empty/Stub Class", "Bare Class"} and (
         ctx.get("data_container_class")
         or heuristics.is_data_container_class(sym_for_checks)
     ):
         return True
 
+    # 5. Suppress stubs on Protocol classes
     if (
         subtype
         in {
@@ -376,6 +447,12 @@ def _should_suppress_issue(issue: Dict[str, Any], ctx: Dict[str, Any]) -> bool:
         and heuristics.is_protocol_class(sym_for_checks)
     ):
         return True
+
+    # 6. Suppress regex-based "simplified", "placeholder", "for now", "in a real" findings
+    # if they occur inside a function/method/class that has a substantial (non-trivial) body.
+    if subtype in {"simplified", "placeholder", "for now", "in a real"}:
+        if ctx.get("has_trivial_body") is False:
+            return True
 
     return False
 
@@ -521,7 +598,7 @@ def _emit_runtime_issues_for_symbol(
                 }
             )
 
-    # 5. Orphan / Dead Unexported Code
+    # 5. Orphan
     if name and not name.startswith("_"):
         # For methods, query using qualname (which is Class.method).
         # For other kinds, query using name.
@@ -542,36 +619,20 @@ def _emit_runtime_issues_for_symbol(
                     }
                 )
         else:
-            # "Dead Unexported Code": unexported symbol with zero callers *anywhere*.
-            # Guards to avoid high false-positive rates:
-            #   1. Skip dunder names (__init__, __str__, etc.) — called implicitly
-            #      by the Python runtime, never by static call sites.
-            #   2. Skip trivial-body symbols — they are already caught by the
-            #      Annotated Stub / Concrete Stub Method / Async Stub rules and
-            #      tagging them as "dead" adds no signal.
-            #   3. Skip symbols defined in test files — pytest collects and runs
-            #      them by convention; they will never have static caller refs.
-            is_dunder = name.startswith("__") and name.endswith("__")
-            is_in_test_file = (
-                os.path.basename(file_path).startswith("test_")
-                or os.path.basename(file_path).endswith("_test.py")
-                or os.sep + "tests" + os.sep in file_path
-                or "/tests/" in file_path
-            )
-            if not is_dunder and not is_trivial and not is_in_test_file:
-                callers = idx.callers_of(query_name, exclude_file=None)
-                if not callers:
-                    sink.append(
-                        {
-                            "type": "Unused Item (runtime)",
-                            "subtype": "Dead Unexported Code",
-                            "file": file_path,
-                            "line": line,
-                            "content": f"{qualname} is unexported and has zero caller references",
-                            "_runtime_only": True,
-                            "_qualname": qualname,
-                        }
-                    )
+            # If unexported, verify it has zero callers anywhere (internal or external)
+            callers = idx.callers_of(query_name, exclude_file=None)
+            if not callers:
+                sink.append(
+                    {
+                        "type": "Unused Item (runtime)",
+                        "subtype": "Dead Unexported Code",
+                        "file": file_path,
+                        "line": line,
+                        "content": f"{qualname} is unexported and has zero caller references",
+                        "_runtime_only": True,
+                        "_qualname": qualname,
+                    }
+                )
 
 
 def enrich_issue(issue: Dict[str, Any], idx: RuntimeIndex) -> Dict[str, Any]:
@@ -609,6 +670,7 @@ def enrich_issue(issue: Dict[str, Any], idx: RuntimeIndex) -> Dict[str, Any]:
         ctx["abstract_method"] = heuristics.is_abstract_method(sym)
         if sym.get("_kind") == "class":
             ctx["data_container_class"] = heuristics.is_data_container_class(sym)
+        ctx["has_trivial_body"] = heuristics.has_trivial_body(sym)
 
         # Cross-file links
         name = sym.get("name")
