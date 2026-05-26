@@ -44,6 +44,7 @@ from code_analysis.scanner.runtime_bridge import (
 )
 from code_analysis.reporting.markdown_formatter import format_markdown
 from code_analysis.reporting.json_exporter import export_json
+from code_analysis.reporting.backlog_generator import generate_backlog
 from code_analysis.scanner.comment_index import scan_project_comments
 
 config = ConfigManager()
@@ -128,6 +129,7 @@ def main():
     # Batch run static scans concurrently
     if scanned_file_paths:
         from cline_utils.dependency_system.utils.batch_processor import BatchProcessor
+
         print(f"Scanning {len(scanned_file_paths)} files in parallel...")
         processor = BatchProcessor(phase_name="Scanning Files", show_progress=True)
         batch_results = processor.process_items(scanned_file_paths, scan_file)
@@ -183,6 +185,11 @@ def main():
 
     print(f"Report generated at {OUTPUT_FILE}")
     print(f"JSON report at {OUTPUT_JSON_FILE}")
+
+    # ---- Generate Backlog ----
+    backlog_path = os.path.join(project_root, "cline_docs", "technical_debt_backlog.md")
+    print("Generating technical debt backlog...")
+    generate_backlog(all_issues, project_root, backlog_path, code_roots)
 
 
 if __name__ == "__main__":

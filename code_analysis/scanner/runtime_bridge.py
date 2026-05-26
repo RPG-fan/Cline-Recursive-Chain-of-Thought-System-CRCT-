@@ -606,6 +606,8 @@ def _emit_runtime_issues_for_symbol(
 
         if idx.is_exported(file_path, name):
             callers = idx.callers_of(query_name, exclude_file=file_path)
+            if not callers and kind == "method":
+                callers = idx.callers_of(name, exclude_file=file_path)
             if not callers:
                 sink.append(
                     {
@@ -621,6 +623,8 @@ def _emit_runtime_issues_for_symbol(
         else:
             # If unexported, verify it has zero callers anywhere (internal or external)
             callers = idx.callers_of(query_name, exclude_file=None)
+            if not callers and kind == "method":
+                callers = idx.callers_of(name, exclude_file=None)
             if not callers:
                 sink.append(
                     {
@@ -683,6 +687,8 @@ def enrich_issue(issue: Dict[str, Any], idx: RuntimeIndex) -> Dict[str, Any]:
                 target_name = name
 
             callers = idx.callers_of(target_name, exclude_file=file_path)
+            if not callers and sym.get("_kind") == "method":
+                callers = idx.callers_of(name, exclude_file=file_path)
             if callers:
                 ctx["linked_areas"] = {
                     "callers": callers[:20],
