@@ -141,6 +141,7 @@ If a required file (from the list below) is missing, handle its creation as spec
 * **For tracker files (`module_relationship_tracker.md`, `doc_tracker.md`, mini-trackers)**, do *not* create or modify manually. Always use the `dependency_processor.py analyze-project` command as specified in the Set-up/Maintenance phase to ensure correct format and data consistency.
 * **Note: `{module_name}_module.md` files (mini-trackers) serve a dual purpose:** they contain the HDTA Domain Module description for that specific module *and* act as mini-trackers for dependencies *within* that module. Dependencies are managed via `dependency_processor.py` commands, while the descriptive content is managed manually (typically during Strategy).
 * `progress.md` contains a high-level project checklist, this will help track the broader progress of the project.
+* **`[SKILLS_WORKFLOWS]`** in `.clinerules/default-rules.md` lists the relative paths to active custom skill packages and workflow definition directories (e.g., `.agent/skills/comment-skill`). These pathways provide the agent with direct lookup locations for project-specific workflow enhancements and specialized skill guidelines that should be consulted when performing relevant tasks.
 
 **`.clinerules/default-rules.md` File Format (Example):**
 
@@ -159,6 +160,9 @@ next_phase: "Set-up/Maintenance"
 [DOC_DIRECTORIES]
 - docs
 - documentation
+
+[SKILLS_WORKFLOWS]
+- .agent/skills/comment-skill
 
 [LEARNING_JOURNAL]
 - Regularly updating {memory_dir} and any instruction files help me to remember what I have done and what still needs to be done so I don't lose track.

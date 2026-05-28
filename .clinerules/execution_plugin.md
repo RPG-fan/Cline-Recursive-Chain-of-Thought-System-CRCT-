@@ -142,7 +142,9 @@
      - Use existing dependencies where possible. Avoid adding new external libraries unless explicitly planned.
      - If code changes introduce *new functional dependencies* between project files, prepare to update the relevant mini-tracker (see MUP Additions, Section IV).
     9.  **Security**:
-   - Follow secure coding practices to mitigate vulnerabilities (e.g., avoid injection risks, secure credential handling).
+     - Follow secure coding practices to mitigate vulnerabilities (e.g., avoid injection risks, secure credential handling).
+    10. **WIP Markings (CRITICAL)**:
+     - Note that any areas or code blocks that require additional steps, deferred logic, or future modifications **require** a clear, descriptive `# WIP` tag (or language-appropriate comment syntax like `// WIP` or `<!-- WIP -->`) directing to the additional work needed. The system is blind without these markers to direct it during subsequent sweeps or handoffs. Reference the `comment-skill` package path defined under `[SKILLS_WORKFLOWS]` in `.clinerules/default-rules.md` for proper in-file comment-based navigation and standards.
 
 4.  **Execution Flowchart**
 
