@@ -80,10 +80,13 @@ MANUAL_FOREIGN_PINS_META_KEY = "manual_foreign_pins_json"
 def _get_core_dir_for_ast_links() -> Optional[str]:
     try:
         from cline_utils.dependency_system.core import resolve_state_path
+
         _key_manager_module_for_path = __import__(
             "cline_utils.dependency_system.core.key_manager", fromlist=[""]
         )
-        _core_dir = os.path.dirname(os.path.abspath(_key_manager_module_for_path.__file__))
+        _core_dir = os.path.dirname(
+            os.path.abspath(_key_manager_module_for_path.__file__)
+        )
         _ast_path = resolve_state_path(AST_VERIFIED_LINKS_FILENAME, _core_dir)
         return os.path.dirname(_ast_path)
     except (ImportError, AttributeError):
@@ -493,8 +496,12 @@ def write_mini_tracker_with_template_preservation(
         else []
     )
 
+    # --- Atomic Write: write to a temp file first, then replace the target ---
+    # This prevents partial writes (e.g., from a crash or duplicate-write race)
+    # from leaving zero-byte or corrupted files on disk.
+    temp_file = output_file + ".tmp_" + str(os.getpid())
     try:
-        with open(output_file, "w", encoding="utf-8", newline="\n") as f:
+        with open(temp_file, "w", encoding="utf-8", newline="\n") as f:
             # 1. Write header (content before start marker or full template)
             if existing_content_start_idx != -1:  # Markers found, preserve header
                 for i in range(
@@ -580,13 +587,34 @@ def write_mini_tracker_with_template_preservation(
                     # A robust check would see if f.tell() is right after GRID_END---
                     f.write(f"{end_marker}\n")
 
+        # --- Atomically replace target file with temp file ---
+        # os.replace is atomic on the same filesystem (which temp_file is, since
+        # it's in the same directory). This prevents readers from seeing a
+        # partially-written or zero-byte file.
+        os.replace(temp_file, output_file)
         logger.debug(f"Successfully wrote mini tracker content to: {output_file}")
     except Exception as e_write_mini:
         logger.error(
             f"Error during write_mini_tracker_with_template_preservation for {output_file}: {e_write_mini}",
             exc_info=True,
         )
-        raise TrackerIOError(tracker_path=output_file, operation="write_mini_template_preservation") from e_write_mini
+        # Clean up temp file if it still exists after a failure
+        try:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+        except Exception:
+            pass
+        raise TrackerIOError(
+            tracker_path=output_file, operation="write_mini_template_preservation"
+        ) from e_write_mini
+    finally:
+        # Safety cleanup: remove temp file if it somehow still exists
+        # (e.g., if os.replace failed between file close and replace)
+        try:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+        except Exception:
+            pass
 
 
 # --- Patched: Top-level write_tracker_file ---
@@ -625,7 +653,7 @@ def write_tracker_file(
                     "reason": "grid_validation_failure",
                     "expected_size": expected_grid_size,
                     "actual_size": len(grid_rows_ordered),
-                }
+                },
             )
 
         # --- Ensure grid_rows_ordered matches expected_grid_size ---
@@ -865,7 +893,6 @@ def _merge_grids(
     for i in range(merged_size):
         if i < merged_size:
             merged_decompressed_grid_rows[i][i] = DIAGONAL_CHAR  # Safety check
-
 
     # Helper to decompress a list of rows, robustly
     def safe_decompress_rows(
@@ -1399,14 +1426,16 @@ def create_mini_tracker(
         logger.error(
             f"I/O Error creating mini tracker {output_file}: {e_io}", exc_info=True
         )
-        raise TrackerIOError(tracker_path=output_file, operation="create_mini") from e_io
+        raise TrackerIOError(
+            tracker_path=output_file, operation="create_mini"
+        ) from e_io
     except Exception as e_exc:
         logger.exception(
             f"Unexpected error creating mini tracker {output_file}: {e_exc}"
         )
-        raise TrackerIOError(tracker_path=output_file, operation="create_mini") from e_exc
-
-
+        raise TrackerIOError(
+            tracker_path=output_file, operation="create_mini"
+        ) from e_exc
 
 
 # Shared helper used by consolidation and pruning: determines whether a path

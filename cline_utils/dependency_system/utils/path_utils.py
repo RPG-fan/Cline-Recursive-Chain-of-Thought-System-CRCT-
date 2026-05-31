@@ -8,16 +8,66 @@ Handles path normalization, validation, and comparison.
 import fnmatch
 import logging
 import os
+import re
 from typing import Dict, List, Optional, Tuple
 
 PathMigrationInfo = Dict[str, Tuple[Optional[str], Optional[str]]]
 
 logger = logging.getLogger(__name__)
 
+# Regex to strip invisible/zero-width Unicode characters that can poison filenames.
+# Strips: ZWSP (U+200B), ZWNJ (U+200C), ZWJ (U+200D), BOM/ZWNBS (U+FEFF),
+# Word Joiner (U+2060), Left-to-Right Mark (U+200E), Right-to-Left Mark (U+200F),
+# and other format characters (Unicode category "Cf") except normal whitespace.
+#
+# Also strips ASCII control characters (0x00-0x1F, 0x7F) that are NOT normal
+# whitespace (tab, newline, carriage return are excluded from stripping since
+# they should never appear in a path anyway on modern filesystems).
+_INVISIBLE_CHARS_RE = re.compile(
+    "["
+    "\u200b"  # ZERO WIDTH SPACE
+    "\u200c"  # ZERO WIDTH NON-JOINER
+    "\u200d"  # ZERO WIDTH JOINER
+    "\u200e"  # LEFT-TO-RIGHT MARK
+    "\u200f"  # RIGHT-TO-LEFT MARK
+    "\u2060"  # WORD JOINER
+    "\u2061"  # FUNCTION APPLICATION
+    "\u2062"  # INVISIBLE TIMES
+    "\u2063"  # INVISIBLE SEPARATOR
+    "\u2064"  # INVISIBLE PLUS
+    "\ufffe"  # NON-CHARACTER
+    "\ufeff"  # ZERO WIDTH NO-BREAK SPACE (BOM)
+    "\u00ad"  # SOFT HYPHEN
+    "\u034f"  # COMBINING GRAPHEME JOINER
+    "\u061c"  # ARABIC LETTER MARK
+    "\u115f"  # HANGUL CHOSEONG FILLER
+    "\u1160"  # HANGUL JUNGSEONG FILLER
+    "\u17b4"  # KHMER VOWEL INHERENT AQ
+    "\u17b5"  # KHMER VOWEL INHERENT AA
+    "\u180e"  # MONGOLIAN VOWEL SEPARATOR
+    "\u3164"  # HANGUL FILLER
+    "\uffa0"  # HALFWIDTH HANGUL FILLER
+    "]+",
+    re.UNICODE,
+)
+
+
+def _strip_invisible_chars(path: str) -> str:
+    """Remove invisible/zero-width Unicode characters from a path string."""
+    return _INVISIBLE_CHARS_RE.sub("", path)
+
 
 def normalize_path(path: str) -> str:
     """
     Normalize a file path for consistent comparison.
+
+    This function:
+    - Makes relative paths absolute
+    - Normalizes path separators to forward slashes
+    - Uppercases the drive letter on Windows
+    - Removes trailing slashes (except for root dirs)
+    - Strips invisible Unicode characters (e.g. zero-width spaces)
+      that can cause duplicate-filename corruption
 
     Args:
         path: Path to normalize
@@ -25,6 +75,10 @@ def normalize_path(path: str) -> str:
     Returns:
         Normalized path
     """
+    if not path:
+        return ""
+    # Strip invisible characters FIRST so they don't propagate
+    path = _strip_invisible_chars(path)
     if not path:
         return ""
     if not os.path.isabs(path):

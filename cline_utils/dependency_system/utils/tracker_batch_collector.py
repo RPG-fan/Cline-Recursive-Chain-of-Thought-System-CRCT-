@@ -110,6 +110,11 @@ class TrackerBatchCollector:
         """
         Add a tracker update to the batch.
 
+        If an update for the same output_file already exists, the newer update
+        replaces the older one. This prevents double-writes to the same file
+        (e.g., when two paths with invisible-character differences normalize
+        to the same target), avoiding corruption from overlapping writes.
+
         Args:
             update: A TrackerUpdate object containing all data needed for the update
 
@@ -119,7 +124,19 @@ class TrackerBatchCollector:
         if not update:
             raise ValueError("Cannot add None update to batch")
 
-        self.pending_updates.append(update)
+        # Deduplicate by output_file: if an update for the same file already
+        # exists, replace it with the newer one (last-write-wins, which is
+        # correct for the batch collector's final state semantics).
+        for i, existing in enumerate(self.pending_updates):
+            if existing.output_file == update.output_file:
+                logger.debug(
+                    f"Replacing existing update for {os.path.basename(update.output_file)} "
+                    f"(type: {existing.tracker_type}) with newer update (type: {update.tracker_type})"
+                )
+                self.pending_updates[i] = update
+                break
+        else:
+            self.pending_updates.append(update)
         try:
             config = ConfigManager()
             get_priority = config.get_char_priority

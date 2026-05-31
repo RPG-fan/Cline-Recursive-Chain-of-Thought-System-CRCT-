@@ -22,7 +22,7 @@ from cline_utils.dependency_system.core.key_manager import (
 from .cache_manager import cached
 from .cache_manager import normalize_path_cached as normalize_path
 from .config_manager import ConfigManager
-from .path_utils import PathMigrationInfo
+from .path_utils import PathMigrationInfo, _strip_invisible_chars
 
 logger = logging.getLogger(__name__)
 
@@ -366,10 +366,27 @@ def find_all_tracker_paths(
             mini_tracker_pattern = os.path.join(code_root_abs, "**", "*_module.md")
             try:
                 found_mini_trackers = glob.glob(mini_tracker_pattern, recursive=True)
-                normalized_mini_paths = {
-                    normalize_path(mt_path) for mt_path in found_mini_trackers
-                }
+                normalized_mini_paths: Set[str] = set()
+                warned_invisible = False
+                for mt_path in found_mini_trackers:
+                    stripped = _strip_invisible_chars(mt_path)
+                    if stripped != mt_path:
+                        if not warned_invisible:
+                            logger.warning(
+                                f"Found mini tracker path with invisible Unicode characters: {repr(mt_path)}. Stripping them."
+                            )
+                            warned_invisible = True
+                    normed = normalize_path(stripped)
+                    normalized_mini_paths.add(normed)
                 all_tracker_paths.update(normalized_mini_paths)
+                if warned_invisible:
+                    # Log the total count of affected paths discovered
+                    affected_count = sum(
+                        1 for p in found_mini_trackers if _strip_invisible_chars(p) != p
+                    )
+                    logger.warning(
+                        f"Filtered {affected_count} mini tracker path(s) with invisible characters under '{code_root_rel}'."
+                    )
                 logger.debug(
                     f"Found {len(normalized_mini_paths)} mini trackers under '{code_root_rel}'."
                 )
