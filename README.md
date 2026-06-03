@@ -164,6 +164,51 @@ Welcome to the **Cline Recursive Chain-of-Thought System (CRCT)**, a framework d
 
 ---
 
+## CRCT System File Updater
+
+The **CRCT System File Updater** (`crct_updater.py`) keeps your CRCT framework files in sync with the upstream repository. It uses the GitHub Git Trees API to compare your local files against the `main` branch and downloads only what has changed, without touching your project code or user-customized files.
+
+### How it works
+
+- Fetches the upstream repository tree in **2 API calls**, regardless of file count.
+- Computes local **Git blob SHAs** and compares them to remote SHAs to detect real changes.
+- Before overwriting any file, checks its **modification time (mtime)**. If your local copy is newer than the remote commit, it is treated as a local customization and **left untouched**.
+- Only files under the managed paths (`cline_docs/CRCT_Documentation/`, `cline_docs/templates/`, `code_analysis/`, `cline_utils/`, `.agent/`, `.clinerules/`) are ever touched.
+
+### Quick reference
+
+```bash
+# Dry-run: see what would change without writing anything
+python -m cline_utils.dependency_system.utils.crct_updater --check
+
+# Interactive update (prompts before writing)
+python -m cline_utils.dependency_system.utils.crct_updater
+
+# Enable automatic background checks on every dependency_processor run (1-hour cooldown)
+python -m cline_utils.dependency_system.utils.crct_updater --enable-auto
+
+# Disable automatic background checks
+python -m cline_utils.dependency_system.utils.crct_updater --disable-auto
+
+# Show current config and last-run info
+python -m cline_utils.dependency_system.utils.crct_updater --status
+```
+
+### When to use the auto-update feature
+
+Enable auto-updates (`--enable-auto`) when you want to stay current with upstream improvements automatically — for example, on a fresh install or on a project where you are not modifying any CRCT framework files directly. The 1-hour cooldown ensures network calls are infrequent and the check is fully silent, never blocking your normal workflow.
+
+### ⚠ When to avoid auto-updates
+
+> [!WARNING]
+> **Do not enable auto-updates if you have made intentional modifications to any CRCT system files** — for example, custom logic in `.clinerules/`, bespoke `.agent/` workflows, or edited `cline_utils/` modules. Although the mtime gate protects files you have edited more recently than the last upstream commit, any file whose mtime predates the latest remote commit will be overwritten automatically.
+>
+> In this case, use `--check` to review diffs before committing to an update, or keep auto-updates disabled and run updates manually when you choose to merge upstream changes.
+
+A full deep-dive on the updater — including configuration options, the state file, exclusion rules, and advanced usage — will be covered in a dedicated documentation page in a future update.
+
+---
+
 ## Project Structure
 
 ```

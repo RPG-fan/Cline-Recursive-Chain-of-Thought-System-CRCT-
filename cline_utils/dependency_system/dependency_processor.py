@@ -8,21 +8,22 @@ Processes command-line arguments and delegates to appropriate handlers.
 import argparse
 import json
 import logging
-from cline_utils.dependency_system.io.file_io import read_file_content_safely
 import os
 import subprocess
 import sys
 from collections import defaultdict
 from logging import LogRecord
 from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple, Union, cast
+from pathlib import Path
+import time
 
+from cline_utils.dependency_system.utils.placeholder_resolver import PreparedPair
+from cline_utils.dependency_system.io.file_io import read_file_content_safely
 from cline_utils.dependency_system.analysis.dependency_analyzer import analyze_file
 from cline_utils.dependency_system.analysis.dependency_suggester import (
     load_project_symbol_map,
 )
 
-# Type alias for sortable parts
-SortableParts = list[str]
 from cline_utils.dependency_system.analysis.embedding_manager import (
     generate_symbol_essence_string,
 )
@@ -108,6 +109,9 @@ from cline_utils.dependency_system.core.exceptions_enhanced import (
     ParsingError,
     FileAnalysisError,
 )
+from cline_utils.dependency_system.utils.crct_updater import (
+    auto_update_check as _crct_auto_update,
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -116,8 +120,25 @@ logger = logging.getLogger(__name__)
 KEY_DEFINITIONS_START_MARKER = "---KEY_DEFINITIONS_START---"
 KEY_DEFINITIONS_END_MARKER = "---KEY_DEFINITIONS_END---"
 
+# Type alias for sortable parts
+SortableParts = list[str]
+
 
 # --- Helper Functions ---
+def _maybe_auto_update() -> None:
+    """
+    Fire the CRCT system-file updater if the user has opted in and the
+    1-hour cooldown has elapsed. Designed to be completely silent and
+    non-blocking — any error is swallowed so it can never disrupt the
+    normal dependency processing flow.
+    """
+    try:
+        project_root = Path(get_project_root())
+        _crct_auto_update(project_root=project_root)
+    except Exception:
+        pass  # updater must never crash the processor
+
+
 def _configure_stdio_for_unicode() -> None:
     """Avoid UnicodeEncodeError on Windows terminals using legacy code pages."""
     for stream_name in ("stdout", "stderr"):
@@ -349,7 +370,6 @@ def handle_determine_dependency(args: argparse.Namespace) -> int:
 
 def command_handler_analyze_file(args: argparse.Namespace) -> int:
     """Handle the analyze-file command."""
-    import json
 
     try:
         if not os.path.exists(args.file_path):
@@ -395,7 +415,6 @@ def command_handler_analyze_file(args: argparse.Namespace) -> int:
 
 def command_handler_analyze_project(args: argparse.Namespace) -> int:
     """Handle the analyze-project command."""
-    import json
 
     original_cwd: Optional[str] = None  # Initialize to None
     try:
@@ -1154,7 +1173,6 @@ def handle_clear_caches(args: argparse.Namespace) -> int:
 def handle_build_context(args: argparse.Namespace) -> int:
     """Handles the CLI request to build a targeted LLM context package."""
     try:
-        from pathlib import Path
         from cline_utils.dependency_system.io.context_packager import ContextPackager
 
         packager = ContextPackager()
@@ -2024,9 +2042,6 @@ def handle_visualize_dependencies(args: argparse.Namespace) -> int:
         return 1
 
 
-from cline_utils.dependency_system.utils.placeholder_resolver import PreparedPair
-
-
 def _prepare_pair(
     srckey: str,
     srcpath: str,
@@ -2228,8 +2243,6 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
         t_path = gi_to_path.get(tgt_gi)
         if s_path and t_path:
             edges[s_path][t_path] = char
-
-    import time
 
     # ---------------------------------------------------------
     # GLOBAL PHASE 1 & 2: Algorithmic Resolution across ALL trackers
@@ -2859,10 +2872,6 @@ def handle_normalize_docs(args: argparse.Namespace) -> int:
         load_transparency_registry,
         find_normalization_candidates,
     )
-    from cline_utils.dependency_system.analysis.local_llm_processor import (
-        LocalLLMProcessor,
-    )
-    from cline_utils.dependency_system.utils.config_manager import ConfigManager
 
     project_root = get_project_root()
     config_mgr = ConfigManager()
@@ -2926,6 +2935,7 @@ def handle_normalize_docs(args: argparse.Namespace) -> int:
 def main():
     """Parse arguments and dispatch to handlers."""
     _configure_stdio_for_unicode()
+    _maybe_auto_update()
     parser = argparse.ArgumentParser(description="Dependency tracking system CLI")
     subparsers = parser.add_subparsers(
         dest="command", help="Available commands", required=True
@@ -3333,20 +3343,13 @@ def main():
                 from cline_utils.dependency_system.io.transparency_manager import (
                     get_transparency_manager,
                 )
-                from cline_utils.dependency_system.analysis.dependency_suggester import (
-                    load_project_symbol_map,
-                )
-                from cline_utils.dependency_system.utils.cache_manager import (
-                    get_project_root_cached,
-                )
-                from pathlib import Path
 
                 print(
                     f"Running final populate_comments_hook for {len(args.accumulated_tracker_updates)} accumulated updates..."
                 )
                 try:
                     results = populate_comments_for_batch(
-                        project_root=Path(get_project_root_cached()),
+                        project_root=Path(get_project_root()),
                         updates=args.accumulated_tracker_updates,
                         symbol_map=load_project_symbol_map(),
                         dry_run=False,
