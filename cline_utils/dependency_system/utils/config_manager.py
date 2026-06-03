@@ -53,6 +53,7 @@ DEFAULT_CONFIG = {
         ".tox",
         ".coverage",
         ".cache",
+        "models",
     ],
     "excluded_extensions": [
         ".pyc",
@@ -156,6 +157,8 @@ DEFAULT_CONFIG = {
         "*-checkpoint.md",
         "*debug.txt",
         "*suggestions.log",
+        "AGENTS.md",
+        "GEMINI.md",
     ],
     "visualization": {
         "auto_generate_on_analyze": True,  # Enable auto-generation by default

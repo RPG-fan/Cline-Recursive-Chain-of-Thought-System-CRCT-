@@ -259,9 +259,20 @@ def generate_keys(
     """
     if isinstance(root_paths, str):
         root_paths = [root_paths]
-    for root_path in root_paths:
-        if not os.path.exists(root_path):
-            raise FileNotFoundError(f"Root path '{root_path}' does not exist.")
+
+    # Resolve to absolute normalized paths to enable correct nesting detection
+    resolved_roots = []
+    for rp in root_paths:
+        abs_path = os.path.abspath(rp)
+        if not os.path.exists(abs_path):
+            raise FileNotFoundError(
+                f"Root path '{rp}' (resolved to '{abs_path}') does not exist."
+            )
+        resolved_roots.append(normalize_path(abs_path))
+
+    # Deduplicate while preserving order or sorted for consistency
+    unique_roots = sorted(list(set(resolved_roots)))
+    root_paths = unique_roots
 
     if len(root_paths) > MAX_TOP_LEVEL_ROOTS:
         raise KeyGenerationError(
@@ -621,7 +632,14 @@ def generate_keys(
     # Sort root_paths so top-level letter assignments (A, B, C...) are
     # deterministic regardless of the order the caller supplies them.
     for root_path in sorted(root_paths):
-        process_directory(root_path, exclusion_set_for_processing, parent_info=None)
+        # Build specific exclusion set for this root path to avoid walking into other root paths
+        # that are strictly nested within it.
+        root_exclusions = set(exclusion_set_for_processing)
+        for other_root in root_paths:
+            if other_root != root_path:
+                if other_root.startswith(root_path + "/"):
+                    root_exclusions.add(other_root)
+        process_directory(root_path, root_exclusions, parent_info=None)
 
     # Ensure the returned list contains unique KeyInfo objects (in case of reprocessing/overlaps)
     # Using dict.fromkeys preserves order (Python 3.7+) and ensures uniqueness based on KeyInfo equality

@@ -39,14 +39,19 @@ logger = logging.getLogger(__name__)
 
 def strip_json_comments(json_str: str) -> str:
     """
-    Strip standard multi-line and single-line comments from a JSON string.
+    Strip standard multi-line and single-line comments from a JSON string,
+    ensuring comment symbols inside double-quoted string literals are preserved.
     """
-    # Strip multi-line comments /* ... */
-    pattern = r"/\*.*?\*/"
-    json_str = re.sub(pattern, "", json_str, flags=re.DOTALL)
-    # Strip single-line comments // ...
-    json_str = re.sub(r"//.*", "", json_str)
-    return json_str
+    pattern = r'("(?:\\.|[^"\\])*")|(/\*.*?\*/)|(//[^\r\n]*)'
+
+    def replacer(match):
+        # If it matches a string literal, preserve it
+        if match.group(1) is not None:
+            return match.group(1)
+        # Otherwise, it's a comment; discard it
+        return ""
+
+    return re.sub(pattern, replacer, json_str, flags=re.DOTALL)
 
 
 # Caches for structural dependency analysis moved to cache_manager

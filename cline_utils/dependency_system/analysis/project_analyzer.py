@@ -311,7 +311,7 @@ def analyze_project(
                 if file_path_abs in path_to_key_info:  # Check against the generated map
                     files_to_analyze_abs.append(file_path_abs)
                 else:
-                    logger.warning(f"File found but no key generated: {file_path_abs}")
+                    logger.debug(f"File found but no key generated: {file_path_abs}")
     logger.debug(f"Found {len(files_to_analyze_abs)} files to analyze.")
 
     # --- File Analysis ---

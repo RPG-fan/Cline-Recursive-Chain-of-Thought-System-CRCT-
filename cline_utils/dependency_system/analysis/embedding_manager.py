@@ -349,7 +349,10 @@ def _download_with_retry(
                         downloaded += len(chunk)
 
                         if tracker:
-                            tracker.update(len(chunk), description=f"{downloaded}/{total_size} bytes")
+                            tracker.update(
+                                len(chunk),
+                                description=f"{downloaded}/{total_size} bytes",
+                            )
                         elif total_size > 0:
                             progress = (downloaded / total_size) * 100
                             print(
@@ -368,9 +371,13 @@ def _download_with_retry(
                 return True
 
         except urllib.error.HTTPError as e:
-            logger.warning(f"Download HTTP error (status {e.code}) for {description}: {e.reason}")
+            logger.warning(
+                f"Download HTTP error (status {e.code}) for {description}: {e.reason}"
+            )
             if e.code in (400, 401, 403, 404):
-                logger.error(f"Permanent HTTP error {e.code} encountered. Aborting download.")
+                logger.error(
+                    f"Permanent HTTP error {e.code} encountered. Aborting download."
+                )
                 if tracker:
                     cast(Any, tracker).__exit__(type(e), e, e.__traceback__)
                 if os.path.exists(path):
@@ -381,11 +388,15 @@ def _download_with_retry(
                 return False
 
             if attempt < max_retries - 1:
-                delay = min(30.0, initial_delay * (2**attempt) + random.uniform(0.0, 1.0))
+                delay = min(
+                    30.0, initial_delay * (2**attempt) + random.uniform(0.0, 1.0)
+                )
                 logger.info(f"Retrying transient HTTP error in {delay:.2f} seconds...")
                 time.sleep(delay)
             else:
-                logger.error(f"Failed to download {description} after {max_retries} attempts due to HTTP errors.")
+                logger.error(
+                    f"Failed to download {description} after {max_retries} attempts due to HTTP errors."
+                )
                 if tracker:
                     cast(Any, tracker).__exit__(type(e), e, e.__traceback__)
                 if os.path.exists(path):
@@ -396,13 +407,19 @@ def _download_with_retry(
                 return False
 
         except Exception as e:
-            logger.warning(f"Download attempt {attempt + 1} failed for {description}: {e}")
+            logger.warning(
+                f"Download attempt {attempt + 1} failed for {description}: {e}"
+            )
             if attempt < max_retries - 1:
-                delay = min(30.0, initial_delay * (2**attempt) + random.uniform(0.0, 1.0))
+                delay = min(
+                    30.0, initial_delay * (2**attempt) + random.uniform(0.0, 1.0)
+                )
                 logger.info(f"Retrying in {delay:.2f} seconds...")
                 time.sleep(delay)
             else:
-                logger.error(f"Failed to download {description} after {max_retries} attempts.")
+                logger.error(
+                    f"Failed to download {description} after {max_retries} attempts."
+                )
                 if tracker:
                     cast(Any, tracker).__exit__(type(e), e, e.__traceback__)
                 if os.path.exists(path):
@@ -540,7 +557,9 @@ def _get_tokenizer() -> Optional[Any]:
         if _tokenizer_instance is not None:
             return _tokenizer_instance
     except Exception as e:
-        logger.warning(f"Centralized tokenizer factory failed in embedding_manager: {e}")
+        logger.warning(
+            f"Centralized tokenizer factory failed in embedding_manager: {e}"
+        )
 
     # Fallback to legacy checks if factory failed
     try:
@@ -699,9 +718,12 @@ def _unload_model():
 def _load_project_symbol_map() -> Dict[str, Dict[str, Any]]:
     """Loads the project_symbol_map.json."""
     from cline_utils.dependency_system.core import resolve_state_path
+
     try:
         core_dir = os.path.dirname(os.path.abspath(key_manager_module.__file__))
-        map_path = normalize_path(resolve_state_path(PROJECT_SYMBOL_MAP_FILENAME, core_dir))
+        map_path = normalize_path(
+            resolve_state_path(PROJECT_SYMBOL_MAP_FILENAME, core_dir)
+        )
         if os.path.exists(map_path):
             with open(map_path, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -2856,11 +2878,13 @@ def generate_embeddings(
     existing_metadata = {}
     existing_metadata_by_path: Dict[str, Dict[str, Any]] = {}
     metadata_version = ""
+    metadata_model = ""
     if os.path.exists(metadata_path):
         try:
             with open(metadata_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 metadata_version = str(data.get("version", ""))
+                metadata_model = str(data.get("model", ""))
                 existing_metadata = cast(Dict[str, Any], data.get("keys", {}))
                 for m_v in existing_metadata.values():
                     m_value = cast(Dict[str, Any], m_v)
@@ -2871,11 +2895,20 @@ def generate_embeddings(
                         existing_metadata_by_path[normalize_path(path_value)] = m_value
                     except Exception:
                         continue
-                if metadata_version != EMBEDDING_METADATA_VERSION:
+
+                # Get current model config to verify if the model has changed
+                current_model_config = _select_best_model()
+                current_model_name = current_model_config.get("name", "unknown")
+
+                if (
+                    metadata_version != EMBEDDING_METADATA_VERSION
+                    or metadata_model != current_model_name
+                ):
                     logger.info(
-                        f"Embedding metadata version mismatch "
-                        f"(found='{metadata_version}', expected='{EMBEDDING_METADATA_VERSION}'). "
-                        "Forcing embedding regeneration to refresh SES token counts."
+                        f"Embedding metadata version or model mismatch "
+                        f"(found_ver='{metadata_version}', expected_ver='{EMBEDDING_METADATA_VERSION}', "
+                        f"found_model='{metadata_model}', expected_model='{current_model_name}'). "
+                        "Forcing embedding regeneration."
                     )
                     existing_metadata = {}
                     existing_metadata_by_path = {}
@@ -2907,44 +2940,53 @@ def generate_embeddings(
             should_process = True
         else:
             try:
-                src_mtime = os.path.getmtime(key_info.norm_path)
-                emb_mtime = os.path.getmtime(embedding_path)
-                if src_mtime > emb_mtime:
-                    # mtime changed, but maybe it's just [AUTO] comments.
-                    # Perform "Deep Check" using stored content_hash.
-                    m_item = cast(
-                        Optional[Dict[str, Any]],
-                        (
-                            existing_metadata.get(key_info.key_string)
-                            or existing_metadata_by_path.get(key_info.norm_path)
-                        ),
-                    )
-                    stored_hash = (
-                        str(m_item.get("content_hash"))
-                        if m_item and m_item.get("content_hash")
-                        else None
-                    )
+                # 1. Quick dimension verification to prevent stale shape mismatches
+                current_dim = _select_best_model()["embedding_dim"]
+                arr = np.load(embedding_path, mmap_mode="r")
+                dim_mismatch = arr.shape[0] != current_dim
+                del arr
 
-                    if stored_hash:
-                        raw_content = read_file_content_safely(key_info.norm_path)
-                        if raw_content:
-                            current_hash = calculate_content_hash(
-                                raw_content, key_info.norm_path
-                            )
+                if dim_mismatch:
+                    should_process = True
+                else:
+                    src_mtime = os.path.getmtime(key_info.norm_path)
+                    emb_mtime = os.path.getmtime(embedding_path)
+                    if src_mtime > emb_mtime:
+                        # mtime changed, but maybe it's just [AUTO] comments.
+                        # Perform "Deep Check" using stored content_hash.
+                        m_item = cast(
+                            Optional[Dict[str, Any]],
+                            (
+                                existing_metadata.get(key_info.key_string)
+                                or existing_metadata_by_path.get(key_info.norm_path)
+                            ),
+                        )
+                        stored_hash = (
+                            str(m_item.get("content_hash"))
+                            if m_item and m_item.get("content_hash")
+                            else None
+                        )
 
-                            if current_hash == stored_hash:
-                                # Content is same! Touch .npy to align mtime and skip.
-                                logger.debug(
-                                    f"Skipping {os.path.basename(key_info.norm_path)} due to hash match."
+                        if stored_hash:
+                            raw_content = read_file_content_safely(key_info.norm_path)
+                            if raw_content:
+                                current_hash = calculate_content_hash(
+                                    raw_content, key_info.norm_path
                                 )
-                                os.utime(embedding_path, None)
-                                should_process = False
+
+                                if current_hash == stored_hash:
+                                    # Content is same! Touch .npy to align mtime and skip.
+                                    logger.debug(
+                                        f"Skipping {os.path.basename(key_info.norm_path)} due to hash match."
+                                    )
+                                    os.utime(embedding_path, None)
+                                    should_process = False
+                                else:
+                                    should_process = True
                             else:
                                 should_process = True
                         else:
                             should_process = True
-                    else:
-                        should_process = True
             except OSError:
                 should_process = True
 
@@ -2989,9 +3031,14 @@ def generate_embeddings(
     # Perform all drift checks and realignment/recovery in a single context block
     # to avoid sequential lock acquisition and repeated atomic disk writes.
     try:
-        from cline_utils.dependency_system.io.transparency_manager import get_transparency_manager
+        from cline_utils.dependency_system.io.transparency_manager import (
+            get_transparency_manager,
+        )
+
         tm_manager = get_transparency_manager()
-        logger.info("Performing pre-alignment and drift checks on transparency registry in batch...")
+        logger.info(
+            "Performing pre-alignment and drift checks on transparency registry in batch..."
+        )
         with tm_manager._update_context():
             for key_info in files_to_process:
                 # Trigger read_file_transparently which does check_drift and auto-recovery inside our single context!
@@ -2999,7 +3046,9 @@ def generate_embeddings(
                 # and only write to disk ONCE at the end.
                 read_file_transparently(key_info.norm_path)
     except Exception as e:
-        logger.error(f"Failed during transparency pre-alignment phase: {e}", exc_info=True)
+        logger.error(
+            f"Failed during transparency pre-alignment phase: {e}", exc_info=True
+        )
 
     # 3. Processing Phase
     # Pre-calculate token counts and sort to optimize model loading
@@ -3016,7 +3065,7 @@ def generate_embeddings(
         try:
             fp = key_info_obj.norm_path
             rp = os.path.relpath(fp, project_root)
-            
+
             text_to_embed = _get_text_content_for_embedding(
                 fp, symbol_map, project_root
             )
@@ -3039,10 +3088,12 @@ def generate_embeddings(
                 "tokens": ses_tc,
                 "rel_path": rp,
                 "ses_token_count": ses_tc,
-                "full_token_count": full_tc
+                "full_token_count": full_tc,
             }
         except Exception as ex:
-            logger.error(f"Error preparing embedding for {key_info_obj.norm_path}: {ex}")
+            logger.error(
+                f"Error preparing embedding for {key_info_obj.norm_path}: {ex}"
+            )
             return None
 
     with PhaseTracker(
@@ -3056,13 +3107,13 @@ def generate_embeddings(
             future_to_file = {
                 executor.submit(process_file_prep, ki): ki for ki in files_to_process
             }
-            
+
             # Gather results as they complete
             for future in concurrent.futures.as_completed(future_to_file):
                 ki = future_to_file[future]
                 rp_path = os.path.relpath(ki.norm_path, project_root)
                 prep_tracker.set_description(f"Loaded {os.path.basename(rp_path)}")
-                
+
                 result = future.result()
                 if result:
                     # Update token counts dictionary
@@ -3070,12 +3121,14 @@ def generate_embeddings(
                         "ses_tokens": result["ses_token_count"],
                         "full_tokens": result["full_token_count"],
                     }
-                    processing_queue.append({
-                        "key_info": result["key_info"],
-                        "text": result["text"],
-                        "tokens": result["tokens"],
-                        "rel_path": result["rel_path"],
-                    })
+                    processing_queue.append(
+                        {
+                            "key_info": result["key_info"],
+                            "text": result["text"],
+                            "tokens": result["tokens"],
+                            "rel_path": result["rel_path"],
+                        }
+                    )
                 prep_tracker.update()
 
     # Sort by token count (ascending) to grow context window monotonically
@@ -3375,8 +3428,25 @@ def calculate_similarity(
 
     # 3. Load and Compute
     try:
+        current_dim = _select_best_model()["embedding_dim"]
+
         v1 = np.load(p1)
+        if v1.shape[0] != current_dim:
+            logger.info(f"Removing invalid embedding file (dimension mismatch): {p1}")
+            try:
+                os.remove(p1)
+            except OSError:
+                pass
+            return 0.0
+
         v2 = np.load(p2)
+        if v2.shape[0] != current_dim:
+            logger.info(f"Removing invalid embedding file (dimension mismatch): {p2}")
+            try:
+                os.remove(p2)
+            except OSError:
+                pass
+            return 0.0
 
         # Ensure flat (1D) arrays
         v1 = v1.flatten()

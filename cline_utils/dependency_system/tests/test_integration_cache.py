@@ -748,3 +748,103 @@ def test_is04_embedding_regeneration(test_project: Path) -> None:
     print(
         "Verified: Embedding regeneration appears to have triggered use of new data for similarity."
     )
+
+
+def test_is05_embedding_regeneration_on_model_change(
+    test_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify that shifting model name in config triggers full regeneration of embeddings."""
+    project_root = test_project
+
+    embedding_dir = project_root / "cache" / "embeddings"
+    embedding_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Set model to mock-model-1
+    monkeypatch.setattr(
+        embedding_manager,
+        "_selected_model_config",
+        {"type": "sentence-transformer", "embedding_dim": 384, "name": "mock-model-1"},
+    )
+
+    # Run initial analysis
+    analyze_project(force_analysis=True)
+
+    # Check that metadata has mock-model-1
+    metadata_path = embedding_dir / "metadata.json"
+    assert metadata_path.exists()
+    with open(metadata_path, "r", encoding="utf-8") as f:
+        meta_data = json.load(f)
+    assert meta_data.get("model") == "mock-model-1"
+
+    # Set up spy for _flush_batch
+    flush_calls = 0
+    original_flush = embedding_manager._flush_batch
+
+    def mock_flush(*args, **kwargs):
+        nonlocal flush_calls
+        flush_calls += 1
+        return original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(embedding_manager, "_flush_batch", mock_flush)
+
+    # 2. Re-run analysis WITHOUT changing the model - should skip and NOT call _flush_batch
+    analyze_project(force_analysis=False)
+    assert flush_calls == 0  # Should be cached/skipped
+
+    # 3. Change model to mock-model-2
+    monkeypatch.setattr(
+        embedding_manager,
+        "_selected_model_config",
+        {"type": "sentence-transformer", "embedding_dim": 384, "name": "mock-model-2"},
+    )
+
+    # Run analysis - should detect model mismatch and force regeneration
+    analyze_project(force_analysis=False)
+    assert flush_calls > 0  # Must regenerate embeddings
+
+    # Check that metadata now has mock-model-2
+    with open(metadata_path, "r", encoding="utf-8") as f:
+        meta_data_updated = json.load(f)
+    assert meta_data_updated.get("model") == "mock-model-2"
+
+
+def test_is06_embedding_regeneration_on_dim_mismatch(
+    test_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify that a shape/dimension mismatch in an existing `.npy` file forces its regeneration."""
+    project_root = test_project
+
+    embedding_dir = project_root / "cache" / "embeddings"
+    embedding_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Set model config (expected dim = 384)
+    monkeypatch.setattr(
+        embedding_manager,
+        "_selected_model_config",
+        {"type": "sentence-transformer", "embedding_dim": 384, "name": "mock-model-1"},
+    )
+
+    # Write a dummy stale .npy file with a completely different dimension (e.g. 768)
+    npy_path = embedding_dir / "src" / "module_a.py.npy"
+    npy_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_emb = np.zeros(768, dtype=np.float32)
+    np.save(npy_path, stale_emb)
+
+    # Set up spy for _flush_batch
+    flush_calls = 0
+    original_flush = embedding_manager._flush_batch
+
+    def mock_flush(*args, **kwargs):
+        nonlocal flush_calls
+        flush_calls += 1
+        return original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(embedding_manager, "_flush_batch", mock_flush)
+
+    # 2. Run analysis - should detect shape mismatch (768 vs 384) and force regeneration
+    analyze_project(force_analysis=False)
+    assert flush_calls > 0  # Must regenerate due to dimension mismatch
+
+    # Verify the saved file now has 384 elements
+    saved_emb = np.load(npy_path)
+    assert saved_emb.shape[0] == 384

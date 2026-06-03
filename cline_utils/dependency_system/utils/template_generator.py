@@ -92,12 +92,12 @@ def get_item_type(
         normalize_path(os.path.join(project_root, dd))
         for dd in config.get_doc_directories()
     ]
-    for code_root in code_root_dirs_abs:
-        if is_subpath(norm_item_path, code_root) or norm_item_path == code_root:
-            return "code"
     for doc_root in doc_dirs_abs:
         if is_subpath(norm_item_path, doc_root) or norm_item_path == doc_root:
             return "doc"
+    for code_root in code_root_dirs_abs:
+        if is_subpath(norm_item_path, code_root) or norm_item_path == code_root:
+            return "code"
     return None
 
 
