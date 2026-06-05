@@ -875,7 +875,24 @@ def process_file(
     )
 
     src_lines = new_source.splitlines(keepends=True)
-    insert_idx = 0
+
+    def find_minimum_insertion_index(lines: List[str]) -> int:
+        idx = 0
+        coding_re = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
+        while idx < len(lines):
+            line = lines[idx]
+            stripped = line.strip()
+            if stripped.startswith("#!"):
+                idx += 1
+                continue
+            if coding_re.match(line):
+                idx += 1
+                continue
+            break
+        return idx
+
+    min_idx = find_minimum_insertion_index(src_lines)
+    insert_idx = min_idx
 
     # 1.1 Placement logic: Tags take precedence, then docstrings
     tags_end_marker = "---TAGS_END---"
@@ -887,13 +904,19 @@ def process_file(
             break
 
     if not tags_found:
+        # Find the first non-empty line starting from min_idx to check for docstring
+        doc_idx = min_idx
+        while doc_idx < len(src_lines) and not src_lines[doc_idx].strip():
+            doc_idx += 1
+
         # Insert after module docstring if present
-        if src_lines and src_lines[0].startswith(('"""', "'''")):
-            quote = src_lines[0][:3]
-            if src_lines[0].strip().endswith(quote) and len(src_lines[0].strip()) > 3:
-                insert_idx = 1
+        if doc_idx < len(src_lines) and src_lines[doc_idx].strip().startswith(('"""', "'''")):
+            trimmed_start = src_lines[doc_idx].strip()
+            quote = trimmed_start[:3]
+            if trimmed_start.endswith(quote) and len(trimmed_start) > 3:
+                insert_idx = doc_idx + 1
             else:
-                for i in range(1, min(50, len(src_lines))):
+                for i in range(doc_idx + 1, min(doc_idx + 50, len(src_lines))):
                     if src_lines[i].strip().endswith(quote):
                         insert_idx = i + 1
                         break

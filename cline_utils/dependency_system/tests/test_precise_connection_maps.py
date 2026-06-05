@@ -622,3 +622,95 @@ def test_populate_comments_prevents_redundant_writes(tmp_path: Path):
     assert len(backup_files) == 0
 
 
+def test_populate_comments_places_station_header_below_shebang_and_coding(tmp_path: Path):
+    # Case 1: Python file with shebang, coding, and docstring
+    py_source_path = tmp_path / "script.py"
+    py_source_path.write_text(
+        "#!/usr/bin/env python\n"
+        "# -*- coding: utf-8 -*-\n"
+        "\n"
+        '"""\n'
+        "Module docstring.\n"
+        '"""\n'
+        "def foo():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    source = _ki("1A", py_source_path)
+    symbol_data = {
+        "functions": [{"name": "foo", "line": 7}],
+        "classes": [],
+    }
+
+    result = process_file(
+        file_path=py_source_path,
+        source_key="1A",
+        key_info_list=[source],
+        grid_row="o",
+        tracker_ref="mini_tracker.md",
+        entry_from=[],
+        exits_to=[],
+        symbol_data=symbol_data,
+        project_root=tmp_path,
+        dry_run=False,
+        verbose=False,
+    )
+
+    assert result["station_added"] is True
+    content = py_source_path.read_text(encoding="utf-8")
+    lines = content.splitlines()
+
+    # The shebang and coding headers must be at the very top
+    assert lines[0] == "#!/usr/bin/env python"
+    assert lines[1] == "# -*- coding: utf-8 -*-"
+    assert lines[2] == ""
+    assert lines[3] == '"""'
+    assert lines[4] == "Module docstring."
+    assert lines[5] == '"""'
+    # Then the station header block starts
+    assert "STATION_HEADER_START" in lines[6]
+    # And there must be the definition of foo later
+    assert "def foo():" in content
+
+    # Case 2: Node.js file with shebang
+    js_source_path = tmp_path / "script.js"
+    js_source_path.write_text(
+        "#!/usr/bin/env node\n"
+        "console.log('hello');\n",
+        encoding="utf-8",
+    )
+
+    source_js = _ki("2A", js_source_path)
+    js_symbol_data = {
+        "functions": [],
+        "classes": [],
+    }
+
+    result_js = process_file(
+        file_path=js_source_path,
+        source_key="2A",
+        key_info_list=[source_js],
+        grid_row="o",
+        tracker_ref="mini_tracker.md",
+        entry_from=[],
+        exits_to=[],
+        symbol_data=js_symbol_data,
+        project_root=tmp_path,
+        dry_run=False,
+        verbose=False,
+    )
+
+    assert result_js["station_added"] is True
+    content_js = js_source_path.read_text(encoding="utf-8")
+    lines_js = content_js.splitlines()
+
+    # Shebang must be at the top
+    assert lines_js[0] == "#!/usr/bin/env node"
+    # Station header follows
+    assert "STATION_HEADER_START" in lines_js[1]
+    # Rest of script remains
+    assert "console.log('hello');" in content_js
+
+
+
