@@ -1424,7 +1424,12 @@ def generate_symbol_essence_string(
         if scripts:
             parts.append(f"SCRIPTS: {len(scripts)} block(s)")
             for s in cast(List[Dict[str, Any]], scripts):
-                s_content = cast(str, s["content"]).strip()
+                # Use "content" if available, fallback to "url" for HTML files
+                s_content = cast(str, s.get("content", s.get("url", ""))).strip()
+                if not s_content:
+                    logger.debug(
+                        "Script dict missing both 'content' and 'url' keys: %s", s
+                    )
                 # Show more content (up to 4000 chars)
                 lines: List[str] = s_content.split("\n")
                 if len(s_content) > 4000:
@@ -1441,7 +1446,12 @@ def generate_symbol_essence_string(
         if stylesheets:
             parts.append(f"STYLES: {len(stylesheets)} block(s)")
             for s in cast(List[Dict[str, Any]], stylesheets):
-                s_content = cast(str, s["content"]).strip()
+                # Use "content" if available, fallback to "url" for HTML files
+                s_content = cast(str, s.get("content", s.get("url", ""))).strip()
+                if not s_content:
+                    logger.debug(
+                        "Stylesheet dict missing both 'content' and 'url' keys: %s", s
+                    )
                 # Same truncation for styles
                 lines: List[str] = s_content.split("\n")
                 if len(lines) > 40 or len(s_content) > 2000:

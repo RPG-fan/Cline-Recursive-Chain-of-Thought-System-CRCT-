@@ -3497,19 +3497,20 @@ def _analyze_html_file_ts(file_path: str, content: str, result: Dict[str, Any]) 
                     if url and not url.startswith(
                         ("#", "http:", "https:", "mailto:", "tel:", "data:")
                     ):
-                        if query_name == "scripts":
-                            result["scripts"].append({"url": url, "line": line})
-                        elif query_name == "stylesheets":
-                            result["stylesheets"].append({"url": url, "line": line})
-                        elif query_name == "images":
-                            result["images"].append({"url": url, "line": line})
-                        elif query_name == "links":
-                            result["links"].append({"url": url, "line": line})
+                        item = {"url": url, "content": url, "line": line}
+                        result[query_name].append(item)
 
+        # Deduplicate by (url, line) — avoids frozenset TypeError on unhashable values
         for key in ["links", "scripts", "stylesheets", "images"]:
             if result.get(key):
-                unique_items = {frozenset(d.items()) for d in result[key]}
-                result[key] = [dict(fs) for fs in unique_items]
+                seen: set = set()
+                unique: list = []
+                for d in result[key]:
+                    dedup_key = (d.get("url", ""), d.get("line", -1))
+                    if dedup_key not in seen:
+                        seen.add(dedup_key)
+                        unique.append(d)
+                result[key] = unique
 
     except Exception as e:
         logger.error(
