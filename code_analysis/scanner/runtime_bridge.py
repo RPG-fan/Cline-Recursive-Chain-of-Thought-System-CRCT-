@@ -303,11 +303,19 @@ class RuntimeIndex:
 
     @staticmethod
     def is_in_abstract_mro(sym: Dict[str, Any]) -> bool:
-        inh = cast(Dict[str, Any], sym.get("inheritance") or {})
-        bases = cast(List[str], inh.get("bases") or [])
-        mro = cast(List[str], inh.get("mro") or [])
-        joined = " ".join(bases) + " " + " ".join(mro)
-        return "ABC" in joined or "abc." in joined.lower()
+        inh = sym.get("inheritance")
+        if not isinstance(inh, dict):
+            return False
+        orig = inh.get("_haystack_original")
+        low = inh.get("_haystack_lower")
+        if orig is None:
+            bases = inh.get("bases") or []
+            mro = inh.get("mro") or []
+            orig = " ".join(bases) + " " + " ".join(mro)
+            low = orig.lower()
+            inh["_haystack_original"] = orig
+            inh["_haystack_lower"] = low
+        return "ABC" in orig or "abc." in low
 
 
 # ===========================================================================
@@ -353,7 +361,7 @@ def maybe_run_runtime_inspector(project_root_path: str) -> None:
         return
     print("[runtime] CRCT_AUTO_RUNTIME=1; invoking runtime_inspector...")
     try:
-        subprocess.run(
+        subprocess.run(  # nosec B603
             [
                 sys.executable,
                 "-m",
@@ -362,6 +370,7 @@ def maybe_run_runtime_inspector(project_root_path: str) -> None:
             ],
             cwd=safe_root,
             check=False,
+            timeout=300,
         )
     except Exception as e:
         print(f"[runtime] Auto-run failed: {e}")
@@ -529,10 +538,16 @@ def _emit_runtime_issues_for_symbol(
     is_trivial = heuristics.has_trivial_body(sym)
     annotated_return = heuristics.annotated_non_trivial_return(sym)
     decorators = cast(List[str], sym.get("decorators") or [])
-    is_async = bool(sym.get("is_async")) or any(
-        "async" in str(d).lower() for d in decorators
-    )
-    is_abstract = any("abstract" in str(d).lower() for d in decorators)
+    is_async = bool(sym.get("is_async"))
+    is_abstract = False
+    for d in decorators:
+        d_lower = str(d).lower()
+        if "async" in d_lower:
+            is_async = True
+        if "abstract" in d_lower:
+            is_abstract = True
+        if is_async and is_abstract:
+            break
     belongs_to_protocol = owning_class is not None and heuristics.is_protocol_class(
         owning_class
     )
@@ -663,7 +678,7 @@ def enrich_issue(issue: Dict[str, Any], idx: RuntimeIndex) -> Dict[str, Any]:
         if sym.get("decorators"):
             ctx["decorators"] = sym["decorators"]
         if sym.get("inheritance"):
-            ctx["inheritance"] = sym["inheritance"]
+            ctx["inheritance"] = {k: v for k, v in sym["inheritance"].items() if not k.startswith("_")}
         scope: Dict[str, Any] = sym.get("scope_references") or {}
         if scope:
             ctx["scope_references"] = scope
@@ -705,7 +720,7 @@ def enrich_issue(issue: Dict[str, Any], idx: RuntimeIndex) -> Dict[str, Any]:
                 enclosing_class
             )
         if not ctx.get("inheritance") and enclosing_class.get("inheritance"):
-            ctx["inheritance"] = enclosing_class["inheritance"]
+            ctx["inheritance"] = {k: v for k, v in enclosing_class["inheritance"].items() if not k.startswith("_")}
 
     ctx["severity"] = score_severity(issue, ctx)
     issue_copy = dict(issue)
@@ -717,21 +732,26 @@ def enrich_issue(issue: Dict[str, Any], idx: RuntimeIndex) -> Dict[str, Any]:
     return issue_copy
 
 
+_SUBTYPE_SCORES = {
+    "Annotated Stub": 2,
+    "Exported Placeholder": 2,
+    "Concrete Stub Method": 2,
+    "Empty/Stub Function": 1,
+    "Empty/Stub Class": 1,
+    "Async Stub": 1,
+}
+
+
 def score_severity(issue: Dict[str, Any], ctx: Dict[str, Any]) -> str:
     score = 0
     sub = issue.get("subtype", "")
     if "NotImplementedError" in sub:
         score += 2
-    if sub in {"Annotated Stub", "Exported Placeholder", "Concrete Stub Method"}:
-        score += 2
-    if sub in {"Empty/Stub Function", "Empty/Stub Class", "Async Stub"}:
-        score += 1
+    score += _SUBTYPE_SCORES.get(sub, 0)
     if ctx.get("exported"):
         score += 1
     if ctx.get("linked_areas", {}).get("caller_count", 0) > 0:
         score += 1
-    if sub in {"TODO", "FIXME", "for now", "simplified", "placeholder", "in a real"}:
-        score += 0
     if score >= 4:
         return "critical"
     if score >= 2:

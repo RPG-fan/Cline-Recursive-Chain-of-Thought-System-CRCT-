@@ -59,6 +59,10 @@ def test_get_historical_pairs_invalidates_when_cycle_file_updated(tmp_path):
     history_dir = os.path.join(project_root, HISTORY_DIR.replace("/", os.sep))
     cycle_path = _write_cycle_file(history_dir, 5, [("x.py", "y.py")])
 
+    # Ensure mtime changes by setting the initial file's mtime back in time
+    st = os.stat(cycle_path)
+    os.utime(cycle_path, (st.st_atime - 10, st.st_mtime - 10))
+
     assert get_historical_pairs(project_root) == {("x.py", "y.py")}
     assert get_historical_pairs(project_root) == {("x.py", "y.py")}
 

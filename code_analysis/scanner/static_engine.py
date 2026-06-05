@@ -129,7 +129,7 @@ def analyze_node(
                         "file": str(filepath),
                         "line": node.start_point[0] + 1,
                         "end_line": node.end_point[0] + 1,
-                        "content": node.text.decode("utf-8", errors="replace").split("\n")[0] + "...",
+                        "content": node.text.partition(b"\n")[0].rstrip(b"\r").decode("utf-8", errors="replace") + "...",
                     }
                 )
 
@@ -154,7 +154,7 @@ def analyze_node(
                         "file": str(filepath),
                         "line": node.start_point[0] + 1,
                         "end_line": node.end_point[0] + 1,
-                        "content": node.text.decode("utf-8", errors="replace").split("\n")[0] + "...",
+                        "content": node.text.partition(b"\n")[0].rstrip(b"\r").decode("utf-8", errors="replace") + "...",
                     }
                 )
 
@@ -195,7 +195,7 @@ def analyze_node(
                         "file": str(filepath),
                         "line": node.start_point[0] + 1,
                         "end_line": node.end_point[0] + 1,
-                        "content": node.text.decode("utf-8", errors="replace").split("\n")[0] + "...",
+                        "content": node.text.partition(b"\n")[0].rstrip(b"\r").decode("utf-8", errors="replace") + "...",
                     }
                 )
 

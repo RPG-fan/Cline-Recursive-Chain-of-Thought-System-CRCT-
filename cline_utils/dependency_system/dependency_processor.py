@@ -479,12 +479,13 @@ def command_handler_analyze_project(args: argparse.Namespace) -> int:
                 else:
                     env["PYTHONPATH"] = path_str
 
-                process = subprocess.run(
+                process = subprocess.run(  # nosec B603
                     [sys.executable, runtime_inspector_path, abs_project_root],
                     capture_output=True,
                     text=True,
                     check=False,
                     env=env,
+                    timeout=300,
                 )
 
                 if process.returncode == 0:
@@ -2253,6 +2254,8 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
     algo_processed_count = 0
     shortcut_processed_count = 0
+    algo_rolled = 0
+    shortcut_propagated = 0
 
     # Collect all algorithmic/shortcut tasks globally
     for t_path in trackers_to_scan:
@@ -2313,7 +2316,12 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                                     (t_path, row_label, tgt_key_label, char)
                                 )
                                 shortcut_processed_count += 1
-                                logger.info(
+                                shortcut_propagated += 1
+                                sys.stdout.write(
+                                    f"\rResolving... Algo (Rolled): {algo_rolled} | Shortcut (Propagated): {shortcut_propagated}"
+                                )
+                                sys.stdout.flush()
+                                logger.debug(
                                     f"Shortcut: Resolved {row_label} -> {tgt_key_label}: '{existing_global_char}' (Propagated from global cache)"
                                 )
                                 continue
@@ -2332,7 +2340,12 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                                     (t_path, row_label, tgt_key_label, char)
                                 )
                                 shortcut_processed_count += 1
-                                logger.info(
+                                shortcut_propagated += 1
+                                sys.stdout.write(
+                                    f"\rResolving... Algo (Rolled): {algo_rolled} | Shortcut (Propagated): {shortcut_propagated}"
+                                )
+                                sys.stdout.flush()
+                                logger.debug(
                                     f"Shortcut: Resolved {row_label} -> {tgt_key_label}: 'x' (Parent-Child relation)"
                                 )
                                 if sn not in edges:
@@ -2404,7 +2417,13 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                                     global_suggestions[t_path][row_label].append(
                                         (tgt_key_label, best_char)
                                     )
-                                    logger.info(
+                                    algo_processed_count += 1
+                                    algo_rolled += 1
+                                    sys.stdout.write(
+                                        f"\rResolving... Algo (Rolled): {algo_rolled} | Shortcut (Propagated): {shortcut_propagated}"
+                                    )
+                                    sys.stdout.flush()
+                                    logger.debug(
                                         f"Algorithmically resolved {row_label} -> {tgt_key_label}: '{best_char}' (Rolled up)"
                                     )
                                     if sn not in edges:
@@ -2414,7 +2433,13 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                                     global_suggestions[t_path][row_label].append(
                                         (tgt_key_label, "n")
                                     )
-                                    logger.info(
+                                    algo_processed_count += 1
+                                    algo_rolled += 1
+                                    sys.stdout.write(
+                                        f"\rResolving... Algo (Rolled): {algo_rolled} | Shortcut (Propagated): {shortcut_propagated}"
+                                    )
+                                    sys.stdout.flush()
+                                    logger.debug(
                                         f"Algorithmically resolved {row_label} -> {tgt_key_label}: 'n' (No dependencies found)"
                                     )
                                     if sn not in edges:
@@ -2428,6 +2453,12 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                                 continue
             except Exception:
                 continue
+
+    if algo_rolled > 0 or shortcut_propagated > 0:
+        sys.stdout.write(
+            f"\rResolved: Algo (Rolled): {algo_rolled} | Shortcut (Propagated): {shortcut_propagated} | Total: {algo_rolled + shortcut_propagated}\n"
+        )
+        sys.stdout.flush()
 
     # Apply all algorithmic/shortcut suggestions globally
     if global_suggestions:

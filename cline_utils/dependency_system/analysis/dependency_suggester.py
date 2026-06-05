@@ -542,6 +542,27 @@ def _verify_class_member(
     return False
 
 
+def _has_symbol_name(
+    module_symbols: Dict[str, Any],
+    symbol_name: str,
+    keys: Optional[List[str]] = None,
+) -> bool:
+    """
+    Fast lookup helper to check if a symbol name exists in module symbols.
+    Avoids generator overhead by using basic loops.
+    """
+    if keys is None:
+        keys = ["functions", "classes", "globals_defined", "exports"]
+    for key in keys:
+        symbol_list = module_symbols.get(key)
+        if symbol_list:
+            for s_item in symbol_list:
+                if s_item.get("name") == symbol_name:
+                    return True
+    return False
+
+
+
 def _classify_role(path: str) -> str:
     """
     Classify a file as 'doc' or 'code' based on its extension.
@@ -687,15 +708,8 @@ def _build_import_map(
                         item_name_actually_imported = alias.name
                         name_in_scope = alias.asname or alias.name
 
-                        is_defined_in_module_symbols = any(
-                            s_item.get("name") == item_name_actually_imported
-                            for s_list_key in [
-                                "functions",
-                                "classes",
-                                "globals_defined",
-                                "exports",
-                            ]
-                            for s_item in module_symbols.get(s_list_key, [])
+                        is_defined_in_module_symbols = _has_symbol_name(
+                            module_symbols, item_name_actually_imported
                         )
 
                         is_submodule_or_package = False
@@ -881,17 +895,12 @@ def _identify_structural_dependencies(
                 # We need the part of target_name_str that is relative to the resolved module (target_path_val)
                 # This can be complex if target_name_str is like module.class.method
                 # For now, simple split:
-                parts = target_name_str.split(".")
-                if (
-                    len(parts) > 1 and ".".join(parts[:-1]) == potential_source_str
-                ):  # my_alias.item -> item
-                    actual_item_name_to_check = parts[-1]
+                if potential_source_str and target_name_str.startswith(potential_source_str + "."):
+                    actual_item_name_to_check = target_name_str[len(potential_source_str) + 1:]
                 elif not potential_source_str:  # direct call of an imported name
-                    actual_item_name_to_check = target_name_str.split(".")[
-                        0
-                    ]  # if target_name_str itself is dotted
+                    actual_item_name_to_check, _, _ = target_name_str.partition(".")
                 else:  # Fallback or if potential_source_str is the same as target_name_str (e.g. direct function call)
-                    actual_item_name_to_check = target_name_str.split(".")[-1]
+                    _, _, actual_item_name_to_check = target_name_str.rpartition(".")
 
             if actual_item_name_to_check:
                 # Remove "()" if it's a call representation from _get_full_name_str
@@ -899,21 +908,12 @@ def _identify_structural_dependencies(
                     actual_item_name_to_check = actual_item_name_to_check[:-2]
 
                 module_symbols = project_symbol_map.get(target_path_val, {})
-                is_verified = any(
-                    s_item.get("name") == actual_item_name_to_check
-                    for s_list_key in [
-                        "functions",
-                        "classes",
-                        "globals_defined",
-                        "exports",
-                    ]
-                    for s_item in module_symbols.get(s_list_key, [])
-                )
+                is_verified = _has_symbol_name(module_symbols, actual_item_name_to_check)
 
                 # Deep verification: check if the member is actually defined on the class
                 # using enriched symbol map data (methods list, __init__ attributes)
                 if not is_verified and potential_source_str:
-                    potential_class_name = potential_source_str.split(".")[-1]
+                    _, _, potential_class_name = potential_source_str.rpartition(".")
                     if _verify_class_member(
                         module_symbols,
                         potential_class_name,
@@ -963,16 +963,12 @@ def _identify_structural_dependencies(
             module_symbols = project_symbol_map.get(target_path_val, {})
 
             # Check if the attribute_name_accessed is a global/function/class directly in the module
-            is_verified = any(
-                s_item.get("name") == attribute_name_accessed
-                for s_list_key in ["functions", "classes", "globals_defined", "exports"]
-                for s_item in module_symbols.get(s_list_key, [])
-            )
+            is_verified = _has_symbol_name(module_symbols, attribute_name_accessed)
 
             # Deep verification: check if the attribute is a method, __init__ attr, or class-level attribute
             # using enriched symbol map data (methods list, __init__ attributes)
             if not is_verified and potential_source_str:
-                potential_class_name_from_source = potential_source_str.split(".")[-1]
+                _, _, potential_class_name_from_source = potential_source_str.rpartition(".")
                 if _verify_class_member(
                     module_symbols,
                     potential_class_name_from_source,
@@ -1010,15 +1006,8 @@ def _identify_structural_dependencies(
         if target_path_val and target_path_val != source_path:
             # Verify "Base" is in target_path_val's symbols
             module_symbols = project_symbol_map.get(target_path_val, {})
-            actual_class_name = (
-                base_class_name_str.split(".")[-1]
-                if "." in base_class_name_str
-                else base_class_name_str
-            )
-            if any(
-                c["name"] == actual_class_name
-                for c in module_symbols.get("classes", [])
-            ):
+            _, _, actual_class_name = base_class_name_str.rpartition(".")
+            if _has_symbol_name(module_symbols, actual_class_name, ["classes"]):
                 dep_char = "<"
                 suggestions_path_based.append((target_path_val, dep_char))
                 raw_ast_verified_links.append(
@@ -1049,28 +1038,12 @@ def _identify_structural_dependencies(
         if target_path_val and target_path_val != source_path:
             # Verify the actual type (e.g., "TheirType") is defined in the resolved module
             module_symbols = project_symbol_map.get(target_path_val, {})
-            actual_type_to_check = (
-                type_name_str.split(".")[-1] if "." in type_name_str else type_name_str
-            )
-            is_defined_type = (
-                any(
-                    c["name"] == actual_type_to_check
-                    for c in module_symbols.get("classes", [])
-                )
-                or any(
-                    f["name"] == actual_type_to_check
-                    for f in module_symbols.get("functions", [])
-                )
-                or any(
-                    g["name"] == actual_type_to_check
-                    for g in module_symbols.get("globals_defined", [])
-                )
+            _, _, actual_type_to_check = type_name_str.rpartition(".")
+            is_defined_type = _has_symbol_name(
+                module_symbols, actual_type_to_check, ["classes", "functions", "globals_defined"]
             )
             if is_defined_type:
-                if any(
-                    c["name"] == actual_type_to_check
-                    for c in module_symbols.get("classes", [])
-                ):  # Prioritize classes for type hints
+                if _has_symbol_name(module_symbols, actual_type_to_check, ["classes"]):  # Prioritize classes for type hints
                     dep_char = "<"
                     suggestions_path_based.append((target_path_val, dep_char))
                     raw_ast_verified_links.append(
@@ -1120,26 +1093,11 @@ def _identify_structural_dependencies(
             target_path_val = _resolve_name_to_path_wrapper(item_name_str)
             if target_path_val and target_path_val != source_path:
                 module_symbols = project_symbol_map.get(target_path_val, {})
-                actual_item_to_check = (
-                    item_name_str.split(".")[-1]
-                    if "." in item_name_str
-                    else item_name_str
-                )
+                _, _, actual_item_to_check = item_name_str.rpartition(".")
 
                 # Check if the item exists as any kind of defined symbol in the target module
-                is_defined_symbol = (
-                    any(
-                        c["name"] == actual_item_to_check
-                        for c in module_symbols.get("classes", [])
-                    )
-                    or any(
-                        f["name"] == actual_item_to_check
-                        for f in module_symbols.get("functions", [])
-                    )
-                    or any(
-                        g["name"] == actual_item_to_check
-                        for g in module_symbols.get("globals_defined", [])
-                    )
+                is_defined_symbol = _has_symbol_name(
+                    module_symbols, actual_item_to_check, ["classes", "functions", "globals_defined"]
                 )
                 if is_defined_symbol:
                     suggestions_path_based.append((target_path_val, dep_char))
@@ -1421,9 +1379,8 @@ def _identify_javascript_structural_dependencies(
         if not symbol_name:
             return None
 
-        parts = symbol_name.split(".")
-        base_symbol = parts[0]
-        member_access_chain = parts[1:]
+        base_symbol, _, member_rest = symbol_name.partition(".")
+        member_access_chain = [member_rest.partition(".")[0]] if member_rest else []
 
         import_info = import_map.get(base_symbol)
         if not import_info:
@@ -2826,19 +2783,8 @@ def _convert_python_import_to_paths(
                 )
                 if specific_item_name:
                     module_symbols = project_symbol_map.get(p_candidate_str, {})
-                    is_defined = (
-                        any(
-                            f.get("name") == specific_item_name
-                            for f in module_symbols.get("functions", [])
-                        )
-                        or any(
-                            c.get("name") == specific_item_name
-                            for c in module_symbols.get("classes", [])
-                        )
-                        or any(
-                            g.get("name") == specific_item_name
-                            for g in module_symbols.get("globals_defined", [])
-                        )
+                    is_defined = _has_symbol_name(
+                        module_symbols, specific_item_name, ["functions", "classes", "globals_defined"]
                     )
 
                     if (

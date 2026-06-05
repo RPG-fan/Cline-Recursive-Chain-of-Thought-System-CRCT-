@@ -189,7 +189,7 @@ def _is_internal_module(module_name: str) -> bool:
     code_roots = config_manager.get_code_root_directories()
 
     # Split to get top-level package (e.g. 'psycopg.sql' -> 'psycopg')
-    root_module = module_name.split(".")[0]
+    root_module, _, _ = module_name.partition(".")
 
     for root in code_roots:
         # Check for directory (package)
@@ -242,13 +242,13 @@ def _is_useful_call(
                 return False
 
         # Also check against known external libraries explicitly to be safe
-        root_source = resolved_source.split(".")[0]
+        root_source, _, _ = resolved_source.partition(".")
         if root_source in IGNORED_CALL_SOURCES:
             return False
 
     # 3. Check Generic Methods
     # Strategy: If generic name AND (source is None OR source is generic-looking variable), maybe filter?
-    if target_name.split(".")[-1] in GENERIC_CALL_NAMES:
+    if target_name.rpartition(".")[-1] in GENERIC_CALL_NAMES:
         if not potential_source:
             pass
         elif potential_source in {
@@ -327,8 +327,8 @@ def _normalize_sql_identifier_text(text: str) -> str:
 
     # Handle schema-qualified names: schema.table -> table
     if "." in text:
-        parts = text.split(".")
-        text = parts[-1].strip()
+        _, _, text = text.rpartition(".")
+        text = text.strip()
 
     # Strip matching quote/bracket pairs
     while len(text) >= 2:
@@ -1288,7 +1288,8 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                 # try to resolve from imports_map to capture cross-file relationships
                 if potential_source is None and target_full_name:
                     # For direct calls, the base name is the function/class being called
-                    base_name = target_full_name.split("(")[0].split(".")[0]
+                    func_name, _, _ = target_full_name.partition("(")
+                    base_name, _, _ = func_name.partition(".")
                     if base_name in imports_map:
                         potential_source = cast(str, imports_map[base_name])
 
