@@ -53,7 +53,6 @@ DEFAULT_CONFIG = {
         ".tox",
         ".coverage",
         ".cache",
-        "models",
     ],
     "excluded_extensions": [
         ".pyc",
