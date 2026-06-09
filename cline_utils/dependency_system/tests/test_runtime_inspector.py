@@ -37,7 +37,8 @@ def outer():
 @pytest.fixture
 def mock_path_utils():
     with patch.dict("sys.modules", {"cline_utils.dependency_system.utils.path_utils": MagicMock()}):
-        mock = sys.modules["cline_utils.dependency_system.utils.path_utils"]
+        from typing import Any
+        mock: Any = sys.modules["cline_utils.dependency_system.utils.path_utils"]
         mock.normalize_path = lambda p: p.replace("\\", "/")
         mock.is_subpath = lambda p, r: p.startswith(r)
         yield mock
@@ -51,7 +52,9 @@ class TestRuntimeInspector:
 
     def test_get_source_context(self, mock_path_utils):
         # We need to make sure the file is considered within code roots
-        current_file = inspect.getsourcefile(sample_func).replace("\\", "/")
+        sf = inspect.getsourcefile(sample_func)
+        assert sf is not None
+        current_file = sf.replace("\\", "/")
         code_roots = [os.path.dirname(current_file).replace("\\", "/")]
         
         context = get_source_context(sample_func, code_roots)
@@ -76,7 +79,9 @@ class TestRuntimeInspector:
             assert exports['exported_func'] == "some_module"
 
     def test_get_inheritance_info(self, mock_path_utils):
-        current_file = inspect.getsourcefile(SampleClass).replace("\\", "/")
+        sf = inspect.getsourcefile(SampleClass)
+        assert sf is not None
+        current_file = sf.replace("\\", "/")
         code_roots = [os.path.dirname(current_file).replace("\\", "/")]
         
         info = get_inheritance_info(SampleClass, code_roots)

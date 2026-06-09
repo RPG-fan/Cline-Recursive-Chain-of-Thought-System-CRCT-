@@ -30,9 +30,11 @@ class TestExceptionsEnhanced(unittest.TestCase):
 
         # Assertions
         self.assertIsInstance(converted, ProjectPermissionError)
-        self.assertEqual(converted.path, file_path)
-        self.assertEqual(converted.operation, "read")
-        self.assertIn("Permission denied", converted.message)
+        from typing import cast
+        perm_err = cast(ProjectPermissionError, converted)
+        self.assertEqual(perm_err.path, file_path)
+        self.assertEqual(perm_err.operation, "read")
+        self.assertIn("Permission denied", perm_err.message)
 
     def test_project_permission_error_properties(self) -> None:
         """Verify the custom properties of ProjectPermissionError."""
@@ -54,8 +56,10 @@ class TestExceptionsEnhanced(unittest.TestCase):
         converted = handle_file_analysis_error(file_path, original_error)
 
         self.assertIsInstance(converted, EncodingError)
-        self.assertEqual(converted.file_path, file_path)
-        self.assertEqual(converted.encoding_attempted, "utf-8")
+        from typing import cast
+        enc_err = cast(EncodingError, converted)
+        self.assertEqual(enc_err.file_path, file_path)
+        self.assertEqual(enc_err.encoding_attempted, "utf-8")
 
     def test_syntax_error_mapping(self) -> None:
         """Verify that SyntaxError is converted to ParsingError."""
@@ -67,9 +71,11 @@ class TestExceptionsEnhanced(unittest.TestCase):
         converted = handle_file_analysis_error(file_path, original_error)
 
         self.assertIsInstance(converted, ParsingError)
-        self.assertEqual(converted.file_path, file_path)
-        self.assertEqual(converted.line_number, 10)
-        self.assertIn("invalid syntax", converted.syntax_details)
+        from typing import cast
+        parse_err = cast(ParsingError, converted)
+        self.assertEqual(parse_err.file_path, file_path)
+        self.assertEqual(parse_err.line_number, 10)
+        self.assertIn("invalid syntax", parse_err.syntax_details)
 
     def test_log_and_reraise_custom(self) -> None:
         """Verify that log_and_reraise reraises custom ProjectAnalyzerError without wrapping."""

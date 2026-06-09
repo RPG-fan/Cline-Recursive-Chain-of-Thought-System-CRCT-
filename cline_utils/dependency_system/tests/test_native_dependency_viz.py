@@ -29,7 +29,9 @@ def _global_map() -> Dict[str, KeyInfo]:
         "h:/repo/src/c.md": KeyInfo("1A3", "h:/repo/src/c.md", "h:/repo/src", 1, False),
         "h:/repo/src/d.py": KeyInfo("1A4", "h:/repo/src/d.py", "h:/repo/src", 1, False),
         "h:/repo/engine": KeyInfo("1B", "h:/repo/engine", None, 1, True),
-        "h:/repo/engine/e.py": KeyInfo("1B1", "h:/repo/engine/e.py", "h:/repo/engine", 1, False),
+        "h:/repo/engine/e.py": KeyInfo(
+            "1B1", "h:/repo/engine/e.py", "h:/repo/engine", 1, False
+        ),
     }
 
 
@@ -37,8 +39,13 @@ def _config() -> ConfigManager:
     return ConfigManager()
 
 
-def _migration_info(global_map: Dict[str, KeyInfo]):
-    return {path: (info.key_string, info.key_string) for path, info in global_map.items()}
+from cline_utils.dependency_system.analysis.project_analyzer import PathMigrationInfo
+
+
+def _migration_info(global_map: Dict[str, KeyInfo]) -> PathMigrationInfo:
+    return {
+        path: (info.key_string, info.key_string) for path, info in global_map.items()
+    }
 
 
 def _links() -> AggregatedLinks:
@@ -170,10 +177,16 @@ def test_native_pipe_aggregation_and_svg_stages():
     assert pipe.dep_char == "<"
     assert pipe.count == 3
     assert pipe.stroke_width == pipe_stroke_width(3, config)
-    assert all(edge.is_pipe_member for edge in layout.edges if edge.pipe_id == pipe.pipe_id)
+    assert all(
+        edge.is_pipe_member for edge in layout.edges if edge.pipe_id == pipe.pipe_id
+    )
 
-    structure_svg = render_svg_pass(layout, NativeLayoutConfig(pipe_threshold=3, render_stage=1))
-    full_svg = render_svg_pass(layout, NativeLayoutConfig(pipe_threshold=3, render_stage=5))
+    structure_svg = render_svg_pass(
+        layout, NativeLayoutConfig(pipe_threshold=3, render_stage=1)
+    )
+    full_svg = render_svg_pass(
+        layout, NativeLayoutConfig(pipe_threshold=3, render_stage=5)
+    )
 
     assert 'id="groups"' in structure_svg
     assert 'id="pipe-spines"' not in structure_svg

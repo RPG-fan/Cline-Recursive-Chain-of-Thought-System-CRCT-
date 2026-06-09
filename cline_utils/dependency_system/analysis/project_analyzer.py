@@ -318,7 +318,7 @@ def analyze_project(
     logger.debug("Starting file analysis...")
     # Use process_items for potential parallelization
     # Pass force_analysis flag down to analyze_file if caching is implemented there
-    analysis_results_list: List[Dict[str, Any]] = process_items(
+    analysis_results_list: List[Optional[Dict[str, Any]]] = process_items(
         files_to_analyze_abs, analyze_file, force=force_analysis
     )
     file_analysis_results: Dict[str, Any] = {}

@@ -35,9 +35,9 @@ def test_kill_process_tree_uses_scoped_taskkill_on_windows_without_psutil() -> N
 
     def import_mock(
         name: str,
-        globals: object = None,
-        locals: object = None,
-        fromlist: object = (),
+        globals: dict[str, object] | None = None,
+        locals: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] = (),
         level: int = 0,
     ) -> object:
         if name == "psutil":

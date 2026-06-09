@@ -69,8 +69,10 @@ def test_download_permanent_error():
     """Test that a permanent HTTP error (e.g. 404) aborts immediately without retrying."""
     url = "https://example.com/missing.model"
     
+    from email.message import Message
+    msg = Message()
     # HTTPError signature: url, code, msg, hdrs, fp
-    http_error = urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+    http_error = urllib.error.HTTPError(url, 404, "Not Found", msg, None)
     
     with tempfile.TemporaryDirectory() as tmpdir:
         dest_path = os.path.join(tmpdir, "missing.model")
@@ -89,7 +91,9 @@ def test_download_transient_retry_success():
     url = "https://example.com/transient.model"
     data = b"Successful after retry"
     
-    transient_error = urllib.error.HTTPError(url, 503, "Service Unavailable", {}, None)
+    from email.message import Message
+    msg = Message()
+    transient_error = urllib.error.HTTPError(url, 503, "Service Unavailable", msg, None)
     response = DummyResponse(data)
     
     with tempfile.TemporaryDirectory() as tmpdir:

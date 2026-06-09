@@ -2405,10 +2405,11 @@ def _load_reranker_model():
                 )
 
                 # Only move non-quantized models manually
-                if not getattr(_reranker_model, "is_quantized", False):
+                if _reranker_model is not None and not getattr(_reranker_model, "is_quantized", False):
                     _reranker_model.to(device)
 
-            _reranker_model.eval()
+            if _reranker_model is not None:
+                _reranker_model.eval()
 
             # Create a dummy tensor to prime the CUDA context with the expected dtype and device
             if device == "cuda":
@@ -2418,7 +2419,7 @@ def _load_reranker_model():
                 logger.debug("CUDA context primed with dummy tensor.")
 
             # Verify Flash Attention
-            if hasattr(_reranker_model.config, "_attn_implementation"):
+            if _reranker_model is not None and hasattr(_reranker_model.config, "_attn_implementation"):
                 attn_impl = getattr(
                     _reranker_model.config, "_attn_implementation", "unknown"
                 )
@@ -2430,15 +2431,16 @@ def _load_reranker_model():
                     )
 
             # Measure model memory footprint for adaptive worker calculation
-            if device == "cuda":
-                torch.cuda.synchronize()
-                model_memory_gb = torch.cuda.memory_allocated() / (1024**3)
-                logger.info(
-                    f"Loaded Qwen3-Reranker (Q8 quantized) on {_reranker_model.device}. "
-                    f"Model footprint: {model_memory_gb:.2f}GB"
-                )
-            else:
-                logger.info(f"Loaded Qwen3-Reranker-0.6B on {_reranker_model.device}")
+            if _reranker_model is not None:
+                if device == "cuda":
+                    torch.cuda.synchronize()
+                    model_memory_gb = torch.cuda.memory_allocated() / (1024**3)
+                    logger.info(
+                        f"Loaded Qwen3-Reranker (Q8 quantized) on {_reranker_model.device}. "
+                        f"Model footprint: {model_memory_gb:.2f}GB"
+                    )
+                else:
+                    logger.info(f"Loaded Qwen3-Reranker-0.6B on {_reranker_model.device}")
         except Exception as e:
             logger.error(f"Failed to load reranker: {e}", exc_info=True)
             _clear_reranker_load_state()

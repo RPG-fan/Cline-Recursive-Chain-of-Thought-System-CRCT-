@@ -101,6 +101,7 @@ def test_dead_process_pruning():
         # Request an allocation (it will register with our current PID which is alive)
         granted1, alloc_id1 = mgr.request_allocation(size_gb=2.0)
         assert granted1 is True
+        assert alloc_id1 is not None
 
         # Manually corrupt or append a mock dead process allocation to the registry
         registry = mgr._load_registry()

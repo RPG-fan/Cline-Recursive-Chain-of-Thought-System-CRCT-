@@ -100,9 +100,9 @@ class RuntimeIndex:
                         meths = cls_any.get("methods") or []
                         for meth_any in meths:
                             if isinstance(meth_any, dict):
-                                meth_name = meth_any.get("name")
-                                if meth_name:
-                                    self._all_methods[meth_name].add(cls_name)
+                                method_name = meth_any.get("name")
+                                if method_name:
+                                    self._all_methods[method_name].add(cls_name)
 
         all_project_classes = set()
         for classes in self._file_defined_classes.values():
@@ -308,14 +308,14 @@ class RuntimeIndex:
             return False
         orig = inh.get("_haystack_original")
         low = inh.get("_haystack_lower")
-        if orig is None:
+        if orig is None or low is None:
             bases = inh.get("bases") or []
             mro = inh.get("mro") or []
             orig = " ".join(bases) + " " + " ".join(mro)
             low = orig.lower()
             inh["_haystack_original"] = orig
             inh["_haystack_lower"] = low
-        return "ABC" in orig or "abc." in low
+        return "ABC" in str(orig) or "abc." in str(low)
 
 
 # ===========================================================================

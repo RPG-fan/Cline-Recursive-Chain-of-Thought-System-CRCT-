@@ -290,10 +290,10 @@ class ContextPackager:
         # Resolve config limits
         local_max = self.config_mgr.get_context_packager_setting(
             "local_max_tokens", 20000
-        )
+        ) or 20000
         cloud_max = self.config_mgr.get_context_packager_setting(
             "cloud_max_tokens", 100000
-        )
+        ) or 100000
         default_mode = self.config_mgr.get_context_packager_setting(
             "default_mode", "auto"
         )
@@ -301,16 +301,16 @@ class ContextPackager:
         mode = routing_mode if routing_mode != "auto" else default_mode
 
         if max_tokens is None:
-            max_tokens = local_max if mode == "local" else cloud_max
+            max_tokens_val = int(local_max) if mode == "local" else int(cloud_max)
         else:
             # Clamp limits if mode requests it
             if mode == "local" and max_tokens > local_max:
                 logger.warning(
                     f"Local routing requested but max_tokens > {local_max}. Clamping."
                 )
-                max_tokens = local_max
-
-        max_tokens_val = int(max_tokens)
+                max_tokens_val = int(local_max)
+            else:
+                max_tokens_val = int(max_tokens)
 
         global_map = load_global_key_map()
         if not global_map:

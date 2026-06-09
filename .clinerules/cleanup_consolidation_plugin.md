@@ -7,7 +7,7 @@
 ## I. Entering and Exiting Cleanup/Consolidation Phase
 
 **Entering Cleanup/Consolidation Phase:**
-1. **`.clinerules` Check**: Always read `.clinerules` first. If `[LAST_ACTION_STATE]` shows `next_phase: "Cleanup/Consolidation"`, proceed with these instructions. This phase typically follows the Execution phase.
+1. **`.clinerules` Check**: Always read `.clinerules/default-rules.md` first. If `[LAST_ACTION_STATE]` shows `next_phase: "Cleanup/Consolidation"`, proceed with these instructions. This phase typically follows the Execution phase.
 2. **User Trigger**: Start a new session if the system is paused after Execution, awaiting this phase.
 
 **Exiting Cleanup/Consolidation Phase:**
@@ -16,7 +16,7 @@
    - Cleanup steps (Section IV) are complete: obsolete files identified and archived/removed.
    - `activeContext.md` reflects the clean, consolidated state.
    - MUP is followed for all actions.
-2. **`.clinerules` Update (MUP):**
+2. **`default-rules.md` Update (MUP):**
    - Typically transition back to Set-up/Maintenance for verification or Strategy for next planning cycle:
      ```
      [LAST_ACTION_STATE]
@@ -33,7 +33,7 @@
      next_action: "Project Completion - User Review"
      next_phase: "Project Complete"
      ```
-3. **User Action**: After updating `.clinerules`, pause for user to trigger the next phase.
+3. **User Action**: After updating `default-rules.md`, pause for user to trigger the next phase.
 
 ---
 
@@ -64,7 +64,7 @@
         *   **Action**: Use `list_files` recursively to identify all `*.md` files within the *entire* `cline_docs/archive/` directory (and its subdirectories) to locate any previously archived task files.
         *   **Purpose**: Create a comprehensive list of all available task instruction files, regardless of their current location (active or archived), for subsequent review in batches.
     *   **c. List All Implementation Plan Files**:
-        *   **Action**: For each directory listed in `[CODE_ROOT_DIRECTORIES]` (from `.clinerules`), use `list_files` recursively to identify all files matching the pattern `implementation_plan_*.md`. These are typically located within module directories (e.g., `src/module_name/implementation_plan_*.md`).
+        *   **Action**: For each directory listed in `[CODE_ROOT_DIRECTORIES]` (from `default-rules.md`), use `list_files` recursively to identify all files matching the pattern `implementation_plan_*.md`. These are typically located within module directories (e.g., `src/module_name/implementation_plan_*.md`).
         *   **Purpose**: Create a comprehensive list of all implementation plan files for subsequent review in batches.
     *   **d. Read Core Project State Files**:
         *   **Action**: Read `activeContext.md`: Identify key decisions, unresolved issues, and summaries of work done.
@@ -151,8 +151,8 @@
         *   **Core Files**:
             *   **Action (CRITICAL)**: Update `progress.md` to accurately mark all completed high-level checklist items based on verified outcomes.
             *   **Action (CRITICAL)**: Update `userProfile.md` with any newly observed or reinforced user preferences or interaction patterns.
-            *   **Action (CRITICAL)**: Review and Consolidate `.clinerules` `[LEARNING_JOURNAL]`:
-                i.  **Action**: Read the current `[LEARNING_JOURNAL]` section from `.clinerules`.
+            *   **Action (CRITICAL)**: Review and Consolidate `default-rules.md` `[LEARNING_JOURNAL]`:
+                i.  **Action**: Read the current `[LEARNING_JOURNAL]` section from `default-rules.md`.
                 ii. **Purpose**: To refine the journal by grouping similar learnings, combining related entries for conciseness, removing entries that are not strategic or system-level learnings (e.g., very minor tactical notes better suited for `activeContext.md` during a specific task, or temporary observations that are no longer relevant), and ensuring entries are clearly articulated.
                 iii. **Procedure**:
                     - Identify entries that are redundant or cover very similar points. Combine them into a single, more comprehensive entry.
@@ -160,7 +160,7 @@
                     - Identify entries that are not appropriate for the Learning Journal's purpose (e.g., simple reminders, task-specific notes that don't represent broader learning). Remove these.
                     - Ensure remaining entries are clear, concise, and genuinely reflect significant learnings about the CRCT process, project management, technical approaches, or user interactions.
                 iv. **Action**: Add any *new* significant system-level learnings identified during the comprehensive review (from Step 1e, 1f, 1g) to the refined journal. Example: "Adding to Learning Journal: Comprehensive review during Cleanup/Consolidation revealed a recurring pattern of task underestimation when initial data definitions are incomplete, highlighting the need for more rigorous data strategy upfront."
-                v.  **Action**: Use `write_to_file` (or `apply_diff` if more appropriate for `.clinerules` format) to update the `[LEARNING_JOURNAL]` section in `.clinerules` with the consolidated and newly added entries.
+                v.  **Action**: Use `write_to_file` (or `apply_diff` if more appropriate for `default-rules.md` format) to update the `[LEARNING_JOURNAL]` section in `default-rules.md` with the consolidated and newly added entries.
 
     *   **b. Consolidate and Reorganize Changelog (CRITICAL)**:
         *   **Purpose**: To transform the `changelog.md` into a more readable and maintainable format by structuring all historical entries by their primary component/module and then chronologically within each component. This provides a clear, organized history of changes for the entire project lifecycle. This is a **CRITICAL** step for long-term project understanding and maintainability.
@@ -190,7 +190,7 @@
         *   **Action (CRITICAL)**: After all other information has been consolidated into persistent documents (HDTA, core files) and the changelog has been reorganized, update `activeContext.md` one last time.
         *   **Goal**: To ensure `activeContext.md` accurately reflects the *current, fully consolidated baseline state of the entire project*. This involves removing any transient details specific to *any previously completed work cycles or outdated project states* (e.g., step-by-step execution logs from past tasks, outdated considerations, resolved issues that are now documented elsewhere). The file should retain only the current high-level project status, truly outstanding issues that require immediate or near-term attention, and clear pointers to where detailed, persistent information now resides (e.g., "Final design details for feature Y documented in `implementation_plan_feature_y.md`. Changelog comprehensively reorganized. Next focus: Phase X based on `roadmap_v3.md`.").
 
-4.  **MUP**: Perform Core MUP and Section V additions after completing the consolidation steps (including changelog). Update `last_action` in `.clinerules` to indicate consolidation is finished and cleanup is next.
+4.  **MUP**: Perform Core MUP and Section V additions after completing the consolidation steps (including changelog). Update `last_action` in `default-rules.md` to indicate consolidation is finished and cleanup is next.
 
 ---
 
@@ -277,7 +277,7 @@
     *   **Action (CRITICAL)**: If any archive or delete operations were performed in Step 3, use `list_files` again with the original *relative* locations of the processed files to verify they are no longer present in those locations.
     *   **Action (CRITICAL)**: Ensure `activeContext.md` is clean and does not reference the removed/archived files unless it is explicitly pointing to their new archive location for historical reference. All other pointers should be to active, persistent documentation.
 
-5.  **MUP**: Perform Core MUP and Section V additions after completing cleanup. Update `last_action` and `next_phase` in `.clinerules` to signify the end of this phase.
+5.  **MUP**: Perform Core MUP and Section V additions after completing cleanup. Update `last_action` and `next_phase` in `default-rules.md` to signify the end of this phase.
 
 **Cleanup Flowchart**
 ```mermaid
@@ -303,7 +303,7 @@ flowchart TD
     L --> M{More files?}
     M -- Yes --> G
     M -- No --> N[Verify Files Moved/Removed]
-    N --> O[MUP & Update .clinerules to Exit Phase]
+    N --> O[MUP & Update default-rules.md to Exit Phase]
     O --> P[End Cleanup]
 
     style J fill:#f9f,stroke:#f6f,stroke-width:2px,color:#000
@@ -319,7 +319,7 @@ flowchart TD
 
 1.  **Verify `activeContext.md` State (CRITICAL)**: After any significant consolidation or cleanup action, and especially at the MUP points defined in Section III.4 and IV.5, **CRITICALLY** verify that `activeContext.md` accurately reflects the current, clean, and consolidated state. Ensure it points to persistent documents for details and that all transient information from now-completed cycles or outdated states has been removed.
 2.  **Verify `changelog.md` Structure (CRITICAL)**: After the changelog reorganization (Section III.3b), and at the MUP point in Section III.4, **CRITICALLY** verify that the `changelog.md` structure correctly reflects the component grouping and chronological sorting as intended.
-3.  **Update `.clinerules` [LAST_ACTION_STATE] (CRITICAL)**:
+3.  **Update `default-rules.md` [LAST_ACTION_STATE] (CRITICAL)**:
     *   **After Consolidation step is fully completed (including changelog reorganization - as per Section III.4)**:
       ```
       [LAST_ACTION_STATE]
@@ -358,7 +358,7 @@ flowchart TD
         5.  Identify ALL information for consolidation from the above reviews.
         6.  Update HDTA docs (`system_manifest.md`, `*_module.md`, `implementation_plan_*.md`).
         7.  Update Core Files: `progress.md`, `userProfile.md`.
-        8.  Review, Refine, & Update `.clinerules` `[LEARNING_JOURNAL]` (group, combine, remove inappropriate, add new).
+        8.  Review, Refine, & Update `default-rules.md` `[LEARNING_JOURNAL]` (group, combine, remove inappropriate, add new).
         9.  Reorganize ENTIRE `changelog.md` (Parse->Group by Component->Sort by Date->Format->Write).
         10. Update `activeContext.md` to reflect fully consolidated project baseline.
     - **Tools**: `list_files`, `read_file`, `write_to_file`, `apply_diff`.
@@ -371,5 +371,5 @@ flowchart TD
         4.  Verify files moved/removed (use `list_files`); Ensure `activeContext.md` is clean.
     - **Tools**: `list_files`, `execute_command`, `ask_followup_question`.
 - **MUP Additions (Section V) (CRITICAL)**:
-    - After Consolidation: Verify `activeContext.md`, `changelog.md`; Update `.clinerules` (last_action: "Completed ALL Consolidation...", next_action: "Begin Cleanup...").
-    - After Cleanup (Exiting Phase): Verify `activeContext.md`; Update `.clinerules` (last_action: "Completed Cleanup/Consolidation Phase (All Steps)...", next_action: "Phase Complete...").
+    - After Consolidation: Verify `activeContext.md`, `changelog.md`; Update `default-rules.md` (last_action: "Completed ALL Consolidation...", next_action: "Begin Cleanup...").
+    - After Cleanup (Exiting Phase): Verify `activeContext.md`; Update `default-rules.md` (last_action: "Completed Cleanup/Consolidation Phase (All Steps)...", next_action: "Phase Complete...").

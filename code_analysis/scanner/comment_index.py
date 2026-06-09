@@ -484,7 +484,7 @@ def scan_file_comments(
                             cleaned = cleaned[1:].lstrip()
                         if cleaned:
                             bodies.insert(0, cleaned)
-                    elif first_marker_idx != -1:
+                    elif first_marker_idx != -1 and matched_marker is not None:
                         # Single-line comment
                         bodies.append(
                             raw_line[first_marker_idx + len(matched_marker):].lstrip()

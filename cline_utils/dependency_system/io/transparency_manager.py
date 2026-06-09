@@ -12,6 +12,7 @@ try:
 
     _HAS_MSVCRT = True
 except ImportError:
+    msvcrt = None  # type: ignore
     _HAS_MSVCRT = False
 
 try:
@@ -19,6 +20,7 @@ try:
 
     _HAS_FCNTL = True
 except ImportError:
+    fcntl = None  # type: ignore
     _HAS_FCNTL = False
 from cline_utils.dependency_system.utils.calculate_hash import calculate_content_hash
 from cline_utils.dependency_system.utils.cache_manager import (
@@ -243,11 +245,11 @@ class TransparencyLock:
 
         while True:
             try:
-                if _HAS_MSVCRT:
+                if _HAS_MSVCRT and msvcrt is not None:
                     self.fd.seek(0)
-                    msvcrt.locking(self.fd.fileno(), msvcrt.LK_NBLCK, 1)
-                elif _HAS_FCNTL:
-                    fcntl.flock(self.fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    msvcrt.locking(self.fd.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore
+                elif _HAS_FCNTL and fcntl is not None:
+                    fcntl.flock(self.fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore
                 break
             except (OSError, BlockingIOError):
                 if time.time() - start_time > self.timeout:
@@ -262,11 +264,11 @@ class TransparencyLock:
     def release(self) -> None:
         if self.fd:
             try:
-                if _HAS_MSVCRT:
+                if _HAS_MSVCRT and msvcrt is not None:
                     self.fd.seek(0)
-                    msvcrt.locking(self.fd.fileno(), msvcrt.LK_UNLCK, 1)
-                elif _HAS_FCNTL:
-                    fcntl.flock(self.fd.fileno(), fcntl.LOCK_UN)
+                    msvcrt.locking(self.fd.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore
+                elif _HAS_FCNTL and fcntl is not None:
+                    fcntl.flock(self.fd.fileno(), fcntl.LOCK_UN)  # type: ignore
             except Exception:
                 pass
             finally:
@@ -1240,22 +1242,24 @@ class TransparencyManager:
                                 start_anchor = str(anchors_list[0])
                                 end_anchor = str(anchors_list[1])
 
-                            new_start = self._find_anchor(
-                                lines, start_anchor, projected_start - 1
-                            )
-                            new_end = self._find_anchor(
-                                lines, end_anchor, projected_end - 1
-                            )
+                                new_start = self._find_anchor(
+                                    lines, start_anchor, projected_start - 1
+                                )
+                                new_end = self._find_anchor(
+                                    lines, end_anchor, projected_end - 1
+                                )
 
-                            if new_start is not None:
-                                recovered_start = new_start + 1
-                            else:
-                                anchor_mismatches += 1
+                                if new_start is not None:
+                                    recovered_start = new_start + 1
+                                else:
+                                    anchor_mismatches += 1
 
-                            if new_end is not None:
-                                recovered_end = new_end + 1
+                                if new_end is not None:
+                                    recovered_end = new_end + 1
+                                else:
+                                    anchor_mismatches += 1
                             else:
-                                anchor_mismatches += 1
+                                anchor_mismatches += 2
                         else:
                             anchor_mismatches += 2
 
@@ -1290,24 +1294,24 @@ class TransparencyManager:
                     if len(val_list) == 2:
                         orig_start_line = int(val_list[0])
                         orig_end_line = int(val_list[1])
-                    projected_start = orig_start_line + get_interpolated_shift(
-                        orig_start_line
-                    )
-                    projected_end = orig_end_line + get_interpolated_shift(
-                        orig_end_line
-                    )
-                    projected_start = max(1, min(N_new, projected_start))
-                    projected_end = max(1, min(N_new, projected_end))
-
-                    if projected_start > projected_end:
-                        logger.warning(
-                            f"Unrecoverable drift: invalid projected range [{projected_start}, {projected_end}] "
-                            f"for list section {name} in {file_path}"
+                        projected_start = orig_start_line + get_interpolated_shift(
+                            orig_start_line
                         )
-                        self.lock_entry(file_path)
-                        return None
+                        projected_end = orig_end_line + get_interpolated_shift(
+                            orig_end_line
+                        )
+                        projected_start = max(1, min(N_new, projected_start))
+                        projected_end = max(1, min(N_new, projected_end))
 
-                    recovered_sections[name] = [projected_start, projected_end]
+                        if projected_start > projected_end:
+                            logger.warning(
+                                f"Unrecoverable drift: invalid projected range [{projected_start}, {projected_end}] "
+                                f"for list section {name} in {file_path}"
+                            )
+                            self.lock_entry(file_path)
+                            return None
+
+                        recovered_sections[name] = [projected_start, projected_end]
 
             if (
                 total_range_sections > 0

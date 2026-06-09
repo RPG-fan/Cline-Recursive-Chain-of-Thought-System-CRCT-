@@ -86,7 +86,7 @@ def drain_local_render_process_roots() -> List[int]:
 
 def _popen_render_subprocess(
     command: List[str], mermaid_syntax: str
-) -> subprocess.Popen[bytes]:
+) -> subprocess.Popen[Any]:
     """Start mmdc in an isolated process group for targeted teardown."""
     popen_kwargs: Dict[str, Any] = {
         "stdin": subprocess.PIPE,
