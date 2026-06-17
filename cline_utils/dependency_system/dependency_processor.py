@@ -76,6 +76,7 @@ from cline_utils.dependency_system.utils.template_generator import (
 )
 from cline_utils.dependency_system.utils.tracker_batch_collector import (
     TrackerBatchCollector,
+    build_dependency_suggestions_with_reciprocals,
     create_doc_tracker_update,
     create_main_tracker_update,
     create_mini_tracker_update,
@@ -1049,9 +1050,10 @@ def handle_add_dependency(args: argparse.Namespace) -> int:
 
     suggestions_for_update_tracker: Optional[Dict[str, List[Tuple[str, str]]]] = None
     if final_target_keys_for_suggestion_list:
-        suggestions_for_update_tracker = {
-            final_source_key_for_suggestion: final_target_keys_for_suggestion_list
-        }
+        # Build forward suggestions from source to all targets
+        suggestions_for_update_tracker = build_dependency_suggestions_with_reciprocals(
+            {final_source_key_for_suggestion: final_target_keys_for_suggestion_list}
+        )
 
     file_to_module_map = {
         info.norm_path: info.parent_path
@@ -2798,7 +2800,7 @@ def handle_reconcile_transparency(args: argparse.Namespace) -> int:
         return 0
 
     reconciled_count = 0
-    with manager._update_context():
+    with manager.update_context():
         for file_path in all_files:
             try:
                 with open(file_path, "r", encoding="utf-8") as f:

@@ -1476,6 +1476,14 @@ def update_tracker(
     Performs path stability checks before migrating grid data.
     Calls tracker-specific logic for filtering, aggregation (main), and path determination.
     Uses hierarchical sorting for key strings.
+
+    IMPORTANT — Reciprocal propagation invariant:
+    When called with ``return_update=False`` (direct write mode), reciprocal dependency
+    characters are NOT applied.  Reciprocal application now lives exclusively in
+    ``TrackerBatchCollector._consolidate_grids()`` (Phase 1B).  Callers that use the
+    direct-write path must be aware that only the forward direction of a dependency
+    will be written.  Prefer ``return_update=True`` + ``TrackerBatchCollector`` for any
+    call that applies suggestions so that reciprocals are batch-applied correctly.
     """
     logger.debug(
         f"--- update_tracker CALLED --- Suggestion: '{output_file_suggestion}', Type: '{tracker_type}', ForceSugg: {force_apply_suggestions}, ApplyAST: {apply_ast_overrides}"
@@ -2743,7 +2751,6 @@ def update_tracker(
                 ]
                 final_char_to_set_in_grid = dep_char_sugg
 
-                is_upgraded_to_x_this_link = False
                 if final_char_to_set_in_grid in ("<", ">"):
                     char_in_reverse_cell = temp_decomp_grid_rows[tgt_local_idx][
                         src_local_idx
@@ -2757,7 +2764,6 @@ def update_tracker(
                             f"    Mutual dependency formed for {src_ki_in_this_tracker.norm_path} <-> {tgt_ki_in_this_tracker.norm_path}. Upgrading to 'x'."
                         )
                         final_char_to_set_in_grid = "x"
-                        is_upgraded_to_x_this_link = True
                         if temp_decomp_grid_rows[tgt_local_idx][src_local_idx] != "x":
                             temp_decomp_grid_rows[tgt_local_idx][src_local_idx] = "x"
                             suggestion_applied_flag = True
@@ -2836,56 +2842,12 @@ def update_tracker(
                         ):
                             applied_manual_dep_type = "mixed"
 
-                    if not is_upgraded_to_x_this_link:
-                        reciprocal_char_to_set: Optional[str] = None
-                        if final_char_to_set_in_grid == ">":
-                            reciprocal_char_to_set = "<"
-                        elif final_char_to_set_in_grid == "<":
-                            reciprocal_char_to_set = ">"
-                        elif final_char_to_set_in_grid == "x":
-                            reciprocal_char_to_set = "x"
-
-                        if reciprocal_char_to_set:
-                            existing_char_in_reverse = temp_decomp_grid_rows[
-                                tgt_local_idx
-                            ][src_local_idx]
-                            apply_reciprocal_to_cell = False
-                            if (
-                                force_apply_suggestions
-                                and existing_char_in_reverse != "x"
-                                and existing_char_in_reverse != reciprocal_char_to_set
-                            ):
-                                apply_reciprocal_to_cell = True
-                            elif not force_apply_suggestions and (
-                                existing_char_in_reverse == PLACEHOLDER_CHAR
-                                or (
-                                    existing_char_in_reverse != "n"
-                                    and get_priority(reciprocal_char_to_set)
-                                    > get_priority(existing_char_in_reverse)
-                                )
-                            ):
-                                apply_reciprocal_to_cell = True
-
-                            if apply_reciprocal_to_cell:
-                                if (
-                                    temp_decomp_grid_rows[tgt_local_idx][src_local_idx]
-                                    != reciprocal_char_to_set
-                                ):
-                                    temp_decomp_grid_rows[tgt_local_idx][
-                                        src_local_idx
-                                    ] = reciprocal_char_to_set
-                                    suggestion_applied_flag = True
-                                    if force_apply_suggestions:
-                                        print(
-                                            f"    Reciprocal Applied: {tgt_ki_in_this_tracker.norm_path} -> {src_ki_in_this_tracker.norm_path} = '{reciprocal_char_to_set}'"
-                                        )
-                                    else:
-                                        logger.debug(
-                                            f"    Reciprocal Applied: {tgt_ki_in_this_tracker.norm_path} -> {src_ki_in_this_tracker.norm_path} = '{reciprocal_char_to_set}'"
-                                        )
-                                # If forced, this reciprocal action also contributes to metadata timestamp update via any_forced_suggestion_processed_for_metadata
-                                # No need to update applied_manual_... vars again as the primary direction covers the intent.
-
+                    # Reciprocal application has been moved to
+                    # TrackerBatchCollector._consolidate_grids() where it is
+                    # performed as a single batch pass after all forward
+                    # dependencies have been consolidated from the master state.
+                    # This eliminates thousands of individual reciprocal
+                    # set operations during per-suggestion processing.
                 elif (
                     not force_apply_suggestions
                     and existing_char_in_grid not in (PLACEHOLDER_CHAR, DIAGONAL_CHAR)

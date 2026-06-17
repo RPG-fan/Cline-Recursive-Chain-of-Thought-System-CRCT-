@@ -10,7 +10,7 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from cline_utils.dependency_system.core.dependency_grid import (
     DIAGONAL_CHAR,
@@ -31,6 +31,83 @@ from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.path_utils import is_subpath, normalize_path
 
 logger = logging.getLogger(__name__)
+
+DIRECTIONAL_RECIPROCAL_CHARS = {">": "<", "<": ">", "x": "x"}
+
+
+def get_reciprocal_dependency_char(dep_char: str) -> Optional[str]:
+    return DIRECTIONAL_RECIPROCAL_CHARS.get(dep_char)
+
+
+def build_dependency_suggestions_with_reciprocals(
+    suggestions: Dict[str, List[Tuple[str, str]]]
+) -> Dict[str, List[Tuple[str, str]]]:
+    suggestions_with_reciprocals = {
+        source_key: list(deps) for source_key, deps in suggestions.items()
+    }
+
+    for source_key, deps in suggestions.items():
+        for target_key, dep_char in deps:
+            reciprocal_char = get_reciprocal_dependency_char(dep_char)
+            if reciprocal_char is None:
+                continue
+            suggestions_with_reciprocals.setdefault(target_key, []).append(
+                (source_key, reciprocal_char)
+            )
+
+    return suggestions_with_reciprocals
+
+
+def _should_apply_reciprocal_dependency(
+    current_reverse: str,
+    reciprocal_char: str,
+    get_priority: Callable[[str], int],
+    force_apply_suggestions: bool,
+) -> bool:
+    if force_apply_suggestions:
+        return current_reverse != "x" and current_reverse != reciprocal_char
+
+    return current_reverse == PLACEHOLDER_CHAR or (
+        current_reverse != "n"
+        and get_priority(reciprocal_char) > get_priority(current_reverse)
+    )
+
+
+def apply_reciprocal_dependencies_to_grid(
+    grid_rows: List[List[str]],
+    force_apply_suggestions: bool,
+    get_priority: Callable[[str], int],
+) -> int:
+    changes = 0
+
+    for row_idx, row in enumerate(grid_rows):
+        for col_idx in range(len(row)):
+            if row_idx == col_idx:
+                continue
+            if col_idx >= len(grid_rows):
+                continue
+            if row_idx >= len(grid_rows[col_idx]):
+                continue
+
+            forward_char = row[col_idx]
+            reciprocal_char = get_reciprocal_dependency_char(forward_char)
+            if reciprocal_char is None:
+                continue
+
+            current_reverse = grid_rows[col_idx][row_idx]
+            if (
+                current_reverse != reciprocal_char
+                and _should_apply_reciprocal_dependency(
+                    current_reverse,
+                    reciprocal_char,
+                    get_priority,
+                    force_apply_suggestions,
+                )
+            ):
+                grid_rows[col_idx][row_idx] = reciprocal_char
+                changes += 1
+
+    return changes
 
 
 @dataclass
@@ -364,7 +441,7 @@ class TrackerBatchCollector:
                 files_with_maps: Set[str] = set()
                 paths_to_virtualize: List[str] = []
                 for result in results:
-                    if isinstance(result, dict):
+                    if result is not None:
                         path = result.get("path")
                         if isinstance(path, str):
                             files_processed.add(path)
@@ -547,9 +624,59 @@ class TrackerBatchCollector:
                         f"Applied {tracker_changes} consolidation changes to {os.path.basename(u.output_file)}"
                     )
 
+            # --- PHASE 1B: Batch Reciprocal Application ---
+            # Instead of applying reciprocals per-suggestion inside update_tracker
+            # (which would do up to 2246 individual set operations), we apply them
+            # here in a single pass after all forward dependencies have been
+            # consolidated from the master highest_dependency_cache.
+            #
+            # This is correct because the reciprocal is purely a function of the
+            # forward-direction character already set in the grid.
+            reciprocal_changes = 0
+            for u in self.pending_updates:
+                if not u.grid_rows or not u.key_info_list:
+                    continue
+
+                tracker_recip_changes = 0
+                n = len(u.key_info_list)
+
+                # Decompress all rows up-front into a mutable matrix so that
+                # both forward reads and reverse writes operate on the same
+                # in-memory representation.  This avoids the ordering hazard
+                # where `u.grid_rows[ci]` is mutated *after* the outer loop
+                # already appended the old compressed value to `new_rows`.
+                decomp: List[List[str]] = []
+                decomp_ok: List[bool] = []
+                for ri in range(n):
+                    try:
+                        decomp.append(list(decompress(u.grid_rows[ri])))
+                        decomp_ok.append(True)
+                    except Exception:
+                        decomp.append([])
+                        decomp_ok.append(False)
+
+                tracker_recip_changes = apply_reciprocal_dependencies_to_grid(
+                    decomp, u.force_apply_suggestions, get_priority
+                )
+
+                # Re-compress all rows from the fully-mutated matrix
+                if tracker_recip_changes > 0:
+                    u.grid_rows = [
+                        compress("".join(decomp[ri]))
+                        if decomp_ok[ri]
+                        else u.grid_rows[ri]
+                        for ri in range(n)
+                    ]
+                    reciprocal_changes += tracker_recip_changes
+                    logger.debug(
+                        f"Applied {tracker_recip_changes} reciprocal changes to {os.path.basename(u.output_file)}"
+                    )
+
             summary_parts: List[str] = []
             if total_changes > 0:
                 summary_parts.append(f"{total_changes} consolidation changes")
+            if reciprocal_changes > 0:
+                summary_parts.append(f"{reciprocal_changes} reciprocal changes")
             if total_suggestions > 0:
                 summary_parts.append(f"{total_suggestions} suggestions applied")
             if total_structural > 0:
