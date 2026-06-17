@@ -2405,11 +2405,10 @@ def _load_reranker_model():
                 )
 
                 # Only move non-quantized models manually
-                if _reranker_model is not None and not getattr(_reranker_model, "is_quantized", False):
+                if not getattr(_reranker_model, "is_quantized", False):
                     _reranker_model.to(device)
 
-            if _reranker_model is not None:
-                _reranker_model.eval()
+            _reranker_model.eval()
 
             # Create a dummy tensor to prime the CUDA context with the expected dtype and device
             if device == "cuda":
@@ -2419,7 +2418,7 @@ def _load_reranker_model():
                 logger.debug("CUDA context primed with dummy tensor.")
 
             # Verify Flash Attention
-            if _reranker_model is not None and hasattr(_reranker_model.config, "_attn_implementation"):
+            if hasattr(_reranker_model.config, "_attn_implementation"):
                 attn_impl = getattr(
                     _reranker_model.config, "_attn_implementation", "unknown"
                 )
@@ -2431,16 +2430,15 @@ def _load_reranker_model():
                     )
 
             # Measure model memory footprint for adaptive worker calculation
-            if _reranker_model is not None:
-                if device == "cuda":
-                    torch.cuda.synchronize()
-                    model_memory_gb = torch.cuda.memory_allocated() / (1024**3)
-                    logger.info(
-                        f"Loaded Qwen3-Reranker (Q8 quantized) on {_reranker_model.device}. "
-                        f"Model footprint: {model_memory_gb:.2f}GB"
-                    )
-                else:
-                    logger.info(f"Loaded Qwen3-Reranker-0.6B on {_reranker_model.device}")
+            if device == "cuda":
+                torch.cuda.synchronize()
+                model_memory_gb = torch.cuda.memory_allocated() / (1024**3)
+                logger.info(
+                    f"Loaded Qwen3-Reranker (Q8 quantized) on {_reranker_model.device}. "
+                    f"Model footprint: {model_memory_gb:.2f}GB"
+                )
+            else:
+                logger.info(f"Loaded Qwen3-Reranker-0.6B on {_reranker_model.device}")
         except Exception as e:
             logger.error(f"Failed to load reranker: {e}", exc_info=True)
             _clear_reranker_load_state()
@@ -3051,10 +3049,10 @@ def generate_embeddings(
         logger.info(
             "Performing pre-alignment and drift checks on transparency registry in batch..."
         )
-        with tm_manager._update_context():
+        with tm_manager.update_context():
             for key_info in files_to_process:
                 # Trigger read_file_transparently which does check_drift and auto-recovery inside our single context!
-                # Since we are inside _update_context, any recovery or invalidation will modify self._registry in-memory
+                # Since we are inside update_context, any recovery or invalidation will modify self._registry in-memory
                 # and only write to disk ONCE at the end.
                 read_file_transparently(key_info.norm_path)
     except Exception as e:

@@ -8,3 +8,5 @@ docs/**
 .agent/**
 .clinerules.config.json
 debug_llm_repair.log
+.kilo/**
+cline_utils/dependency_system/utils/cache/**

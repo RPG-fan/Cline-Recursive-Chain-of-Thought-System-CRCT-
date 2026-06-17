@@ -9,7 +9,10 @@ from typing import Callable, Dict, List, Tuple, Optional, Any
 
 from cline_utils.dependency_system.analysis.local_llm_processor import LocalLLMProcessor
 from cline_utils.dependency_system.core.key_manager import KeyInfo
-from cline_utils.dependency_system.io.tracker_io import update_tracker, PathMigrationInfo
+from cline_utils.dependency_system.io.tracker_io import (
+    update_tracker,
+    PathMigrationInfo,
+)
 from cline_utils.dependency_system.utils.template_generator import (
     add_code_doc_dependency_to_checklist,
 )
@@ -246,9 +249,66 @@ class PlaceholderResolver:
                 # Call the injected prepare_func from the caller's context
                 return prefetch_executor.submit(prepare_func, sk, sp, tk, tp)
 
+            # Track source-key boundaries for per-source KV-cache optimization.
+            # With the two-stage sort (source_key, -token_count) in effect, all pairs
+            # for the same source are contiguous, so we can detect source changes.
+            current_source: Optional[str] = None
+
             prefetch_queue: deque[concurrent.futures.Future[PreparedPair]] = deque()
             for pair in itertools.islice(task_iter, PREFETCH_AHEAD):
                 prefetch_queue.append(_submit_next(pair))
+
+            # Tracks the set of all source keys seen so far, used to detect
+            # sort-order violations (a source key appearing after a different
+            # source key has already been processed signals a broken invariant).
+            seen_sources: set = set()
+
+            def _process_with_source_tracking(prepared: PreparedPair) -> None:
+                nonlocal current_source
+                if prepared.srckey != current_source:
+                    if current_source is not None:
+                        logger.debug(
+                            f"Source boundary: '{current_source}' -> '{prepared.srckey}' "
+                            f"(ending source group {current_source})"
+                        )
+                        # Detect sort-order regression: if we've seen this source
+                        # before, the contiguous-group invariant has been violated.
+                        if prepared.srckey in seen_sources:
+                            logger.debug(
+                                f"KV-cache source-group invariant violated: "
+                                f"'{prepared.srckey}' was already processed earlier. "
+                                "KV-cache pinning will degrade to no-ops for this source. "
+                                "Ensure tasks are sorted by (source_key, -token_count)."
+                            )
+                    seen_sources.add(current_source)
+                    # New source — clear old pinned state (safe no-op if None)
+                    self.processor.clear_pinned_state()
+                    current_source = prepared.srckey
+                else:
+                    # Same source — restore cached context if available
+                    self.processor.restore_pinned_state()
+                _process_single_prepared(prepared)
+
+            def _maybe_pin_for_next(prepared: PreparedPair) -> None:
+                """Opportunistic lookahead: pin KV cache only if the next queued
+                pair shares the same source key, making restoration beneficial."""
+                if not prefetch_queue:
+                    self.processor.clear_pinned_state()
+                    return
+                next_future = prefetch_queue[0]
+                if not next_future.done():
+                    # Not ready yet — can't peek; don't pin to be safe
+                    self.processor.clear_pinned_state()
+                    return
+                try:
+                    next_prepared = next_future.result()
+                except Exception:
+                    self.processor.clear_pinned_state()
+                    return
+                if next_prepared.srckey == prepared.srckey:
+                    self.processor.save_pinned_state()
+                else:
+                    self.processor.clear_pinned_state()
 
             for next_pair in task_iter:
                 prefetch_queue.append(_submit_next(next_pair))
@@ -261,11 +321,13 @@ class PlaceholderResolver:
                     continue
 
                 try:
-                    _process_single_prepared(prepared)
+                    _process_with_source_tracking(prepared)
                 except Exception as e:
                     logger.error(
                         f"Error processing pair {prepared.srckey}->{prepared.tgtkey}: {e}"
                     )
+                else:
+                    _maybe_pin_for_next(prepared)
 
             while prefetch_queue:
                 future = prefetch_queue.popleft()
@@ -277,11 +339,13 @@ class PlaceholderResolver:
                     continue
 
                 try:
-                    _process_single_prepared(prepared)
+                    _process_with_source_tracking(prepared)
                 except Exception as e:
                     logger.error(
                         f"Error processing pair {prepared.srckey}->{prepared.tgtkey} (drain): {e}"
                     )
+                else:
+                    _maybe_pin_for_next(prepared)
 
         if processed_count > 0:
             print(

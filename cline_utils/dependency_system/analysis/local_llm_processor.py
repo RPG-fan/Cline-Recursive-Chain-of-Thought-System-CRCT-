@@ -46,17 +46,22 @@ class LocalLLMProcessor:
         # Setup repair logging
         self._setup_repair_logging()
 
-    def save_pinned_state(self):
+    def save_pinned_state(self) -> None:
         """Saves the current KV cache state (e.g., after processing a system prompt)."""
         if self._model and hasattr(self._model, "save_state"):
             self._pinned_state = self._model.save_state()
             logger.info("KV cache state pinned successfully.")
 
-    def restore_pinned_state(self):
+    def restore_pinned_state(self) -> None:
         """Restores the previously pinned KV cache state."""
         if self._model and self._pinned_state and hasattr(self._model, "load_state"):
             self._model.load_state(self._pinned_state)
             logger.info("Pinned KV cache state restored.")
+
+    def clear_pinned_state(self) -> None:
+        """Releases the pinned KV cache state, freeing memory."""
+        self._pinned_state = None
+        logger.debug("Pinned KV cache state cleared.")
 
     def _load_model(self, required_ctx: int, n_gpu_layers: Optional[int] = None) -> Any:
         """
@@ -103,6 +108,9 @@ class LocalLLMProcessor:
                         f"Reloading model to increase n_ctx from {current} to {n_ctx}"
                     )
 
+                self._pinned_state = (
+                    None  # invalidate old KV state — new model instance incoming
+                )
                 self._close_internal(pause_for_vram=True)
 
             if Llama is None:
@@ -193,7 +201,9 @@ class LocalLLMProcessor:
             if tokenizer is not None:
                 return tokenizer_factory.count_tokens(text, tokenizer)
         except Exception as e:
-            logger.warning(f"Centralized tokenizer factory failed: {e}. Trying in-memory llama-cpp model.")
+            logger.warning(
+                f"Centralized tokenizer factory failed: {e}. Trying in-memory llama-cpp model."
+            )
 
         # 2. Secondary fallback: use the in-memory llama-cpp-python model if it's already loaded
         if self._model is not None:
@@ -219,17 +229,13 @@ class LocalLLMProcessor:
         """
         prompt_tokens = self.get_token_count(prompt)
         required_ctx = prompt_tokens + max_tokens
-        
+
         model = self._load_model(required_ctx)
         if model is None:
             raise RuntimeError("Model was not loaded correctly.")
-            
+
         output = model(
-            prompt,
-            max_tokens=max_tokens,
-            stop=stop,
-            temperature=temperature,
-            echo=echo
+            prompt, max_tokens=max_tokens, stop=stop, temperature=temperature, echo=echo
         )
         return str(output["choices"][0]["text"].strip())
 
@@ -672,7 +678,9 @@ Return ONLY the reformatted output.
                     logger.debug(
                         f"Waiting for VRAM to return to baseline: {self._vram_baseline_mb:.1f} MB"
                     )
-                    validator.wait_for_vram_release(target_free_mb=self._vram_baseline_mb)
+                    validator.wait_for_vram_release(
+                        target_free_mb=self._vram_baseline_mb
+                    )
                 else:
                     # Fallback: layer-count estimate (existing behavior)
                     expected_freed_mb = self._current_n_gpu_layers * self.MB_PER_LAYER
