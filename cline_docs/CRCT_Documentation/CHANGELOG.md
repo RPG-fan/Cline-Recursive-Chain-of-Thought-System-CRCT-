@@ -5,6 +5,26 @@ All notable changes to the Cline Recursive Chain-of-Thought System (CRCT) will b
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-06-17
+
+### Added
+- **Malformed Transparency Recovery Guards**: Added regression coverage for malformed transparency metadata, including malformed ranges, invalid `start_line`, invalid/missing `total_lines`, and malformed connection-map metadata.
+- **Centralized Reciprocal Dependency Helpers**: Added shared reciprocal dependency helpers for building reciprocal suggestions and applying reciprocal grid characters in a single batch pass.
+- **KV-Cache Source Grouping Tests**: Added coverage for placeholder resolver KV-cache source grouping behavior.
+- **Dependency Ignore Rules**: Ignored local `.kilo/` state and generated dependency-system cache files.
+
+### Changed
+- **Transparency Recovery Hardening**: `TransparencyManager.recover_alignment()` now validates required line metadata before use, derives original line counts from section metadata when possible, safely ignores malformed optional connection metadata, and locks unrecoverable entries.
+- **Transparent Read Failure Handling**: `read_file_transparently()` now locks the transparency entry and returns `None` metadata when recovery raises an exception.
+- **Public Transparency Context Manager**: Renamed/exposed `TransparencyManager.update_context()` and updated dependency-system callers away from the private `_update_context()` name.
+- **Reciprocal Dependency Consolidation**: Moved reciprocal dependency application out of duplicated call-site logic and into `TrackerBatchCollector`, with `handle_add_dependency()` using the shared suggestion helper.
+- **Placeholder Resolver KV-Cache Pinning**: Placeholder resolution now tracks source-key boundaries and pins/restores local LLM KV-cache state within contiguous source groups.
+- **Reranker Load Handling**: Reranker loading now unconditionally sets the loaded model to eval mode and logs CUDA memory footprint after load.
+
+### Fixed
+- **Reciprocal Application Duplication**: Removed duplicated reciprocal dependency propagation from `update_tracker()` and `handle_add_dependency()` paths by centralizing it in shared helpers.
+- **Transparency Metadata Drift Crashes**: Prevented malformed transparency metadata from crashing recovery and ensured failed recovery invalidates the affected entry.
+
 ## [8.6.0] - 2026-05-21
 
 ### Added

@@ -12,7 +12,6 @@ try:
 
     _HAS_MSVCRT = True
 except ImportError:
-    msvcrt = None  # type: ignore
     _HAS_MSVCRT = False
 
 try:
@@ -20,7 +19,6 @@ try:
 
     _HAS_FCNTL = True
 except ImportError:
-    fcntl = None  # type: ignore
     _HAS_FCNTL = False
 from cline_utils.dependency_system.utils.calculate_hash import calculate_content_hash
 from cline_utils.dependency_system.utils.cache_manager import (
@@ -245,11 +243,11 @@ class TransparencyLock:
 
         while True:
             try:
-                if _HAS_MSVCRT and msvcrt is not None:
+                if _HAS_MSVCRT:
                     self.fd.seek(0)
-                    msvcrt.locking(self.fd.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore
-                elif _HAS_FCNTL and fcntl is not None:
-                    fcntl.flock(self.fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore
+                    msvcrt.locking(self.fd.fileno(), msvcrt.LK_NBLCK, 1)
+                elif _HAS_FCNTL:
+                    fcntl.flock(self.fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except (OSError, BlockingIOError):
                 if time.time() - start_time > self.timeout:
@@ -264,11 +262,11 @@ class TransparencyLock:
     def release(self) -> None:
         if self.fd:
             try:
-                if _HAS_MSVCRT and msvcrt is not None:
+                if _HAS_MSVCRT:
                     self.fd.seek(0)
-                    msvcrt.locking(self.fd.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore
-                elif _HAS_FCNTL and fcntl is not None:
-                    fcntl.flock(self.fd.fileno(), fcntl.LOCK_UN)  # type: ignore
+                    msvcrt.locking(self.fd.fileno(), msvcrt.LK_UNLCK, 1)
+                elif _HAS_FCNTL:
+                    fcntl.flock(self.fd.fileno(), fcntl.LOCK_UN)
             except Exception:
                 pass
             finally:
@@ -398,7 +396,7 @@ class TransparencyManager:
                 self._save_under_lock()
 
     @contextlib.contextmanager
-    def _update_context(self):
+    def update_context(self):
         """
         Context manager to handle file locking, reloading the registry from disk,
         allowing modifications to self._registry, and saving it back atomically.
@@ -443,7 +441,7 @@ class TransparencyManager:
 
     def lock_entry(self, file_path: str) -> None:
         """Flags the transparency metadata for a file as locked/pending realignment."""
-        with self._update_context():
+        with self.update_context():
             norm_path = normalize_path(file_path)
             if norm_path in self._registry["files"]:
                 self._registry["files"][norm_path]["locked"] = True
@@ -462,7 +460,7 @@ class TransparencyManager:
             sections: Dictionary mapping section names (e.g. 'TAGS') to metadata.
             content: Current file content to generate checksum.
         """
-        with self._update_context():
+        with self.update_context():
             norm_path = normalize_path(file_path)
             checksum = calculate_content_hash(content, file_path)
             existing = self._registry["files"].get(norm_path, {})
@@ -562,7 +560,7 @@ class TransparencyManager:
         *,
         defer_save: bool = False,
     ) -> None:
-        with self._update_context():
+        with self.update_context():
             norm_path = normalize_path(file_path)
             existing = self._registry["files"].get(norm_path, {})
             existing_dict = (
@@ -601,7 +599,7 @@ class TransparencyManager:
         Returns:
             True if file content or metadata changed.
         """
-        with self._update_context():
+        with self.update_context():
             norm_path = normalize_path(file_path)
             if self._is_excluded(
                 norm_path, file_path, "virtualize connection maps for"
@@ -677,7 +675,7 @@ class TransparencyManager:
         Perform virtualization of connection maps on multiple files in bulk,
         saving the registry exactly once at the end to avoid expensive disk I/O.
         """
-        with self._update_context():
+        with self.update_context():
             virtualized = 0
             for path in file_paths:
                 if self.virtualize_connection_maps(
@@ -694,7 +692,7 @@ class TransparencyManager:
         For any file in files_processed that is NOT in files_with_maps, removes 'connection_maps'
         and 'connection_map_lines' to ensure they don't linger as ghost/stale metadata.
         """
-        with self._update_context():
+        with self.update_context():
             for file_path in files_processed:
                 if file_path in files_with_maps:
                     continue
@@ -712,7 +710,7 @@ class TransparencyManager:
         saving the registry exactly once at the end.
         """
         results: Dict[str, bool] = {}
-        with self._update_context():
+        with self.update_context():
             for path in file_paths:
                 results[path] = self.restore_markers(path)
         return results
@@ -723,7 +721,7 @@ class TransparencyManager:
         saving the registry exactly once at the end.
         """
         results: Dict[str, bool] = {}
-        with self._update_context():
+        with self.update_context():
             for path in file_paths:
                 results[path] = self.remove_markers(path)
         return results
@@ -751,7 +749,7 @@ class TransparencyManager:
         Returns:
             True if markers were restored, False otherwise.
         """
-        with self._update_context():
+        with self.update_context():
             norm_path = normalize_path(file_path)
 
             # Safety Check: Do not operate on excluded files or directories
@@ -988,7 +986,7 @@ class TransparencyManager:
         Returns:
             True if markers were removed and registered, False otherwise.
         """
-        with self._update_context():
+        with self.update_context():
             norm_path = normalize_path(file_path)
 
             # Safety Check: Do not operate on excluded files or directories
@@ -1110,7 +1108,7 @@ class TransparencyManager:
 
     def invalidate_entry(self, file_path: str) -> None:
         """Invalidates/deletes the transparency metadata for a file."""
-        with self._update_context():
+        with self.update_context():
             norm_path = normalize_path(file_path)
             if norm_path in self._registry["files"]:
                 del self._registry["files"][norm_path]
@@ -1128,7 +1126,7 @@ class TransparencyManager:
         If unrecoverable, places a lock on the entry that is dependent upon the next
         analyze project run to realign it.
         """
-        with self._update_context():
+        with self.update_context():
             norm_path = normalize_path(file_path)
             metadata = self.get_raw_file_metadata(file_path)
             if not metadata:
@@ -1141,47 +1139,54 @@ class TransparencyManager:
                 self.lock_entry(file_path)
                 return None
 
-            N_orig = metadata.get("total_lines")
+            N_orig = _coerce_line(metadata.get("total_lines"))
             if N_orig is None:
                 max_line = 0
-                sections = cast(Dict[str, Any], metadata.get("sections", {}))
-                for name, val in sections.items():
-                    if isinstance(val, dict):
-                        d_val = cast(Dict[str, Any], val)
-                        s_line = d_val.get("start_line")
-                        if isinstance(s_line, int):
-                            max_line = max(max_line, s_line)
-                        rng = d_val.get("range")
-                        if isinstance(rng, (list, tuple)):
-                            rng_list = cast(List[Any], rng)
-                            if len(rng_list) == 2 and isinstance(rng_list[1], int):
-                                max_line = max(max_line, rng_list[1])
-                    elif isinstance(val, list):
-                        val_list = cast(List[Any], val)
-                        if len(val_list) == 2 and isinstance(val_list[1], int):
-                            max_line = max(max_line, val_list[1])
-                connection_map_lines = cast(
-                    List[Dict[str, Any]], metadata.get("connection_map_lines", [])
-                )
-                for item in connection_map_lines:
-                    if item and "line" in item:
-                        c_line = item.get("line")
-                        if isinstance(c_line, int):
-                            max_line = max(max_line, c_line)
+                sections_for_derivation = metadata.get("sections", {})
+                if isinstance(sections_for_derivation, dict):
+                    for name, val in sections_for_derivation.items():
+                        if isinstance(val, dict):
+                            d_val = cast(Dict[str, Any], val)
+                            s_line = _coerce_line(d_val.get("start_line"))
+                            if s_line is not None:
+                                max_line = max(max_line, s_line)
+                            rng = d_val.get("range")
+                            if isinstance(rng, (list, tuple)):
+                                rng_list = cast(List[Any], rng)
+                                if len(rng_list) == 2:
+                                    end_line = _coerce_line(rng_list[1])
+                                    if end_line is not None:
+                                        max_line = max(max_line, end_line)
+                        elif isinstance(val, list):
+                            val_list = cast(List[Any], val)
+                            if len(val_list) == 2:
+                                end_line = _coerce_line(val_list[1])
+                                if end_line is not None:
+                                    max_line = max(max_line, end_line)
+                connection_map_lines = metadata.get("connection_map_lines", [])
+                if isinstance(connection_map_lines, list):
+                    for item in connection_map_lines:
+                        if isinstance(item, dict):
+                            c_line = _coerce_line(item.get("line"))
+                            if c_line is not None:
+                                max_line = max(max_line, c_line)
                 N_orig = max_line if max_line > 0 else N_new
 
             # 1. Establish the points for triangulation/interpolation: (original_line, shift)
             points = [(1, 0)]  # Start of file (0% freebie)
 
             floating_markers = metadata.get("floating_markers", [])
-            for marker in floating_markers:
-                orig_l = marker.get("original_line")
-                anchor_text = marker.get("anchor")
-                if orig_l and anchor_text:
-                    found_idx = self._find_anchor(lines, anchor_text, orig_l - 1)
-                    if found_idx is not None:
-                        new_l = found_idx + 1
-                        points.append((orig_l, new_l - orig_l))
+            if isinstance(floating_markers, list):
+                for marker in floating_markers:
+                    if not isinstance(marker, dict):
+                        continue
+                    orig_l = _coerce_line(marker.get("original_line"))
+                    anchor_text = marker.get("anchor")
+                    if orig_l is not None and isinstance(anchor_text, str):
+                        found_idx = self._find_anchor(lines, anchor_text, orig_l - 1)
+                        if found_idx is not None:
+                            new_l = found_idx + 1
+                            points.append((orig_l, new_l - orig_l))
 
             # End of file (100% freebie)
             if N_orig > 1:
@@ -1219,8 +1224,22 @@ class TransparencyManager:
                     v_dict = cast(Dict[str, Any], val)
                     if "range" in v_dict:
                         total_range_sections += 1
-                        orig_start_line = int(v_dict["range"][0])
-                        orig_end_line = int(v_dict["range"][1])
+                        rng = v_dict.get("range")
+                        if not isinstance(rng, (list, tuple)) or len(rng) != 2:
+                            logger.warning(
+                                f"Unrecoverable drift: malformed dict range for section {name} in {file_path}"
+                            )
+                            self.lock_entry(file_path)
+                            return None
+
+                        orig_start_line = _coerce_line(rng[0])
+                        orig_end_line = _coerce_line(rng[1])
+                        if orig_start_line is None or orig_end_line is None:
+                            logger.warning(
+                                f"Unrecoverable drift: invalid dict range [{rng[0]!r}, {rng[1]!r}] for section {name} in {file_path}"
+                            )
+                            self.lock_entry(file_path)
+                            return None
 
                         projected_start = orig_start_line + get_interpolated_shift(
                             orig_start_line
@@ -1238,28 +1257,30 @@ class TransparencyManager:
 
                         if isinstance(anchors, list):
                             anchors_list = cast(List[Any], anchors)
+                            start_anchor: str = ""
+                            end_anchor: str = ""
                             if len(anchors_list) == 2:
                                 start_anchor = str(anchors_list[0])
                                 end_anchor = str(anchors_list[1])
-
-                                new_start = self._find_anchor(
-                                    lines, start_anchor, projected_start - 1
-                                )
-                                new_end = self._find_anchor(
-                                    lines, end_anchor, projected_end - 1
-                                )
-
-                                if new_start is not None:
-                                    recovered_start = new_start + 1
-                                else:
-                                    anchor_mismatches += 1
-
-                                if new_end is not None:
-                                    recovered_end = new_end + 1
-                                else:
-                                    anchor_mismatches += 1
                             else:
                                 anchor_mismatches += 2
+
+                            new_start = self._find_anchor(
+                                lines, start_anchor, projected_start - 1
+                            )
+                            new_end = self._find_anchor(
+                                lines, end_anchor, projected_end - 1
+                            )
+
+                            if new_start is not None:
+                                recovered_start = new_start + 1
+                            else:
+                                anchor_mismatches += 1
+
+                            if new_end is not None:
+                                recovered_end = new_end + 1
+                            else:
+                                anchor_mismatches += 1
                         else:
                             anchor_mismatches += 2
 
@@ -1280,7 +1301,13 @@ class TransparencyManager:
                             "anchors": anchors,
                         }
                     elif "start_line" in v_dict:
-                        orig_start = int(v_dict["start_line"])
+                        orig_start = _coerce_line(v_dict.get("start_line"))
+                        if orig_start is None:
+                            logger.warning(
+                                f"Unrecoverable drift: invalid start_line {v_dict.get('start_line')!r} for section {name} in {file_path}"
+                            )
+                            self.lock_entry(file_path)
+                            return None
                         projected_start = orig_start + get_interpolated_shift(
                             orig_start
                         )
@@ -1291,27 +1318,40 @@ class TransparencyManager:
                         }
                 elif isinstance(val, list):
                     val_list = cast(List[Any], val)
-                    if len(val_list) == 2:
-                        orig_start_line = int(val_list[0])
-                        orig_end_line = int(val_list[1])
-                        projected_start = orig_start_line + get_interpolated_shift(
-                            orig_start_line
+                    if len(val_list) != 2:
+                        logger.warning(
+                            f"Unrecoverable drift: malformed list range for section {name} in {file_path}"
                         )
-                        projected_end = orig_end_line + get_interpolated_shift(
-                            orig_end_line
+                        self.lock_entry(file_path)
+                        return None
+
+                    orig_start_line = _coerce_line(val_list[0])
+                    orig_end_line = _coerce_line(val_list[1])
+                    if orig_start_line is None or orig_end_line is None:
+                        logger.warning(
+                            f"Unrecoverable drift: invalid list range [{val_list[0]!r}, {val_list[1]!r}] for section {name} in {file_path}"
                         )
-                        projected_start = max(1, min(N_new, projected_start))
-                        projected_end = max(1, min(N_new, projected_end))
+                        self.lock_entry(file_path)
+                        return None
 
-                        if projected_start > projected_end:
-                            logger.warning(
-                                f"Unrecoverable drift: invalid projected range [{projected_start}, {projected_end}] "
-                                f"for list section {name} in {file_path}"
-                            )
-                            self.lock_entry(file_path)
-                            return None
+                    projected_start = orig_start_line + get_interpolated_shift(
+                        orig_start_line
+                    )
+                    projected_end = orig_end_line + get_interpolated_shift(
+                        orig_end_line
+                    )
+                    projected_start = max(1, min(N_new, projected_start))
+                    projected_end = max(1, min(N_new, projected_end))
 
-                        recovered_sections[name] = [projected_start, projected_end]
+                    if projected_start > projected_end:
+                        logger.warning(
+                            f"Unrecoverable drift: invalid projected range [{projected_start}, {projected_end}] "
+                            f"for list section {name} in {file_path}"
+                        )
+                        self.lock_entry(file_path)
+                        return None
+
+                    recovered_sections[name] = [projected_start, projected_end]
 
             if (
                 total_range_sections > 0
@@ -1325,22 +1365,30 @@ class TransparencyManager:
 
             # 3. Update connection maps in registry first so they get carried over
             recovered_connection_maps: List[Dict[str, Any]] = []
-            for record in metadata.get("connection_maps", []):
-                new_record = dict(record)
-                orig_sl = record.get("source_line")
-                if orig_sl is not None:
-                    new_record["source_line"] = orig_sl + get_interpolated_shift(
-                        orig_sl
-                    )
-                recovered_connection_maps.append(new_record)
+            connection_maps = metadata.get("connection_maps", [])
+            if isinstance(connection_maps, list):
+                for record in connection_maps:
+                    if not isinstance(record, dict):
+                        continue
+                    new_record = dict(record)
+                    orig_sl = _coerce_line(record.get("source_line"))
+                    if orig_sl is not None:
+                        new_record["source_line"] = orig_sl + get_interpolated_shift(
+                            orig_sl
+                        )
+                    recovered_connection_maps.append(new_record)
 
             recovered_connection_map_lines: List[Dict[str, Any]] = []
-            for item in metadata.get("connection_map_lines", []):
-                new_item = dict(item)
-                orig_l = item.get("line")
-                if orig_l is not None:
-                    new_item["line"] = orig_l + get_interpolated_shift(orig_l)
-                recovered_connection_map_lines.append(new_item)
+            connection_map_lines = metadata.get("connection_map_lines", [])
+            if isinstance(connection_map_lines, list):
+                for item in connection_map_lines:
+                    if not isinstance(item, dict):
+                        continue
+                    new_item = dict(item)
+                    orig_l = _coerce_line(item.get("line"))
+                    if orig_l is not None:
+                        new_item["line"] = orig_l + get_interpolated_shift(orig_l)
+                    recovered_connection_map_lines.append(new_item)
 
             self._registry["files"][norm_path][
                 "connection_maps"
@@ -1362,7 +1410,7 @@ class TransparencyManager:
             Number of successfully realigned files.
         """
         realigned_count = 0
-        with self._update_context():
+        with self.update_context():
             locked_paths = [
                 path
                 for path, entry in self._registry["files"].items()
@@ -1606,17 +1654,32 @@ def read_file_transparently(
         logger.debug(
             f"Transparency drift detected for {file_path}. Attempting instant auto-recovery..."
         )
-        recovered_metadata = manager.recover_alignment(file_path, content)
-        if recovered_metadata:
-            logger.debug(
-                f"Successfully recovered transparency alignment for {file_path}!"
-            )
-            metadata = recovered_metadata
-        else:
+        try:
+            recovered_metadata = manager.recover_alignment(file_path, content)
+        except Exception as recovery_err:
             logger.error(
-                f"Could not recover transparency alignment for {file_path}. Entry has been invalidated."
+                f"Transparency recovery failed for {file_path}: {recovery_err}",
+                exc_info=True,
             )
+            try:
+                manager.lock_entry(file_path)
+            except Exception:
+                logger.error(
+                    f"Failed to lock transparency entry after recovery failure for {file_path}",
+                    exc_info=True,
+                )
             metadata = None
+        else:
+            if recovered_metadata:
+                logger.debug(
+                    f"Successfully recovered transparency alignment for {file_path}!"
+                )
+                metadata = recovered_metadata
+            else:
+                logger.error(
+                    f"Could not recover transparency alignment for {file_path}. Entry has been invalidated."
+                )
+                metadata = None
 
     if include_connection_maps:
         content = overlay_connection_maps(content, metadata)
