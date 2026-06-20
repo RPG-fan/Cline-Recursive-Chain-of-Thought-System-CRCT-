@@ -10,3 +10,4 @@ docs/**
 debug_llm_repair.log
 .kilo/**
 cline_utils/dependency_system/utils/cache/**
+cline_docs/native_layout_engine_design_spec.md

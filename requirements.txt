@@ -6,6 +6,7 @@ tree-sitter-html
 tree-sitter-javascript
 tree-sitter-python
 tree-sitter-typescript
+tree-sitter-rust
 accelerate
 transformers
 torch
