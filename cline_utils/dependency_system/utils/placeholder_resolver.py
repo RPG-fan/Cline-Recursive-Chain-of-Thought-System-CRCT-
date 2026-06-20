@@ -306,7 +306,8 @@ class PlaceholderResolver:
                     self.processor.clear_pinned_state()
                     return
                 if next_prepared.srckey == prepared.srckey:
-                    self.processor.save_pinned_state()
+                    if not getattr(self.processor, "has_pinned_state", False):
+                        self.processor.save_pinned_state()
                 else:
                     self.processor.clear_pinned_state()
 

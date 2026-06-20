@@ -39,14 +39,21 @@ def test_placeholder_resolver_pins_kv_state_within_source_group(monkeypatch) -> 
     class FakeProcessor:
         def __init__(self) -> None:
             self.calls: list[str] = []
+            self._pinned_state = None
+
+        @property
+        def has_pinned_state(self) -> bool:
+            return self._pinned_state is not None
 
         def clear_pinned_state(self) -> None:
+            self._pinned_state = None
             self.calls.append("clear")
 
         def restore_pinned_state(self) -> None:
             self.calls.append("restore")
 
         def save_pinned_state(self) -> None:
+            self._pinned_state = object()
             self.calls.append("save")
 
         def determine_dependency(self, **_: object) -> tuple[str, str]:
@@ -84,6 +91,68 @@ def test_placeholder_resolver_pins_kv_state_within_source_group(monkeypatch) -> 
     assert "save" in processor.calls
     assert "restore" in processor.calls
     assert processor.calls.index("save") < processor.calls.index("restore")
+
+
+def test_placeholder_resolver_skips_redundant_pins(monkeypatch) -> None:
+    class FakeProcessor:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self._pinned_state = None
+
+        @property
+        def has_pinned_state(self) -> bool:
+            return self._pinned_state is not None
+
+        def clear_pinned_state(self) -> None:
+            self._pinned_state = None
+            self.calls.append("clear")
+
+        def restore_pinned_state(self) -> None:
+            self.calls.append("restore")
+
+        def save_pinned_state(self) -> None:
+            self._pinned_state = object()
+            self.calls.append("save")
+
+        def determine_dependency(self, **_: object) -> tuple[str, str]:
+            self.calls.append("determine")
+            return "n", "no dependency"
+
+    processor = FakeProcessor()
+    resolver = PlaceholderResolver(processor)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        "cline_utils.dependency_system.utils.placeholder_resolver.background_commit",
+        lambda *args, **kwargs: None,
+    )
+    source = _key("A", Path("a.py"))
+    first_target = _key("B", Path("b.py"))
+    second_target = _key("C", Path("c.py"))
+    third_target = _key("D", Path("d.py"))
+    tasks = [
+        ("A", source.norm_path, "B", first_target.norm_path),
+        ("A", source.norm_path, "C", second_target.norm_path),
+        ("A", source.norm_path, "D", third_target.norm_path),
+    ]
+
+    resolver.resolve_batch(
+        tasks=tasks,
+        tracker_path="main_tracker.md",
+        global_map={
+            source.norm_path: source,
+            first_target.norm_path: first_target,
+            second_target.norm_path: second_target,
+            third_target.norm_path: third_target,
+        },
+        tracker_type="main",
+        prepare_func=_prepared,
+    )
+
+    # For 3 tasks sharing the same source:
+    # Task 1: clear (start), determine, save (next is A, no pinned state)
+    # Task 2: restore, determine, skip save (next is A, already pinned)
+    # Task 3: restore, determine, clear (no next)
+    assert processor.calls.count("save") == 1
+    assert processor.calls.count("restore") == 2
 
 
 def test_local_llm_processor_exposes_clear_pinned_state() -> None:

@@ -63,6 +63,11 @@ class LocalLLMProcessor:
         self._pinned_state = None
         logger.debug("Pinned KV cache state cleared.")
 
+    @property
+    def has_pinned_state(self) -> bool:
+        """Returns True if a KV cache state is currently pinned."""
+        return self._pinned_state is not None
+
     def _load_model(self, required_ctx: int, n_gpu_layers: Optional[int] = None) -> Any:
         """
         Dynamically loads or reloads the local LLM based on context requirements.
