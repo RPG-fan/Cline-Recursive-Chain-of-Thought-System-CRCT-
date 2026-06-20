@@ -179,6 +179,7 @@ class TrackerBatchCollector:
         self.pending_updates: List[TrackerUpdate] = []
         self._temp_backup_dir: Optional[str] = None
         self._backed_up_files: Set[str] = set()
+        self._backup_mappings: Dict[str, str] = {}
         self.highest_dependency_cache: Dict[Tuple[str, str], Tuple[str, Set[str]]] = {}
         self.key_to_paths: Dict[str, Set[str]] = {}
         super().__init__()
@@ -480,7 +481,7 @@ class TrackerBatchCollector:
         This method restores all tracker files from their backups
         to ensure data consistency after a failed batch write.
         """
-        if not self._temp_backup_dir or not self._backed_up_files:
+        if not self._temp_backup_dir:
             logger.debug("No backups to restore")
             return
 
@@ -489,13 +490,12 @@ class TrackerBatchCollector:
         restored_count = 0
         failed_count = 0
 
-        for original_path in self._backed_up_files:
-            backup_path = os.path.join(
-                self._temp_backup_dir, os.path.basename(original_path)
-            )
+        for update in self.pending_updates:
+            original_path = update.output_file
+            backup_path = self._backup_mappings.get(original_path)
 
             try:
-                if os.path.exists(backup_path):
+                if backup_path and os.path.exists(backup_path):
                     shutil.copy2(backup_path, original_path)
                     restored_count += 1
                     logger.debug(f"Restored {original_path} from backup")
@@ -1036,6 +1036,7 @@ class TrackerBatchCollector:
 
                     shutil.copy2(update.output_file, backup_path)
                     self._backed_up_files.add(update.output_file)
+                    self._backup_mappings[update.output_file] = backup_path
                     logger.debug(
                         f"Created backup for {update.output_file} at {backup_path}"
                     )
@@ -1171,6 +1172,7 @@ class TrackerBatchCollector:
             finally:
                 self._temp_backup_dir = None
                 self._backed_up_files.clear()
+                self._backup_mappings.clear()
 
 
 # Convenience functions for creating TrackerUpdate objects
