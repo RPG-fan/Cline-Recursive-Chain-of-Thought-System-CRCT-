@@ -206,19 +206,25 @@ class ContextPackager:
                         start_idx = int(rv_list[0]) - 1
                         end_idx = int(rv_list[1]) - 1
 
-                        if is_drifted:
-                            anchors = val_dict.get("anchors")
-                            anchors_list: List[Any] = anchors if isinstance(anchors, list) else []
-                            if len(anchors_list) == 2:
-                                start_anchor = str(anchors_list[0])
-                                end_anchor = str(anchors_list[1])
-                                new_start = tm.find_anchor(
-                                    lines, start_anchor, start_idx
-                                )
+                        anchors = val_dict.get("anchors")
+                        anchors_list: List[Any] = anchors if isinstance(anchors, list) else []
+                        if len(anchors_list) == 2:
+                            start_anchor = str(anchors_list[0])
+                            end_anchor = str(anchors_list[1])
+
+                            # Perform verification check on start_idx and end_idx
+                            start_matched = (0 <= start_idx < len(lines) and lines[start_idx].strip() == start_anchor.strip())
+                            end_matched = (0 <= (end_idx - 1) < len(lines) and lines[end_idx - 1].strip() == end_anchor.strip())
+
+                            if not start_matched or not end_matched:
+                                new_start = tm.find_anchor(lines, start_anchor, start_idx)
                                 new_end = tm.find_anchor(lines, end_anchor, end_idx)
                                 if new_start is not None and new_end is not None:
                                     start_idx = new_start
                                     end_idx = new_end + 1
+                                    logger.info(
+                                        f"Re-aligned section {name} via anchors verification check to lines {start_idx+1}-{end_idx+1}"
+                                    )
 
                         range_len = end_idx - start_idx
                         insertions.append(
@@ -321,10 +327,25 @@ class ContextPackager:
         # Invert global map to map key strings (including GI suffixes) to paths
         key_to_path = {ki.key_string: p for p, ki in global_map.items()}
 
+        def is_directory_key(key: str) -> bool:
+            base_key = key.split("#")[0]
+            if not base_key:
+                return True
+            # Directory keys lack a trailing number (end with a letter)
+            if not base_key[-1].isdigit():
+                return True
+            path = key_to_path.get(key)
+            if path and path in global_map and global_map[path].is_directory:
+                return True
+            return False
+
         # 1. Resolve Target Files
         target_paths: List[str] = []
         target_kis: List[KeyInfo] = []
         for key in target_keys:
+            if is_directory_key(key):
+                logger.warning(f"Omitting target key '{key}' because it is a directory key.")
+                continue
             path = key_to_path.get(key)
             if not path:
                 # Try finding without instance suffix
@@ -344,8 +365,12 @@ class ContextPackager:
                     )
 
             if path:
+                ki = global_map[path]
+                if ki.is_directory or is_directory_key(ki.key_string):
+                    logger.warning(f"Omitting target path '{path}' because it is a directory key.")
+                    continue
                 target_paths.append(path)
-                target_kis.append(global_map[path])
+                target_kis.append(ki)
             else:
                 logger.error(f"Target key '{key}' could not be resolved.")
 
@@ -392,6 +417,8 @@ class ContextPackager:
         target_key_strings = {ki.key_string for ki in target_kis}
         for (src_gi, tgt_gi), (char, _) in agg_deps.items():
             if src_gi in target_key_strings and tgt_gi not in target_key_strings:
+                if is_directory_key(tgt_gi):
+                    continue
                 if char in self.TIER_MAP:
                     tier_level = self.TIER_MAP[char]
                     tiers[tier_level].add(tgt_gi)
@@ -425,8 +452,12 @@ class ContextPackager:
             )
 
             for dep_key in sorted_deps:
+                if is_directory_key(dep_key):
+                    continue
                 path = key_to_path.get(dep_key)
                 if not path:
+                    continue
+                if global_map[path].is_directory:
                     continue
 
                 full_tokens, ses_tokens = self.get_file_tokens(path)

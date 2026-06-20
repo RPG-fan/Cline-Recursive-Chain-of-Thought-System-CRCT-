@@ -180,3 +180,30 @@ def test_read_file_transparently_locks_when_recovery_raises(
     assert content == drifted_content
     assert metadata is None
     assert manager.get_raw_file_metadata(str(path))["locked"] is True
+
+
+def test_recover_alignment_corrects_end_marker_placement(tmp_path: Path) -> None:
+    path = tmp_path / "sample.py"
+    path.write_text("def alpha():\n    # first line\n    # last line\n", encoding="utf-8")
+    manager = TransparencyManager(str(tmp_path / "transparency_registry.json"))
+
+    manager.update_file_metadata(
+        file_path=str(path),
+        sections={
+            "FUNC": {
+                "range": [1, 4],
+                "anchors": ["def alpha():", "    # last line"],
+            }
+        },
+        content=path.read_text(encoding="utf-8"),
+    )
+
+    meta = manager.get_raw_file_metadata(str(path))
+    assert meta["sections"]["FUNC"]["range"] == [1, 4]
+
+    drifted_content = "# some header comment\ndef alpha():\n    # first line\n    # last line\n"
+    path.write_text(drifted_content, encoding="utf-8")
+
+    res = manager.recover_alignment(str(path), drifted_content)
+    assert res is not None
+    assert res["sections"]["FUNC"]["range"] == [2, 5]

@@ -137,6 +137,63 @@ class TestContextPackager(unittest.TestCase):
         self.assertIn("def func_ses(): ...", result)
         self.assertIn("SES Signatures Only", result)
 
+    @patch("cline_utils.dependency_system.io.context_packager.load_global_key_map")
+    @patch("cline_utils.dependency_system.io.context_packager._load_token_metadata")
+    @patch("cline_utils.dependency_system.io.context_packager.aggregate_all_dependencies")
+    @patch("cline_utils.dependency_system.io.context_packager.find_all_tracker_paths")
+    @patch("cline_utils.dependency_system.io.context_packager.build_path_migration_map")
+    def test_build_package_omits_directories(
+        self,
+        mock_migration_map,
+        mock_tracker_paths,
+        mock_agg_deps,
+        mock_token_meta,
+        mock_key_map,
+    ):
+        from cline_utils.dependency_system.utils.path_utils import normalize_path
+        
+        path1 = normalize_path("/mock/project/file1.py")
+        path_dir = normalize_path("/mock/project/docs")
+
+        # Setup mock keymap and KeyInfo
+        mock_key_map.return_value = {
+            path1: KeyInfo(
+                key_string="1A1",
+                norm_path=path1,
+                parent_path=normalize_path("/mock/project"),
+                tier=1,
+                is_directory=False,
+            ),
+            path_dir: KeyInfo(
+                key_string="1A",
+                norm_path=path_dir,
+                parent_path=normalize_path("/mock/project"),
+                tier=1,
+                is_directory=True,
+            ),
+        }
+
+        # Setup mock token metadata
+        mock_token_meta.return_value = {
+            path1: {"full_tokens": 100, "ses_tokens": 30},
+            path_dir: {"full_tokens": 100, "ses_tokens": 30},
+        }
+
+        # Setup mock aggregated dependencies (1A1 has dependency on directory 1A)
+        mock_agg_deps.return_value = {
+            ("1A1", "1A"): ("x", {normalize_path("/mock/project/tracker.md")})
+        }
+
+        # Mock overlaid content
+        self.packager.get_overlaid_content = MagicMock(return_value="print('full')")
+        self.packager.get_ses_content = MagicMock(return_value="def func_ses(): ...")
+
+        result = self.packager.build_package(target_keys=["1A1", "1A"], max_tokens=1000)
+
+        # Asserts: 1A should be completely omitted from TARGET CORE LOGIC and tiers
+        self.assertIn("1A1", result)
+        self.assertNotIn("## [1A] docs (Full Content)", result)
+        self.assertNotIn("Tier 1: Mutual dependencies (x)", result)
 
 if __name__ == "__main__":
     unittest.main()

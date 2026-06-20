@@ -809,6 +809,7 @@ class TransparencyManager:
                             f"Successfully recovered transparency alignment for {file_path} before restoring markers!"
                         )
                         metadata = recovered_metadata
+                        sections = metadata.get("sections", {})
                         is_drifted = False  # Clear drifted status since we've recovered
                     else:
                         logger.error(
@@ -862,25 +863,23 @@ class TransparencyManager:
                                 start_idx = int(rv[0]) - 1
                                 end_idx = int(rv[1]) - 1
 
-                                if is_drifted:
-                                    anchors = v_dict.get("anchors")
-                                    if isinstance(anchors, list) and len(anchors) == 2:
-                                        start_anchor = str(anchors[0])
-                                        end_anchor = str(anchors[1])
-                                        new_start = self._find_anchor(
-                                            lines, start_anchor, start_idx
-                                        )
-                                        new_end = self._find_anchor(
-                                            lines, end_anchor, end_idx
-                                        )
-                                        if (
-                                            new_start is not None
-                                            and new_end is not None
-                                        ):
+                                anchors = v_dict.get("anchors")
+                                if isinstance(anchors, list) and len(anchors) == 2:
+                                    start_anchor = str(anchors[0])
+                                    end_anchor = str(anchors[1])
+
+                                    # Perform verification check on start_idx and end_idx
+                                    start_matched = (0 <= start_idx < len(lines) and lines[start_idx].strip() == start_anchor.strip())
+                                    end_matched = (0 <= (end_idx - 1) < len(lines) and lines[end_idx - 1].strip() == end_anchor.strip())
+
+                                    if not start_matched or not end_matched:
+                                        new_start = self._find_anchor(lines, start_anchor, start_idx)
+                                        new_end = self._find_anchor(lines, end_anchor, end_idx)
+                                        if new_start is not None and new_end is not None:
                                             start_idx = new_start
                                             end_idx = new_end + 1
                                             logger.info(
-                                                f"Re-aligned section {name} via anchors to lines {start_idx+1}-{end_idx+1}"
+                                                f"Re-aligned section {name} via anchors verification check to lines {start_idx+1}-{end_idx+1}"
                                             )
 
                                 range_len = end_idx - start_idx
@@ -1249,7 +1248,7 @@ class TransparencyManager:
                         )
 
                         projected_start = max(1, min(N_new, projected_start))
-                        projected_end = max(1, min(N_new, projected_end))
+                        projected_end = max(1, min(N_new + 1, projected_end))
 
                         anchors = v_dict.get("anchors")
                         recovered_start = projected_start
@@ -1278,7 +1277,7 @@ class TransparencyManager:
                                 anchor_mismatches += 1
 
                             if new_end is not None:
-                                recovered_end = new_end + 1
+                                recovered_end = new_end + 2
                             else:
                                 anchor_mismatches += 1
                         else:
@@ -1287,7 +1286,7 @@ class TransparencyManager:
                         if (
                             recovered_start > recovered_end
                             or recovered_start < 1
-                            or recovered_end > N_new
+                            or recovered_end > N_new + 1
                         ):
                             logger.warning(
                                 f"Unrecoverable drift: invalid recovered range [{recovered_start}, {recovered_end}] "
@@ -1341,7 +1340,7 @@ class TransparencyManager:
                         orig_end_line
                     )
                     projected_start = max(1, min(N_new, projected_start))
-                    projected_end = max(1, min(N_new, projected_end))
+                    projected_end = max(1, min(N_new + 1, projected_end))
 
                     if projected_start > projected_end:
                         logger.warning(

@@ -264,16 +264,19 @@ def prepare_normalization(
         existing_context = ""
         existing_overview = ""
 
+        # Strip existing compliance markers from content in memory for context/overview extraction
+        search_content = re.sub(r"---[A-Z_]+_(START|END)---", "", original_content)
+
         context_match = re.search(
             r"## Context\s*\n(.*?)(?:\n##|\n---)",
-            original_content,
+            search_content,
             re.DOTALL | re.IGNORECASE,
         )
         if context_match:
             existing_context = context_match.group(1).strip()
         overview_match = re.search(
             r"## Overview\s*\n(.*?)(?:\n##|\n---)",
-            original_content,
+            search_content,
             re.DOTALL | re.IGNORECASE,
         )
         if overview_match:
@@ -612,16 +615,19 @@ def normalize_docs_batch(
 
             existing_context = ""
             existing_overview = ""
+            # Strip existing compliance markers from content in memory for context/overview extraction
+            search_content = re.sub(r"---[A-Z_]+_(START|END)---", "", original_content)
+
             context_match = re.search(
                 r"## Context\s*\n(.*?)(?:\n##|\n---)",
-                original_content,
+                search_content,
                 re.DOTALL | re.IGNORECASE,
             )
             if context_match:
                 existing_context = context_match.group(1).strip()
             overview_match = re.search(
                 r"## Overview\s*\n(.*?)(?:\n##|\n---)",
-                original_content,
+                search_content,
                 re.DOTALL | re.IGNORECASE,
             )
             if overview_match:
