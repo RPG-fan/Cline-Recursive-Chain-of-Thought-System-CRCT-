@@ -14,6 +14,23 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
+
+def _has_method(methods: List[Dict[str, Any]], member_name: str) -> bool:
+    """Fast lookup for method names in a list of dicts without creating generators."""
+    for m in methods:
+        if isinstance(m, dict) and m.get("name") == member_name:
+            return True
+    return False
+
+
+def _has_grid_row(grid_rows: List[Tuple[str, Any]], source_key_str: str) -> bool:
+    """Fast lookup for row labels in grid rows without creating generators."""
+    for r_label, _ in grid_rows:
+        if r_label == source_key_str:
+            return True
+    return False
+
+
 from cline_utils.dependency_system.core import key_manager
 
 # Import only from lower-level modules
@@ -517,7 +534,7 @@ def _verify_class_member(
         # If the class has method data, do an actual lookup
         if methods:
             # Check direct method name match
-            if any(m.get("name") == member_name for m in methods):
+            if _has_method(methods, member_name):
                 return True
             # Check instance attributes (self.X set in __init__)
             init_method = next(
@@ -548,19 +565,34 @@ def _has_symbol_name(
     keys: Optional[List[str]] = None,
 ) -> bool:
     """
-    Fast lookup helper to check if a symbol name exists in module symbols.
-    Avoids generator overhead by using basic loops.
+    Fast lookup for symbol names in a module without creating generators.
+    
+    Handles a hybrid list of symbol types:
+    - Dict items: Structured symbols (e.g., Python classes, functions) that contain
+      a 'name' key and other metadata (like line numbers).
+    - Str items: Simple symbol names or exports (e.g., JavaScript/TypeScript raw string
+      exports or globals_defined) represented as plain strings.
     """
-    if keys is None:
-        keys = ["functions", "classes", "globals_defined", "exports"]
-    for key in keys:
-        symbol_list = module_symbols.get(key)
+    if not isinstance(module_symbols, dict):
+        return False
+    keys_to_check = (
+        keys
+        if keys is not None
+        else ["functions", "classes", "globals_defined", "exports"]
+    )
+    for s_key in keys_to_check:
+        symbol_list = module_symbols.get(s_key)
         if symbol_list:
             for s_item in symbol_list:
-                if s_item.get("name") == symbol_name:
-                    return True
+                # Python symbols are typically parsed as dictionaries with a "name" key.
+                if isinstance(s_item, dict):
+                    if s_item.get("name") == symbol_name:
+                        return True
+                # JS/TS exports or other simplified symbols are represented directly as strings.
+                elif isinstance(s_item, str):
+                    if s_item == symbol_name:
+                        return True
     return False
-
 
 
 def _classify_role(path: str) -> str:
@@ -895,8 +927,12 @@ def _identify_structural_dependencies(
                 # We need the part of target_name_str that is relative to the resolved module (target_path_val)
                 # This can be complex if target_name_str is like module.class.method
                 # For now, simple split:
-                if potential_source_str and target_name_str.startswith(potential_source_str + "."):
-                    actual_item_name_to_check = target_name_str[len(potential_source_str) + 1:]
+                if potential_source_str and target_name_str.startswith(
+                    potential_source_str + "."
+                ):
+                    actual_item_name_to_check = target_name_str[
+                        len(potential_source_str) + 1 :
+                    ]
                 elif not potential_source_str:  # direct call of an imported name
                     actual_item_name_to_check, _, _ = target_name_str.partition(".")
                 else:  # Fallback or if potential_source_str is the same as target_name_str (e.g. direct function call)
@@ -908,7 +944,9 @@ def _identify_structural_dependencies(
                     actual_item_name_to_check = actual_item_name_to_check[:-2]
 
                 module_symbols = project_symbol_map.get(target_path_val, {})
-                is_verified = _has_symbol_name(module_symbols, actual_item_name_to_check)
+                is_verified = _has_symbol_name(
+                    module_symbols, actual_item_name_to_check
+                )
 
                 # Deep verification: check if the member is actually defined on the class
                 # using enriched symbol map data (methods list, __init__ attributes)
@@ -968,7 +1006,9 @@ def _identify_structural_dependencies(
             # Deep verification: check if the attribute is a method, __init__ attr, or class-level attribute
             # using enriched symbol map data (methods list, __init__ attributes)
             if not is_verified and potential_source_str:
-                _, _, potential_class_name_from_source = potential_source_str.rpartition(".")
+                _, _, potential_class_name_from_source = (
+                    potential_source_str.rpartition(".")
+                )
                 if _verify_class_member(
                     module_symbols,
                     potential_class_name_from_source,
@@ -1040,10 +1080,14 @@ def _identify_structural_dependencies(
             module_symbols = project_symbol_map.get(target_path_val, {})
             _, _, actual_type_to_check = type_name_str.rpartition(".")
             is_defined_type = _has_symbol_name(
-                module_symbols, actual_type_to_check, ["classes", "functions", "globals_defined"]
+                module_symbols,
+                actual_type_to_check,
+                ["classes", "functions", "globals_defined"],
             )
             if is_defined_type:
-                if _has_symbol_name(module_symbols, actual_type_to_check, ["classes"]):  # Prioritize classes for type hints
+                if _has_symbol_name(
+                    module_symbols, actual_type_to_check, ["classes"]
+                ):  # Prioritize classes for type hints
                     dep_char = "<"
                     suggestions_path_based.append((target_path_val, dep_char))
                     raw_ast_verified_links.append(
@@ -1097,7 +1141,9 @@ def _identify_structural_dependencies(
 
                 # Check if the item exists as any kind of defined symbol in the target module
                 is_defined_symbol = _has_symbol_name(
-                    module_symbols, actual_item_to_check, ["classes", "functions", "globals_defined"]
+                    module_symbols,
+                    actual_item_to_check,
+                    ["classes", "functions", "globals_defined"],
                 )
                 if is_defined_symbol:
                     suggestions_path_based.append((target_path_val, dep_char))
@@ -1308,7 +1354,7 @@ def _identify_javascript_structural_dependencies(
     # --- Step 1: Handle re-exports directly ---
     for export_item in source_analysis.get("exports", []):
         if "from" in export_item:
-            # ⚡ Bolt Optimization: Pass tracked_paths_globally to avoid O(N) reconstruction
+            #  Pass tracked_paths_globally to avoid O(N) reconstruction
             # Impact: Significantly reduces time complexity in parallel workers from O(N * M) to O(M)
             # Measurement: Check task processing times in _handle_dependency_task
             resolved_path = _resolve_js_import_path(
@@ -1338,7 +1384,7 @@ def _identify_javascript_structural_dependencies(
         if not unresolved_path:
             continue
 
-        # ⚡ Bolt Optimization: Pass tracked_paths_globally to avoid O(N) reconstruction
+        #  Pass tracked_paths_globally to avoid O(N) reconstruction
         # Impact: Significantly reduces time complexity in parallel workers from O(N * M) to O(M)
         # Measurement: Check task processing times in _handle_dependency_task
         resolved_path = _resolve_js_import_path(
@@ -2200,7 +2246,7 @@ def suggest_semantic_dependencies_path_based(
                     grid_headers = t_data.get("grid_headers_ordered", [])
 
                     source_key_str = source_key_info.key_string
-                    if not any(r_label == source_key_str for r_label, _ in grid_rows):
+                    if not _has_grid_row(grid_rows, source_key_str):
                         continue
 
                     grid_dict = {r_label: r_data for r_label, r_data in grid_rows}
@@ -2784,7 +2830,9 @@ def _convert_python_import_to_paths(
                 if specific_item_name:
                     module_symbols = project_symbol_map.get(p_candidate_str, {})
                     is_defined = _has_symbol_name(
-                        module_symbols, specific_item_name, ["functions", "classes", "globals_defined"]
+                        module_symbols,
+                        specific_item_name,
+                        ["functions", "classes", "globals_defined"],
                     )
 
                     if (
@@ -2878,7 +2926,7 @@ def _identify_python_dependencies(
             temp_import_name = temp_import_name[1:]
         module_to_resolve_for_convert = temp_import_name
 
-        # ⚡ Bolt Optimization: Pass tracked_paths_globally to avoid O(N) reconstruction
+        #  Pass tracked_paths_globally to avoid O(N) reconstruction
         # Impact: Significantly reduces time complexity in parallel workers from O(N * M) to O(M)
         # Measurement: Check task processing times in _handle_dependency_task
         resolved_path_infos = _convert_python_import_to_paths(

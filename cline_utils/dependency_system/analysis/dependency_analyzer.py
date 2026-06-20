@@ -16,6 +16,43 @@ import re
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
 
+
+#  Helper functions to eliminate generator expression overhead in any()
+def _has_literal_assignment(
+    assignments: List[Dict[str, Any]], target_name: str, extracted_val: Any
+) -> bool:
+    for a in assignments:
+        if (
+            isinstance(a, dict)
+            and a.get("name") == target_name
+            and a.get("value") == extracted_val
+        ):
+            return True
+    return False
+
+
+def _has_symbol_by_name_and_line(
+    symbols: List[Dict[str, Any]], name: str, line: int
+) -> bool:
+    for s in symbols:
+        if isinstance(s, dict) and s.get("name") == name and s.get("line") == line:
+            return True
+    return False
+
+
+def _has_inheritance(
+    inheritances: List[Dict[str, Any]], class_name: str, base_class_name: str
+) -> bool:
+    for inh in inheritances:
+        if (
+            isinstance(inh, dict)
+            and inh.get("class_name") == class_name
+            and inh.get("base_class_name") == base_class_name
+        ):
+            return True
+    return False
+
+
 # Global tree-sitter variables and their corresponding language and parser instances.
 # These are imported and initialized directly at module load time.
 import tree_sitter
@@ -780,9 +817,10 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                 if "literal_assignments" not in result:
                     result["literal_assignments"] = []
                 # Avoid duplicates
-                if not any(
-                    a["name"] == target_name and a["value"] == extracted_val
-                    for a in cast(List[Dict[str, Any]], result["literal_assignments"])
+                if not _has_literal_assignment(
+                    cast(List[Dict[str, Any]], result["literal_assignments"]),
+                    target_name,
+                    extracted_val,
                 ):
                     cast(List[Dict[str, Any]], result["literal_assignments"]).append(
                         {
@@ -930,16 +968,14 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                 if isinstance(node, ast.AsyncFunctionDef):
                     func_data["async"] = True
                 # Avoid duplicates if somehow processed differently (though tree.body is one pass)
-                if not any(
-                    f["name"] == node.name and f["line"] == node.lineno
-                    for f in result["functions"]
+                if not _has_symbol_by_name_and_line(
+                    result["functions"], node.name, node.lineno
                 ):
                     result["functions"].append(func_data)
             elif isinstance(node, ast.ClassDef):
                 # Add TOP-LEVEL classes to result["classes"]
-                if not any(
-                    c["name"] == node.name and c["line"] == node.lineno
-                    for c in result["classes"]
+                if not _has_symbol_by_name_and_line(
+                    result["classes"], node.name, node.lineno
                 ):
                     result["classes"].append({"name": node.name, "line": node.lineno})
             elif isinstance(node, ast.Assign):
@@ -1217,10 +1253,8 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                     base_full_name = _get_full_name_str(base)
                     if base_full_name:
                         # Avoid duplicates if inheritance was somehow processed differently before
-                        if not any(
-                            inh["class_name"] == node.name
-                            and inh["base_class_name"] == base_full_name
-                            for inh in result["inheritance"]
+                        if not _has_inheritance(
+                            result["inheritance"], node.name, base_full_name
                         ):
                             result["inheritance"].append(
                                 {
