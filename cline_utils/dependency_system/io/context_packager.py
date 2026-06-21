@@ -8,6 +8,7 @@ Decouples token window management and dynamic LLM routing.
 import json
 import logging
 import os
+import re
 from typing import Dict, List, Set, Tuple, Any, Optional, TypedDict
 
 
@@ -15,6 +16,7 @@ class InsertionDict(TypedDict):
     idx: int
     priority: int
     content: str
+
 
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.path_utils import (
@@ -128,7 +130,9 @@ class ContextPackager:
         ses = meta.get("ses_tokens", 250)
         return full, ses
 
-    def get_overlaid_content(self, file_path: str) -> str:
+    def get_overlaid_content(
+        self, file_path: str, include_connection_maps: bool = True
+    ) -> str:
         """Retrieves file content with transparency overlay maps/tags reinserted in memory."""
         norm_path = normalize_path(file_path)
         if not os.path.exists(norm_path):
@@ -147,7 +151,8 @@ class ContextPackager:
             return content
 
         # 1. Overlay connection maps
-        content = overlay_connection_maps(content, meta)
+        if include_connection_maps:
+            content = overlay_connection_maps(content, meta)
 
         # 2. Overlay sections in memory without physical file writes
         sections: Dict[str, Any] = meta.get("sections", {})
@@ -207,17 +212,27 @@ class ContextPackager:
                         end_idx = int(rv_list[1]) - 1
 
                         anchors = val_dict.get("anchors")
-                        anchors_list: List[Any] = anchors if isinstance(anchors, list) else []
+                        anchors_list: List[Any] = (
+                            anchors if isinstance(anchors, list) else []
+                        )
                         if len(anchors_list) == 2:
                             start_anchor = str(anchors_list[0])
                             end_anchor = str(anchors_list[1])
 
                             # Perform verification check on start_idx and end_idx
-                            start_matched = (0 <= start_idx < len(lines) and lines[start_idx].strip() == start_anchor.strip())
-                            end_matched = (0 <= (end_idx - 1) < len(lines) and lines[end_idx - 1].strip() == end_anchor.strip())
+                            start_matched = (
+                                0 <= start_idx < len(lines)
+                                and lines[start_idx].strip() == start_anchor.strip()
+                            )
+                            end_matched = (
+                                0 <= (end_idx - 1) < len(lines)
+                                and lines[end_idx - 1].strip() == end_anchor.strip()
+                            )
 
                             if not start_matched or not end_matched:
-                                new_start = tm.find_anchor(lines, start_anchor, start_idx)
+                                new_start = tm.find_anchor(
+                                    lines, start_anchor, start_idx
+                                )
                                 new_end = tm.find_anchor(lines, end_anchor, end_idx)
                                 if new_start is not None and new_end is not None:
                                     start_idx = new_start
@@ -267,7 +282,9 @@ class ContextPackager:
 
         return "".join(lines)
 
-    def get_ses_content(self, file_path: str) -> str:
+    def get_ses_content(
+        self, file_path: str, include_connection_maps: bool = True
+    ) -> str:
         """Retrieves lightweight Structural/Execution/Signature (SES) content using Static Engine."""
         norm_path = normalize_path(file_path)
         symbol_map = self._get_symbol_map()
@@ -282,34 +299,288 @@ class ContextPackager:
                 )
 
         # Fallback to basic overlay if static generator fails or not in map
-        return self.get_overlaid_content(norm_path)
+        return self.get_overlaid_content(
+            norm_path, include_connection_maps=include_connection_maps
+        )
+
+    def _extract_sliced_block(self, file_path: str, start_line_1: int) -> str:
+        """
+        Extracts the function/class/method definition starting at start_line_1.
+        """
+        norm_path = normalize_path(file_path)
+        if not os.path.exists(norm_path):
+            return ""
+        try:
+            with open(norm_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception as e:
+            logger.error(f"Failed to read file {norm_path} for slicing: {e}")
+            return ""
+
+        if not lines:
+            return ""
+
+        start_idx = max(0, min(len(lines) - 1, start_line_1 - 1))
+        ext = os.path.splitext(norm_path)[1].lower()
+
+        # Scan upwards for decorators in Python/JS/TS/CS/Java
+        if ext in (".py", ".js", ".ts", ".tsx", ".jsx", ".cs", ".java"):
+            while start_idx > 0:
+                prev_line = lines[start_idx - 1].strip()
+                if prev_line.startswith("@"):
+                    start_idx -= 1
+                else:
+                    break
+
+        end_idx = start_idx + 1
+
+        if ext == ".py":
+            # Python: indentation-based scanning
+            def_idx = start_line_1 - 1
+            if def_idx >= len(lines):
+                def_idx = start_idx
+
+            # Find the end of the def/class header (ends with :)
+            body_start_idx = def_idx
+            for i in range(def_idx, len(lines)):
+                stripped = lines[i].strip()
+                if ":" in stripped:
+                    clean = stripped.split("#")[0].strip()
+                    if clean.endswith(":"):
+                        body_start_idx = i + 1
+                        break
+
+            def_line = lines[def_idx]
+            indent_len = len(def_line) - len(def_line.lstrip())
+
+            end_idx = len(lines)
+            for i in range(body_start_idx, len(lines)):
+                line = lines[i]
+                if not line.strip():
+                    continue
+                line_indent = len(line) - len(line.lstrip())
+                if line_indent <= indent_len:
+                    if not line.strip().startswith("#"):
+                        end_idx = i
+                        break
+        elif ext in (
+            ".js",
+            ".ts",
+            ".tsx",
+            ".jsx",
+            ".cs",
+            ".java",
+            ".glsl",
+            ".hlsl",
+            ".wgsl",
+        ):
+            # Brace-balancing scanning
+            open_braces = 0
+            has_opened = False
+            end_idx = len(lines)
+            for i in range(start_idx, len(lines)):
+                line = lines[i]
+                for char in line:
+                    if char == "{":
+                        open_braces += 1
+                        has_opened = True
+                    elif char == "}":
+                        open_braces -= 1
+                if has_opened and open_braces <= 0:
+                    end_idx = i + 1
+                    break
+        elif ext == ".sql":
+            # SQL: scan until semicolon or next CREATE statement
+            end_idx = len(lines)
+            for i in range(start_idx + 1, len(lines)):
+                line = lines[i]
+                if ";" in line:
+                    end_idx = i + 1
+                    break
+                if re.match(r"^\s*CREATE\b", line, re.IGNORECASE):
+                    end_idx = i
+                    break
+        else:
+            # Default: 50 lines
+            end_idx = min(len(lines), start_idx + 50)
+
+        return "".join(lines[start_idx:end_idx])
+
+    def _extract_sliced_block_from_overlaid(
+        self, file_path: str, symbol_name: str, hint_line_1: int, inc_conn: bool
+    ) -> str:
+        """
+        Loads overlaid content, finds the symbol definition, and extracts the block.
+        """
+        content = self.get_overlaid_content(file_path, include_connection_maps=inc_conn)
+        lines = content.splitlines(keepends=True)
+        if not lines:
+            return ""
+
+        ext = os.path.splitext(file_path)[1].lower()
+        escaped = re.escape(symbol_name)
+
+        patterns = []
+        if ext == ".py":
+            patterns = [re.compile(rf"\b(def|class)\s+{escaped}\b")]
+        elif ext in (".js", ".ts", ".tsx", ".jsx"):
+            patterns = [
+                re.compile(rf"\b(function|class|const|let|var)\s+{escaped}\b"),
+                re.compile(
+                    rf"\b{escaped}\s*[:=]\s*(async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>"
+                ),
+                re.compile(
+                    rf"\b(?:async\s+|static\s+|public\s+|private\s+|protected\s+)*{escaped}\s*\("
+                ),
+            ]
+        elif ext == ".cs":
+            patterns = [
+                re.compile(rf"\b(class|struct|interface|enum|void|Task)\s+{escaped}\b")
+            ]
+        elif ext == ".sql":
+            patterns = [
+                re.compile(
+                    rf"\b(CREATE\s+(TABLE|VIEW|PROCEDURE|FUNCTION))\s+{escaped}\b",
+                    re.IGNORECASE,
+                )
+            ]
+        else:
+            patterns = [re.compile(rf"\b{escaped}\b")]
+
+        # Search window first
+        hint_0 = max(0, min(len(lines) - 1, hint_line_1 - 1))
+        window_start = max(0, hint_0 - 50)
+        window_end = min(len(lines), hint_0 + 150)
+
+        def_idx = -1
+        for i in range(window_start, window_end):
+            if any(pat.search(lines[i]) for pat in patterns):
+                def_idx = i
+                break
+
+        if def_idx == -1:
+            # Full scan
+            for i, line in enumerate(lines):
+                if any(pat.search(line) for pat in patterns):
+                    def_idx = i
+                    break
+
+        if def_idx == -1:
+            # Fallback
+            def_idx = hint_0
+
+        start_idx = def_idx
+        # Scan upwards for decorators
+        if ext in (".py", ".js", ".ts", ".tsx", ".jsx", ".cs", ".java"):
+            while start_idx > 0:
+                prev_line = lines[start_idx - 1].strip()
+                if prev_line.startswith("@"):
+                    start_idx -= 1
+                else:
+                    break
+
+        end_idx = start_idx + 1
+
+        if ext == ".py":
+            # Find body start after header closes (ends with :)
+            body_start_idx = def_idx
+            for i in range(def_idx, len(lines)):
+                stripped = lines[i].strip()
+                if ":" in stripped:
+                    clean = stripped.split("#")[0].strip()
+                    if clean.endswith(":"):
+                        body_start_idx = i + 1
+                        break
+
+            def_line = lines[def_idx]
+            indent_len = len(def_line) - len(def_line.lstrip())
+
+            end_idx = len(lines)
+            for i in range(body_start_idx, len(lines)):
+                line = lines[i]
+                if not line.strip():
+                    continue
+                line_indent = len(line) - len(line.lstrip())
+                if line_indent <= indent_len:
+                    if not line.strip().startswith("#"):
+                        end_idx = i
+                        break
+        elif ext in (
+            ".js",
+            ".ts",
+            ".tsx",
+            ".jsx",
+            ".cs",
+            ".java",
+            ".glsl",
+            ".hlsl",
+            ".wgsl",
+        ):
+            open_braces = 0
+            has_opened = False
+            end_idx = len(lines)
+            for i in range(start_idx, len(lines)):
+                line = lines[i]
+                for char in line:
+                    if char == "{":
+                        open_braces += 1
+                        has_opened = True
+                    elif char == "}":
+                        open_braces -= 1
+                if has_opened and open_braces <= 0:
+                    end_idx = i + 1
+                    break
+        elif ext == ".sql":
+            end_idx = len(lines)
+            for i in range(start_idx + 1, len(lines)):
+                line = lines[i]
+                if ";" in line:
+                    end_idx = i + 1
+                    break
+                if re.match(r"^\s*CREATE\b", line, re.IGNORECASE):
+                    end_idx = i
+                    break
+        else:
+            end_idx = min(len(lines), start_idx + 50)
+
+        return "".join(lines[start_idx:end_idx])
 
     def build_package(
         self,
         target_keys: List[str],
         max_tokens: Optional[int] = None,
         routing_mode: str = "auto",
+        include_connection_maps: Optional[bool] = None,
     ) -> str:
         """
         Builds a token-budgeted targeted context package centering around target_keys.
         """
         # Resolve config limits
-        local_max = self.config_mgr.get_context_packager_setting(
-            "local_max_tokens", 20000
-        ) or 20000
-        cloud_max = self.config_mgr.get_context_packager_setting(
-            "cloud_max_tokens", 100000
-        ) or 100000
+        local_max = (
+            self.config_mgr.get_context_packager_setting("local_max_tokens", 20000)
+            or 20000
+        )
+        cloud_max = (
+            self.config_mgr.get_context_packager_setting("cloud_max_tokens", 100000)
+            or 100000
+        )
         default_mode = self.config_mgr.get_context_packager_setting(
             "default_mode", "auto"
         )
+        config_inc_conn = self.config_mgr.get_context_packager_setting(
+            "include_connection_maps", False
+        )
 
         mode = routing_mode if routing_mode != "auto" else default_mode
+        inc_conn = (
+            include_connection_maps
+            if include_connection_maps is not None
+            else config_inc_conn
+        )
 
         if max_tokens is None:
             max_tokens_val = int(local_max) if mode == "local" else int(cloud_max)
         else:
-            # Clamp limits if mode requests it
             if mode == "local" and max_tokens > local_max:
                 logger.warning(
                     f"Local routing requested but max_tokens > {local_max}. Clamping."
@@ -324,14 +595,12 @@ class ContextPackager:
                 "Global key map not found. Please run analyze-project first."
             )
 
-        # Invert global map to map key strings (including GI suffixes) to paths
         key_to_path = {ki.key_string: p for p, ki in global_map.items()}
 
         def is_directory_key(key: str) -> bool:
             base_key = key.split("#")[0]
             if not base_key:
                 return True
-            # Directory keys lack a trailing number (end with a letter)
             if not base_key[-1].isdigit():
                 return True
             path = key_to_path.get(key)
@@ -344,11 +613,12 @@ class ContextPackager:
         target_kis: List[KeyInfo] = []
         for key in target_keys:
             if is_directory_key(key):
-                logger.warning(f"Omitting target key '{key}' because it is a directory key.")
+                logger.warning(
+                    f"Omitting target key '{key}' because it is a directory key."
+                )
                 continue
             path = key_to_path.get(key)
             if not path:
-                # Try finding without instance suffix
                 base_key = key.split("#")[0]
                 matching = [
                     ki
@@ -356,7 +626,6 @@ class ContextPackager:
                     if ki.key_string.split("#")[0] == base_key
                 ]
                 if matching:
-                    # Sort and pick first as fallback
                     matching.sort(key=lambda k: k.norm_path)
                     ki = matching[0]
                     path = ki.norm_path
@@ -367,7 +636,9 @@ class ContextPackager:
             if path:
                 ki = global_map[path]
                 if ki.is_directory or is_directory_key(ki.key_string):
-                    logger.warning(f"Omitting target path '{path}' because it is a directory key.")
+                    logger.warning(
+                        f"Omitting target path '{path}' because it is a directory key."
+                    )
                     continue
                 target_paths.append(path)
                 target_kis.append(ki)
@@ -377,7 +648,50 @@ class ContextPackager:
         if not target_paths:
             return "# Error: No valid target keys resolved."
 
-        # Estimate budget allocations
+        # Scan transparency manager for specific references to/from target files
+        tm = get_transparency_manager()
+        referenced_slices: Dict[str, Set[Tuple[str, int]]] = {}
+        target_keys_set = {ki.key_string for ki in target_kis}
+        norm_target_paths = {normalize_path(p) for p in target_paths}
+
+        # Outbound references from target files
+        for t_path in target_paths:
+            meta = tm.get_file_metadata(t_path)
+            if meta and "connection_maps" in meta:
+                for m in meta["connection_maps"]:
+                    tgt_key = m.get("target_key")
+                    tgt_sym = m.get("target_symbol")
+                    tgt_line = m.get("target_line")
+                    if tgt_key and tgt_sym and tgt_line is not None:
+                        if tgt_sym != "file":
+                            tgt_path = key_to_path.get(tgt_key)
+                            if (
+                                tgt_path
+                                and normalize_path(tgt_path) not in norm_target_paths
+                            ):
+                                normalized_dep_path = normalize_path(tgt_path)
+                                referenced_slices.setdefault(
+                                    normalized_dep_path, set()
+                                ).add((tgt_sym, int(tgt_line)))
+
+        # Inbound references to target files
+        registry_files = tm._registry.get("files", {})
+        for file_path, file_meta in registry_files.items():
+            norm_file_path = normalize_path(file_path)
+            if norm_file_path in norm_target_paths:
+                continue
+            if isinstance(file_meta, dict) and "connection_maps" in file_meta:
+                for m in file_meta["connection_maps"]:
+                    tgt_key = m.get("target_key")
+                    if tgt_key in target_keys_set:
+                        src_sym = m.get("source_symbol")
+                        src_line = m.get("source_line")
+                        if src_sym and src_line is not None:
+                            if src_sym != "file":
+                                referenced_slices.setdefault(norm_file_path, set()).add(
+                                    (src_sym, int(src_line))
+                                )
+
         current_tokens = 0
         package_components: List[str] = []
 
@@ -386,11 +700,10 @@ class ContextPackager:
             "This section contains full file logic for the primary targets.\n"
         )
 
-        # 2. Pack target files completely first
+        # Pack target files completely first
         for path, ki in zip(target_paths, target_kis):
             full_t, _ = self.get_file_tokens(path)
-            content = self.get_overlaid_content(path)
-            # Rough estimation of token count from character count if not found in metadata
+            content = self.get_overlaid_content(path, include_connection_maps=inc_conn)
             token_count = full_t if full_t > 0 else len(content) // 4
             current_tokens += token_count
 
@@ -398,7 +711,7 @@ class ContextPackager:
             package_components.append(f"## [{ki.key_string}] {rel_path} (Full Content)")
             package_components.append(f"```python\n{content}\n```\n")
 
-        # 3. Retrieve Compiled Dependency Graph
+        # Retrieve Compiled Dependency Graph
         all_tp = find_all_tracker_paths(self.config_mgr, self.project_root)
         old_global_map = load_old_global_key_map()
         path_migration_info = build_path_migration_map(old_global_map, global_map)
@@ -410,10 +723,7 @@ class ContextPackager:
             show_progress=False,
         )
 
-        # Categorize dependencies into Tiers
-        # Tiers 1-5 maps: Tier -> Set of target keys
         tiers: Dict[int, Set[str]] = {1: set(), 2: set(), 3: set(), 4: set(), 5: set()}
-
         target_key_strings = {ki.key_string for ki in target_kis}
         for (src_gi, tgt_gi), (char, _) in agg_deps.items():
             if src_gi in target_key_strings and tgt_gi not in target_key_strings:
@@ -423,9 +733,28 @@ class ContextPackager:
                     tier_level = self.TIER_MAP[char]
                     tiers[tier_level].add(tgt_gi)
 
-        # 4. Greedy Knapsack Allocation with SES Fallback
+        # Pack sliced dependency files
         for tier in sorted(tiers.keys()):
             if not tiers[tier]:
+                continue
+
+            # Sort dependency keys by full token count (smallest first) to maximize representation
+            sorted_deps = sorted(
+                list(tiers[tier]),
+                key=lambda k: (
+                    self.get_file_tokens(key_to_path.get(k, ""))[0]
+                    if key_to_path.get(k)
+                    else 99999
+                ),
+            )
+            filtered_deps = [
+                k
+                for k in sorted_deps
+                if key_to_path.get(k)
+                and normalize_path(key_to_path[k]) in referenced_slices
+            ]
+
+            if not filtered_deps:
                 continue
 
             tier_desc = {
@@ -438,50 +767,40 @@ class ContextPackager:
 
             package_components.append(f"# {tier_desc}")
             package_components.append(
-                "Pruned dependencies from this tier to stay within target token ceilings.\n"
+                "Includes only referenced symbols and definitions to stay within target token ceilings.\n"
             )
 
-            # Sort dependency keys by full token count (smallest first) to maximize representation
-            sorted_deps = sorted(
-                list(tiers[tier]),
-                key=lambda k: (
-                    self.get_file_tokens(key_to_path.get(k, ""))[0]
-                    if key_to_path.get(k)
-                    else 99999
-                ),
-            )
+            for dep_key in filtered_deps:
+                path = key_to_path[dep_key]
+                norm_dep_path = normalize_path(path)
+                slices = sorted(
+                    list(referenced_slices[norm_dep_path]), key=lambda x: x[1]
+                )
 
-            for dep_key in sorted_deps:
-                if is_directory_key(dep_key):
-                    continue
-                path = key_to_path.get(dep_key)
-                if not path:
-                    continue
-                if global_map[path].is_directory:
+                content_parts = []
+                for sym, line_no in slices:
+                    block = self._extract_sliced_block_from_overlaid(
+                        path, sym, line_no, inc_conn
+                    )
+                    if block:
+                        content_parts.append(
+                            f"# --- Symbol: {sym} (Line {line_no}) ---\n{block}"
+                        )
+
+                if not content_parts:
                     continue
 
-                full_tokens, ses_tokens = self.get_file_tokens(path)
+                content = "\n\n".join(content_parts)
+                # Roughly estimate sliced tokens (e.g. chars // 4)
+                token_count = len(content) // 4
                 rel_path = os.path.relpath(path, self.project_root)
 
-                # Try Full Content First
-                if current_tokens + full_tokens <= max_tokens_val:
-                    current_tokens += full_tokens
-                    content = self.get_overlaid_content(path)
+                if current_tokens + token_count <= max_tokens_val:
+                    current_tokens += token_count
                     package_components.append(
-                        f"## [{dep_key}] {rel_path} (Full Content)"
+                        f"## [{dep_key}] {rel_path} (Sliced Symbols: {', '.join(s[0] for s in slices)})"
                     )
                     package_components.append(f"```python\n{content}\n```\n")
-
-                # Fallback to SES Signature/Execution Content
-                elif current_tokens + ses_tokens <= max_tokens_val:
-                    current_tokens += ses_tokens
-                    content = self.get_ses_content(path)
-                    package_components.append(
-                        f"## [{dep_key}] {rel_path} (SES Signatures Only)"
-                    )
-                    package_components.append(f"```python\n{content}\n```\n")
-
-                # Context threshold crossed; drop remaining outer ring elements
                 else:
                     package_components.append(
                         f"> Context ceiling of {max_tokens_val} tokens reached. Truncating further outer ring dependencies."

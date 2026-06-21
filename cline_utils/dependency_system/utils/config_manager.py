@@ -267,6 +267,7 @@ DEFAULT_CONFIG = {
         "local_max_tokens": 20000,
         "cloud_max_tokens": 100000,
         "default_mode": "auto",
+        "include_connection_maps": False,
     },
 }
 

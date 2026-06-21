@@ -134,8 +134,8 @@ def test_populate_comments_build_connection_map_formats_precise_targets(tmp_path
     )
 
     assert (
-        line == "# --- CONNECTION_MAP: 1B(target_func:7|TargetClass:20) {d}, "
-        "1C(file:?) {x} --- source_func [AUTO]"
+        line
+        == "# --- CONNECTION_MAP: 1B(target_func:7|TargetClass:20) {d} --- source_func [AUTO]"
     )
 
 
@@ -206,8 +206,7 @@ def test_populate_comments_process_file_dry_run_refreshes_old_flat_map(tmp_path:
 
     assert result["maps_updated"] == 1
     assert result["generated_connection_maps"] == [
-        "# --- CONNECTION_MAP: 1B(target_func:1) {d}, 1C(file:?) {x} "
-        "--- source_func [AUTO]"
+        "# --- CONNECTION_MAP: 1B(target_func:1) {d} " "--- source_func [AUTO]"
     ]
 
 
@@ -622,7 +621,9 @@ def test_populate_comments_prevents_redundant_writes(tmp_path: Path):
     assert len(backup_files) == 0
 
 
-def test_populate_comments_places_station_header_below_shebang_and_coding(tmp_path: Path):
+def test_populate_comments_places_station_header_below_shebang_and_coding(
+    tmp_path: Path,
+):
     # Case 1: Python file with shebang, coding, and docstring
     py_source_path = tmp_path / "script.py"
     py_source_path.write_text(
@@ -676,8 +677,7 @@ def test_populate_comments_places_station_header_below_shebang_and_coding(tmp_pa
     # Case 2: Node.js file with shebang
     js_source_path = tmp_path / "script.js"
     js_source_path.write_text(
-        "#!/usr/bin/env node\n"
-        "console.log('hello');\n",
+        "#!/usr/bin/env node\n" "console.log('hello');\n",
         encoding="utf-8",
     )
 
@@ -711,6 +711,3 @@ def test_populate_comments_places_station_header_below_shebang_and_coding(tmp_pa
     assert "STATION_HEADER_START" in lines_js[1]
     # Rest of script remains
     assert "console.log('hello');" in content_js
-
-
-

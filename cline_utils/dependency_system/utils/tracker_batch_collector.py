@@ -40,7 +40,7 @@ def get_reciprocal_dependency_char(dep_char: str) -> Optional[str]:
 
 
 def build_dependency_suggestions_with_reciprocals(
-    suggestions: Dict[str, List[Tuple[str, str]]]
+    suggestions: Dict[str, List[Tuple[str, str]]],
 ) -> Dict[str, List[Tuple[str, str]]]:
     suggestions_with_reciprocals = {
         source_key: list(deps) for source_key, deps in suggestions.items()
@@ -446,6 +446,7 @@ class TrackerBatchCollector:
                         path = result.get("path")
                         if isinstance(path, str):
                             files_processed.add(path)
+                            paths_to_virtualize.append(path)
                             maps_added = result.get("maps_added")
                             maps_updated = result.get("maps_updated")
                             maps_count = (
@@ -453,11 +454,10 @@ class TrackerBatchCollector:
                             ) + (maps_updated if isinstance(maps_updated, int) else 0)
                             if maps_count > 0:
                                 files_with_maps.add(path)
-                                paths_to_virtualize.append(path)
                 virtualized = 0
                 if paths_to_virtualize:
                     virtualized = manager.bulk_virtualize_connection_maps(
-                        paths_to_virtualize, clear_if_absent=False
+                        paths_to_virtualize, clear_if_absent=True
                     )
                 if files_processed:
                     manager.bulk_prune_stale_virtual_maps(
@@ -662,9 +662,11 @@ class TrackerBatchCollector:
                 # Re-compress all rows from the fully-mutated matrix
                 if tracker_recip_changes > 0:
                     u.grid_rows = [
-                        compress("".join(decomp[ri]))
-                        if decomp_ok[ri]
-                        else u.grid_rows[ri]
+                        (
+                            compress("".join(decomp[ri]))
+                            if decomp_ok[ri]
+                            else u.grid_rows[ri]
+                        )
                         for ri in range(n)
                     ]
                     reciprocal_changes += tracker_recip_changes

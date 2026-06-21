@@ -1182,7 +1182,10 @@ def handle_build_context(args: argparse.Namespace) -> int:
         target_keys = [k.strip() for k in args.keys.split(",")]
 
         payload = packager.build_package(
-            target_keys=target_keys, max_tokens=args.max_tokens, routing_mode=args.mode
+            target_keys=target_keys,
+            max_tokens=args.max_tokens,
+            routing_mode=args.mode,
+            include_connection_maps=args.include_connection_maps,
         )
 
         if args.output:
@@ -1480,20 +1483,11 @@ def handle_show_dependencies(args: argparse.Namespace) -> int:
             if global_key_string_counts.get(interacting_base_key, 0) <= 1:
                 display_name_interacting = interacting_base_key
 
-            origin_trackers_list = sorted(
-                list(set(deps_for_this_char[interacting_key_gi]))
-            )
-            origins_str = (
-                f" (In: {', '.join(origin_trackers_list)})"
-                if origin_trackers_list
-                else ""
-            )
-
             token_count = token_map.get(interacting_ki.norm_path)
             token_info = f" [Tokens: {token_count}]" if token_count is not None else ""
 
             print(
-                f"  - {display_name_interacting}: {interacting_ki.norm_path}{token_info}{origins_str}"
+                f"  - {display_name_interacting}: {interacting_ki.norm_path}{token_info}"
             )
 
     print("\n------------------------------------------")
@@ -3034,6 +3028,20 @@ def main():
     build_context_parser.add_argument(
         "--output", help="Path to save the generated context Markdown file."
     )
+    build_context_parser.add_argument(
+        "--include-connection-maps",
+        dest="include_connection_maps",
+        action="store_true",
+        default=None,
+        help="Explicitly include CONNECTION_MAP comments in the context package.",
+    )
+    build_context_parser.add_argument(
+        "--no-connection-maps",
+        dest="include_connection_maps",
+        action="store_false",
+        default=None,
+        help="Explicitly exclude CONNECTION_MAP comments from the context package.",
+    )
     build_context_parser.set_defaults(func=handle_build_context)
 
     # --- Grid Manipulation Commands ---
@@ -3399,6 +3407,7 @@ def main():
                                 path = result.get("path")
                                 if isinstance(path, str):
                                     files_processed.add(path)
+                                    paths_to_virtualize.append(path)
                                     maps_added = result.get("maps_added")
                                     maps_updated = result.get("maps_updated")
                                     maps_count = (
@@ -3410,11 +3419,10 @@ def main():
                                     )
                                     if maps_count > 0:
                                         files_with_maps.add(path)
-                                        paths_to_virtualize.append(path)
                         virtualized = 0
                         if paths_to_virtualize:
                             virtualized = manager.bulk_virtualize_connection_maps(
-                                paths_to_virtualize, clear_if_absent=False
+                                paths_to_virtualize, clear_if_absent=True
                             )
                         if files_processed:
                             manager.bulk_prune_stale_virtual_maps(

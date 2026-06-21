@@ -614,12 +614,65 @@ class TransparencyManager:
 
                 raw_lines: List[Dict[str, Any]] = []
                 indices_to_remove: Set[int] = set()
+                comments_removed = 0
+
+                # Pre-load symbol map to check active symbols
+                symbol_map = {}
+                try:
+                    from cline_utils.dependency_system.analysis.dependency_suggester import (
+                        load_project_symbol_map,
+                    )
+
+                    symbol_map = load_project_symbol_map()
+                except Exception as e:
+                    logger.debug(
+                        f"Could not load project symbol map in virtualize_connection_maps: {e}"
+                    )
+
+                active_symbols = set()
+                has_symbol_data = False
+                if symbol_map:
+                    file_symbol_data = symbol_map.get(norm_path)
+                    if file_symbol_data is not None:
+                        has_symbol_data = True
+                        for func in file_symbol_data.get("functions", []):
+                            if isinstance(func, dict) and "name" in func:
+                                active_symbols.add(func["name"])
+                        for cls in file_symbol_data.get("classes", []):
+                            if isinstance(cls, dict) and "name" in cls:
+                                active_symbols.add(cls["name"])
+                                for method in cls.get("methods", []):
+                                    if isinstance(method, dict) and "name" in method:
+                                        active_symbols.add(method["name"])
+
                 for idx, line in enumerate(lines):
-                    if _CONNECTION_MAP_LINE_RE.search(line):
+                    match = _CONNECTION_MAP_LINE_RE.search(line)
+                    if match:
+                        source_symbol = match.group("source_symbol").strip()
+                        rail = match.group("rail").strip()
+
+                        # Pruning conditions:
+                        # 1. Contains "file:?"
+                        # 2. Not in active symbols (if symbol data is available for this file)
+                        is_stale = "file:?" in rail
+                        if not is_stale and has_symbol_data:
+                            if source_symbol not in active_symbols:
+                                is_stale = True
+
+                        if is_stale:
+                            logger.info(
+                                f"Pruning stale CONNECTION_MAP for '{source_symbol}' in {file_path}"
+                            )
+                            indices_to_remove.add(idx)
+                            comments_removed += 1
+                            continue
+
+                        clean_line_no = idx + 1 - comments_removed
                         raw_lines.append(
-                            {"line": idx + 1, "content": line.rstrip("\r\n")}
+                            {"line": clean_line_no, "content": line.rstrip("\r\n")}
                         )
                         indices_to_remove.add(idx)
+                        comments_removed += 1
 
                 if not raw_lines:
                     existing = self.get_file_metadata(file_path)
@@ -639,6 +692,20 @@ class TransparencyManager:
                             f"Cleared stale virtual CONNECTION_MAP metadata for {file_path}"
                         )
                         return True
+                    # If we pruned all comments and none remain, ensure we clean file on disk
+                    if indices_to_remove:
+                        clean_lines = [
+                            line
+                            for idx, line in enumerate(lines)
+                            if idx not in indices_to_remove
+                        ]
+                        clean_content = "".join(clean_lines)
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            f.write(clean_content)
+                        self._write_connection_map_metadata(
+                            file_path, clean_content, None, None, defer_save=defer_save
+                        )
+                        return True
                     return False
 
                 original_content = "".join(lines)
@@ -652,6 +719,14 @@ class TransparencyManager:
                 records = _adjust_connection_record_lines(
                     _parse_connection_map_text(original_content), removed_line_numbers
                 )
+
+                # Filter records to keep only those corresponding to the active (non-pruned) symbols
+                kept_symbols = set()
+                for rl in raw_lines:
+                    m = _CONNECTION_MAP_LINE_RE.search(rl["content"])
+                    if m:
+                        kept_symbols.add(m.group("source_symbol").strip())
+                records = [r for r in records if r.get("source_symbol") in kept_symbols]
 
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(clean_content)
@@ -869,13 +944,28 @@ class TransparencyManager:
                                     end_anchor = str(anchors[1])
 
                                     # Perform verification check on start_idx and end_idx
-                                    start_matched = (0 <= start_idx < len(lines) and lines[start_idx].strip() == start_anchor.strip())
-                                    end_matched = (0 <= (end_idx - 1) < len(lines) and lines[end_idx - 1].strip() == end_anchor.strip())
+                                    start_matched = (
+                                        0 <= start_idx < len(lines)
+                                        and lines[start_idx].strip()
+                                        == start_anchor.strip()
+                                    )
+                                    end_matched = (
+                                        0 <= (end_idx - 1) < len(lines)
+                                        and lines[end_idx - 1].strip()
+                                        == end_anchor.strip()
+                                    )
 
                                     if not start_matched or not end_matched:
-                                        new_start = self._find_anchor(lines, start_anchor, start_idx)
-                                        new_end = self._find_anchor(lines, end_anchor, end_idx)
-                                        if new_start is not None and new_end is not None:
+                                        new_start = self._find_anchor(
+                                            lines, start_anchor, start_idx
+                                        )
+                                        new_end = self._find_anchor(
+                                            lines, end_anchor, end_idx
+                                        )
+                                        if (
+                                            new_start is not None
+                                            and new_end is not None
+                                        ):
                                             start_idx = new_start
                                             end_idx = new_end + 1
                                             logger.info(

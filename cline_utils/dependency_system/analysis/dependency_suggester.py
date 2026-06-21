@@ -566,7 +566,7 @@ def _has_symbol_name(
 ) -> bool:
     """
     Fast lookup for symbol names in a module without creating generators.
-    
+
     Handles a hybrid list of symbol types:
     - Dict items: Structured symbols (e.g., Python classes, functions) that contain
       a 'name' key and other metadata (like line numbers).

@@ -14,9 +14,12 @@ class TestContextPackager(unittest.TestCase):
     def setUp(self):
         self.packager = ContextPackager(project_root="/mock/project")
 
+    @patch("cline_utils.dependency_system.io.context_packager.get_transparency_manager")
     @patch("cline_utils.dependency_system.io.context_packager.load_global_key_map")
     @patch("cline_utils.dependency_system.io.context_packager._load_token_metadata")
-    @patch("cline_utils.dependency_system.io.context_packager.aggregate_all_dependencies")
+    @patch(
+        "cline_utils.dependency_system.io.context_packager.aggregate_all_dependencies"
+    )
     @patch("cline_utils.dependency_system.io.context_packager.find_all_tracker_paths")
     @patch("cline_utils.dependency_system.io.context_packager.build_path_migration_map")
     def test_build_package_basic(
@@ -26,9 +29,10 @@ class TestContextPackager(unittest.TestCase):
         mock_agg_deps,
         mock_token_meta,
         mock_key_map,
+        mock_get_tm,
     ):
         from cline_utils.dependency_system.utils.path_utils import normalize_path
-        
+
         path1 = normalize_path("/mock/project/file1.py")
         path2 = normalize_path("/mock/project/file2.py")
 
@@ -61,9 +65,27 @@ class TestContextPackager(unittest.TestCase):
             ("1A1", "1A2"): ("x", {normalize_path("/mock/project/tracker.md")})
         }
 
-        # 4. Mock file content overlay and static essence
-        self.packager.get_overlaid_content = MagicMock(return_value="print('file_content')")
-        self.packager.get_ses_content = MagicMock(return_value="def func(): ...")
+        # 4. Mock transparency manager connection maps
+        mock_tm = MagicMock()
+        mock_tm.get_file_metadata.return_value = {
+            "connection_maps": [
+                {
+                    "target_key": "1A2",
+                    "target_symbol": "func",
+                    "target_line": 5,
+                }
+            ]
+        }
+        mock_tm._registry = {"files": {}}
+        mock_get_tm.return_value = mock_tm
+
+        # 5. Mock file content overlay and static essence / slicing
+        self.packager.get_overlaid_content = MagicMock(
+            return_value="print('file_content')"
+        )
+        self.packager._extract_sliced_block_from_overlaid = MagicMock(
+            return_value="def func():\n    pass\n"
+        )
 
         # Execute
         result = self.packager.build_package(target_keys=["1A1"], max_tokens=1000)
@@ -73,23 +95,31 @@ class TestContextPackager(unittest.TestCase):
         self.assertIn("1A1", result)
         self.assertIn("Tier 1: Mutual dependencies (x)", result)
         self.assertIn("1A2", result)
-        self.packager.get_overlaid_content.assert_any_call(path1)
+        self.assertIn("Sliced Symbols: func", result)
+        self.assertIn("def func():", result)
+        self.packager.get_overlaid_content.assert_any_call(
+            path1, include_connection_maps=False
+        )
 
+    @patch("cline_utils.dependency_system.io.context_packager.get_transparency_manager")
     @patch("cline_utils.dependency_system.io.context_packager.load_global_key_map")
     @patch("cline_utils.dependency_system.io.context_packager._load_token_metadata")
-    @patch("cline_utils.dependency_system.io.context_packager.aggregate_all_dependencies")
+    @patch(
+        "cline_utils.dependency_system.io.context_packager.aggregate_all_dependencies"
+    )
     @patch("cline_utils.dependency_system.io.context_packager.find_all_tracker_paths")
     @patch("cline_utils.dependency_system.io.context_packager.build_path_migration_map")
-    def test_build_package_ses_fallback(
+    def test_build_package_budget_capping(
         self,
         mock_migration_map,
         mock_tracker_paths,
         mock_agg_deps,
         mock_token_meta,
         mock_key_map,
+        mock_get_tm,
     ):
         from cline_utils.dependency_system.utils.path_utils import normalize_path
-        
+
         path1 = normalize_path("/mock/project/file1.py")
         path2 = normalize_path("/mock/project/file2.py")
 
@@ -111,35 +141,54 @@ class TestContextPackager(unittest.TestCase):
             ),
         }
 
-        # Setup mock token metadata (file1 full is 100, file2 full is 500 but ses is 50)
+        # Setup mock token metadata
         mock_token_meta.return_value = {
             path1: {"full_tokens": 100, "ses_tokens": 30},
-            path2: {"full_tokens": 500, "ses_tokens": 50},
+            path2: {"full_tokens": 200, "ses_tokens": 50},
         }
 
-        # Setup mock aggregated dependencies (T1 mutual x)
+        # Setup mock aggregated dependencies
         mock_agg_deps.return_value = {
             ("1A1", "1A2"): ("x", {normalize_path("/mock/project/tracker.md")})
         }
 
-        # Mock overlaid content and SES representation
-        self.packager.get_overlaid_content = MagicMock(return_value="print('full')")
-        self.packager.get_ses_content = MagicMock(return_value="def func_ses(): ...")
+        # Mock transparency manager connection maps
+        mock_tm = MagicMock()
+        mock_tm.get_file_metadata.return_value = {
+            "connection_maps": [
+                {
+                    "target_key": "1A2",
+                    "target_symbol": "func",
+                    "target_line": 5,
+                }
+            ]
+        }
+        mock_tm._registry = {"files": {}}
+        mock_get_tm.return_value = mock_tm
 
-        # Set max_tokens to 200. target 1A1 takes 100, leaving 100 budget.
-        # file2.py full is 500 (does not fit), but ses is 50 (fits!)
-        result = self.packager.build_package(target_keys=["1A1"], max_tokens=200)
+        # Mock content and slicing: slice content length is 40 chars (~10 tokens)
+        self.packager.get_overlaid_content = MagicMock(return_value="print('target')")
+        self.packager._extract_sliced_block_from_overlaid = MagicMock(
+            return_value="def func_slice():\n    pass\n"
+        )
+
+        # Set max_tokens to 105. target takes 100 tokens, leaving 5 tokens budget.
+        # Sliced content of 10 tokens exceeds remaining 5 token budget!
+        result = self.packager.build_package(target_keys=["1A1"], max_tokens=105)
 
         # Asserts
         self.assertIn("# TARGET CORE LOGIC", result)
         self.assertIn("1A1", result)
-        self.assertIn("1A2", result)
-        self.assertIn("def func_ses(): ...", result)
-        self.assertIn("SES Signatures Only", result)
+        # Should not include 1A2 and should mention ceiling reached
+        self.assertNotIn("1A2", result)
+        self.assertIn("Context ceiling of 105 tokens reached", result)
 
+    @patch("cline_utils.dependency_system.io.context_packager.get_transparency_manager")
     @patch("cline_utils.dependency_system.io.context_packager.load_global_key_map")
     @patch("cline_utils.dependency_system.io.context_packager._load_token_metadata")
-    @patch("cline_utils.dependency_system.io.context_packager.aggregate_all_dependencies")
+    @patch(
+        "cline_utils.dependency_system.io.context_packager.aggregate_all_dependencies"
+    )
     @patch("cline_utils.dependency_system.io.context_packager.find_all_tracker_paths")
     @patch("cline_utils.dependency_system.io.context_packager.build_path_migration_map")
     def test_build_package_omits_directories(
@@ -149,9 +198,10 @@ class TestContextPackager(unittest.TestCase):
         mock_agg_deps,
         mock_token_meta,
         mock_key_map,
+        mock_get_tm,
     ):
         from cline_utils.dependency_system.utils.path_utils import normalize_path
-        
+
         path1 = normalize_path("/mock/project/file1.py")
         path_dir = normalize_path("/mock/project/docs")
 
@@ -179,10 +229,16 @@ class TestContextPackager(unittest.TestCase):
             path_dir: {"full_tokens": 100, "ses_tokens": 30},
         }
 
-        # Setup mock aggregated dependencies (1A1 has dependency on directory 1A)
+        # Setup mock aggregated dependencies
         mock_agg_deps.return_value = {
             ("1A1", "1A"): ("x", {normalize_path("/mock/project/tracker.md")})
         }
+
+        # Mock transparency manager to return empty metadata
+        mock_tm = MagicMock()
+        mock_tm.get_file_metadata.return_value = {}
+        mock_tm._registry = {"files": {}}
+        mock_get_tm.return_value = mock_tm
 
         # Mock overlaid content
         self.packager.get_overlaid_content = MagicMock(return_value="print('full')")
@@ -194,6 +250,7 @@ class TestContextPackager(unittest.TestCase):
         self.assertIn("1A1", result)
         self.assertNotIn("## [1A] docs (Full Content)", result)
         self.assertNotIn("Tier 1: Mutual dependencies (x)", result)
+
 
 if __name__ == "__main__":
     unittest.main()

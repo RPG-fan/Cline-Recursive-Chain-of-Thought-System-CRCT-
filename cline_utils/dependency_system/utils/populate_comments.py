@@ -50,7 +50,9 @@ from cline_utils.dependency_system.io.tracker_io import (
     get_tracker_path,
     is_path_in_doc_roots,
 )
-from cline_utils.dependency_system.io.transparency_manager import read_file_transparently
+from cline_utils.dependency_system.io.transparency_manager import (
+    read_file_transparently,
+)
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.path_utils import normalize_path
 
@@ -547,47 +549,63 @@ def find_definition_line(
     hint_line is 1-indexed (from symbol map).
     """
     hint_0 = max(0, hint_line - 1)
+    escaped_item = re.escape(item_name)
 
     if ext == ".py":
-        patterns = [f"def {item_name}", f"class {item_name}"]
+        patterns = [re.compile(rf"\b(def|class)\s+{escaped_item}\b")]
     elif ext in (".js", ".ts", ".tsx", ".jsx"):
         patterns = [
-            f"function {item_name}",
-            f"class {item_name}",
-            f"const {item_name}",
-            f"let {item_name}",
-            f"var {item_name}",
+            re.compile(rf"\b(function|class|const|let|var)\s+{escaped_item}\b"),
+            re.compile(
+                rf"\b{escaped_item}\s*[:=]\s*(async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>"
+            ),
+            re.compile(
+                rf"\b(?:async\s+|static\s+|public\s+|private\s+|protected\s+)*{escaped_item}\s*\("
+            ),
         ]
     elif ext == ".cs":
         patterns = [
-            f"class {item_name}",
-            f"struct {item_name}",
-            f"interface {item_name}",
-            f"enum {item_name}",
-            f"void {item_name}",
-            f"Task {item_name}",
+            re.compile(rf"\b(class|struct|interface|enum|void|Task)\s+{escaped_item}\b")
         ]
     elif ext == ".sql":
         patterns = [
-            f"CREATE TABLE {item_name}",
-            f"CREATE VIEW {item_name}",
-            f"CREATE PROCEDURE {item_name}",
-            f"CREATE FUNCTION {item_name}",
+            re.compile(
+                rf"\b(CREATE\s+(TABLE|VIEW|PROCEDURE|FUNCTION))\s+{escaped_item}\b",
+                re.IGNORECASE,
+            )
         ]
     else:
-        patterns = [item_name]
+        patterns = [re.compile(rf"\b{escaped_item}\b")]
 
     window_start = max(0, hint_0 - 5)
     window_end = min(len(lines), hint_0 + 50)
+
+    def_idx = hint_0
+    found = False
+
     for i in range(window_start, window_end):
-        if any(p in lines[i] for p in patterns):
-            return i
+        if any(pat.search(lines[i]) for pat in patterns):
+            def_idx = i
+            found = True
+            break
 
-    for i, line in enumerate(lines):
-        if any(p in line for p in patterns):
-            return i
+    if not found:
+        for i, line in enumerate(lines):
+            if any(pat.search(line) for pat in patterns):
+                def_idx = i
+                found = True
+                break
 
-    return hint_0
+    # Scan upwards for decorators or annotations (e.g. @property)
+    if found and ext in (".py", ".js", ".ts", ".tsx", ".jsx", ".cs"):
+        while def_idx > 0:
+            prev_line = lines[def_idx - 1].strip()
+            if prev_line.startswith("@"):
+                def_idx -= 1
+            else:
+                break
+
+    return def_idx
 
 
 def get_item_line(item: Dict[str, Any]) -> int:
@@ -687,6 +705,8 @@ def build_connection_map(
                 else None
             )
             target_label = _format_target_symbols(target_symbols)
+            if target_label == "file:?":
+                continue
             entries.append((tgt_key, target_label, dep_char))
 
     if not entries:
@@ -838,7 +858,9 @@ def process_file(
     station_start, station_end = get_station_markers(prefix)
 
     try:
-        source, _ = read_file_transparently(str(file_path), include_connection_maps=True)
+        source, _ = read_file_transparently(
+            str(file_path), include_connection_maps=True
+        )
         if source is None:
             # Fallback to direct read if transparency layer fails to return content
             source = file_path.read_text(encoding="utf-8")
@@ -910,7 +932,9 @@ def process_file(
             doc_idx += 1
 
         # Insert after module docstring if present
-        if doc_idx < len(src_lines) and src_lines[doc_idx].strip().startswith(('"""', "'''")):
+        if doc_idx < len(src_lines) and src_lines[doc_idx].strip().startswith(
+            ('"""', "'''")
+        ):
             trimmed_start = src_lines[doc_idx].strip()
             quote = trimmed_start[:3]
             if trimmed_start.endswith(quote) and len(trimmed_start) > 3:
