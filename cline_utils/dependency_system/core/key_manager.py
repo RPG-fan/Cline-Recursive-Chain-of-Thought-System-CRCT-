@@ -7,6 +7,7 @@ contextual model with tier promotion for nested subdirectories.
 Persists the global key map to a file and maintains the previous version.
 """
 
+import fnmatch
 import json  # Added for saving/loading map
 import logging
 import os
@@ -233,6 +234,7 @@ def generate_keys(
     excluded_dirs: Optional[Set[str]] = None,
     excluded_extensions: Optional[Set[str]] = None,
     precomputed_excluded_paths: Optional[Set[str]] = None,
+    excluded_file_patterns: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, KeyInfo], List[KeyInfo]]:
     """
     Generate hierarchical, contextual keys for files and directories.
@@ -246,6 +248,8 @@ def generate_keys(
         excluded_dirs: Optional set of directory names to exclude. If None, uses config.
         excluded_extensions: Optional set of file extensions to exclude. If None, uses config.
         precomputed_excluded_paths: Optional set of pre-calculated absolute paths to exclude.
+        excluded_file_patterns: Optional list of glob patterns (e.g., "implementation_plan_*.md")
+            to exclude files by basename. If None, reads from config.
 
     Returns:
         Tuple containing:
@@ -288,6 +292,12 @@ def generate_keys(
         set(excluded_extensions)
         if excluded_extensions
         else set(config_manager.get_excluded_extensions() or [])
+    )
+    # Resolve excluded file patterns (glob patterns matched against basename)
+    excluded_file_patterns_resolved = (
+        excluded_file_patterns
+        if excluded_file_patterns is not None
+        else config_manager.config.get("excluded_file_patterns", [])
     )
     project_root = get_project_root()
     absolute_excluded_dirs = {
@@ -458,6 +468,14 @@ def generate_keys(
                             # logger.debug(
                             #     f"Exclusion Check 5: Skipping file '{item_name}' with extension '{ext}' in '{norm_dir_path}'"
                             # )
+                            continue
+
+                    # Check excluded file patterns (glob on basename) for files
+                    if is_file and excluded_file_patterns_resolved:
+                        if any(
+                            fnmatch.fnmatch(item_name, pattern)
+                            for pattern in excluded_file_patterns_resolved
+                        ):
                             continue
 
                     # --- Key Generation Logic ---
@@ -1004,6 +1022,7 @@ def regenerate_keys(
     excluded_dirs: Optional[Set[str]] = None,
     excluded_extensions: Optional[Set[str]] = None,
     precomputed_excluded_paths: Optional[Set[str]] = None,
+    excluded_file_patterns: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, KeyInfo], List[KeyInfo]]:
     """
     Regenerates keys for the given root paths using the new contextual logic.
@@ -1013,6 +1032,7 @@ def regenerate_keys(
         excluded_dirs: Optional set of directory names to exclude.
         excluded_extensions: Optional set of file extensions to exclude.
         precomputed_excluded_paths: Optional set of pre-calculated absolute paths to exclude.
+        excluded_file_patterns: Optional list of glob patterns to exclude by basename.
 
     Returns:
         Tuple containing:
@@ -1025,7 +1045,11 @@ def regenerate_keys(
     """
     # Simply call the main generation function
     return generate_keys(
-        root_paths, excluded_dirs, excluded_extensions, precomputed_excluded_paths
+        root_paths,
+        excluded_dirs,
+        excluded_extensions,
+        precomputed_excluded_paths,
+        excluded_file_patterns,
     )
 
 

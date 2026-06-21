@@ -167,6 +167,7 @@ def analyze_project(
             excluded_dirs=(set(excluded_dirs_rel)),
             excluded_extensions=(set(excluded_extensions)),
             precomputed_excluded_paths=all_excluded_paths_abs_set,
+            excluded_file_patterns=excluded_file_patterns_config,
         )
         analysis_results["key_generation"]["count"] = len(path_to_key_info)
         analysis_results["key_generation"]["new_count"] = len(newly_generated_keys)
