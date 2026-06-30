@@ -36,12 +36,60 @@ EXTENSIONS = {".py", ".js", ".ts", ".jsx", ".tsx", ".md", ".txt"}
 PATTERNS = {
     "TODO": re.compile(r"TODO", re.IGNORECASE),
     "FIXME": re.compile(r"FIXME", re.IGNORECASE),
+    "WIP": re.compile(r"WIP", re.IGNORECASE),
     "pass": re.compile(r"^\s*pass\s*$", re.MULTILINE),
     "NotImplementedError": re.compile(r"NotImplementedError"),
     "in a real": re.compile(r"in a real", re.IGNORECASE),
     "for now": re.compile(r"for now", re.IGNORECASE),
     "simplified": re.compile(r"simplified", re.IGNORECASE),
     "placeholder": re.compile(r"placeholder", re.IGNORECASE),
+}
+
+# Comment-oriented patterns that should only be matched against comment lines.
+# Code-oriented patterns (pass, NotImplementedError) are matched against code lines.
+_COMMENT_ONLY_PATTERNS = frozenset(
+    {"TODO", "FIXME", "WIP", "in a real", "for now", "simplified", "placeholder"}
+)
+
+# Superseding patterns: if a line matches one of these, no other comment-oriented
+# pattern is reported for that line. This prevents duplicate tagging when a more
+# specific marker (e.g. WIP) is present alongside generic ones (e.g. placeholder).
+_SUPERSEDING_PATTERNS = frozenset({"WIP"})
+
+# Per-extension single-line comment marker detection.
+# Maps file extension to a tuple of comment marker strings (longest-first).
+_COMMENT_MARKERS: dict[str, tuple[str, ...]] = {
+    ".py": ("#",),
+    ".pyw": ("#",),
+    ".js": ("//",),
+    ".jsx": ("//",),
+    ".ts": ("//",),
+    ".tsx": ("//",),
+    ".cs": ("//",),
+    ".java": ("//",),
+    ".cpp": ("//", "///"),
+    ".c": ("//",),
+    ".h": ("//",),
+    ".rs": ("///", "//"),
+    ".go": ("//",),
+    ".swift": ("//",),
+    ".kt": ("//",),
+    ".sql": ("--",),
+    ".lua": ("--",),
+    ".rb": ("#",),
+    ".sh": ("#",),
+    ".bash": ("#",),
+    ".zsh": ("#",),
+    ".yaml": ("#",),
+    ".yml": ("#",),
+    ".toml": ("#",),
+    ".ini": ("#", ";"),
+    ".cfg": ("#", ";"),
+    ".r": ("#",),
+    ".glsl": ("//",),
+    ".hlsl": ("//",),
+    ".md": ("<!--",),
+    ".txt": ("#",),
 }
 
 EXCLUSION_PATTERNS = {
@@ -107,7 +155,8 @@ def analyze_node(
                     if child.child_count == 1 and child.children[0].type == "string":
                         continue
                 if child.type == "raise_statement":
-                    if "NotImplementedError" in child.text.decode("utf-8", errors="replace"):
+                    # Optimization: Use byte-level checks instead of decoding the entire AST node text
+                    if b"NotImplementedError" in child.text:
                         has_raise_not_implemented = True
                         continue
                 non_trivial_children.append(child)
@@ -129,7 +178,10 @@ def analyze_node(
                         "file": str(filepath),
                         "line": node.start_point[0] + 1,
                         "end_line": node.end_point[0] + 1,
-                        "content": node.text.partition(b"\n")[0].rstrip(b"\r").decode("utf-8", errors="replace") + "...",
+                        "content": node.text.partition(b"\n")[0]
+                        .rstrip(b"\r")
+                        .decode("utf-8", errors="replace")
+                        + "...",
                     }
                 )
 
@@ -154,7 +206,10 @@ def analyze_node(
                         "file": str(filepath),
                         "line": node.start_point[0] + 1,
                         "end_line": node.end_point[0] + 1,
-                        "content": node.text.partition(b"\n")[0].rstrip(b"\r").decode("utf-8", errors="replace") + "...",
+                        "content": node.text.partition(b"\n")[0]
+                        .rstrip(b"\r")
+                        .decode("utf-8", errors="replace")
+                        + "...",
                     }
                 )
 
@@ -172,12 +227,17 @@ def analyze_node(
                 if child.type in ("comment", "{", "}"):
                     continue
                 if child.type == "throw_statement":
-                    child_text = child.text.decode("utf-8", errors="replace")
-                    if "Not implemented" in child_text or "NotImplementedError" in child_text or "not implemented" in child_text:
+                    # Optimization: Use byte-level checks instead of decoding the entire AST node text
+                    child_text = child.text
+                    if (
+                        b"Not implemented" in child_text
+                        or b"NotImplementedError" in child_text
+                        or b"not implemented" in child_text
+                    ):
                         has_throw_not_implemented = True
                         continue
                 non_trivial_children.append(child)
-            
+
             if not non_trivial_children:
                 kind = (
                     "NotImplementedError"
@@ -195,7 +255,10 @@ def analyze_node(
                         "file": str(filepath),
                         "line": node.start_point[0] + 1,
                         "end_line": node.end_point[0] + 1,
-                        "content": node.text.partition(b"\n")[0].rstrip(b"\r").decode("utf-8", errors="replace") + "...",
+                        "content": node.text.partition(b"\n")[0]
+                        .rstrip(b"\r")
+                        .decode("utf-8", errors="replace")
+                        + "...",
                     }
                 )
 
@@ -227,10 +290,49 @@ def scan_file(filepath: str) -> List[Dict[str, Any]]:
         try:
             text_content = content.decode("utf-8", errors="ignore")
             lines = text_content.splitlines()
+
+            # Determine comment markers for this file extension
+            comment_markers = _COMMENT_MARKERS.get(ext, ("#",))
+
+            def _is_comment_line(line: str) -> bool:
+                """Return True if the stripped line starts with a comment marker."""
+                stripped = line.strip()
+                for marker in sorted(comment_markers, key=len, reverse=True):
+                    if stripped.startswith(marker):
+                        return True
+                return False
+
             for i, line in enumerate(lines):
+                is_comment = _is_comment_line(line)
+
+                # --- Superseding check ---
+                # If a line matches a superseding pattern (e.g. WIP), only that
+                # pattern is reported and all other comment-oriented patterns on
+                # the same line are suppressed.
+                superseding_label: Optional[str] = None
+                if is_comment:
+                    for label in _SUPERSEDING_PATTERNS:
+                        pattern = PATTERNS.get(label)
+                        if pattern and pattern.search(line):
+                            superseding_label = label
+                            break
+
                 for label, pattern in PATTERNS.items():
                     if is_parsed and label in ("pass", "NotImplementedError"):
                         continue
+
+                    # Route patterns to the correct line type
+                    if label in _COMMENT_ONLY_PATTERNS:
+                        if not is_comment:
+                            continue  # skip code lines for comment-oriented patterns
+                        # If a superseding pattern matched on this line, skip
+                        # all other comment-oriented patterns except the superseding one
+                        if superseding_label is not None and label != superseding_label:
+                            continue
+                    else:
+                        if is_comment:
+                            continue  # skip comment lines for code-oriented patterns
+
                     if pattern.search(line):
                         excluded = False
                         if label in EXCLUSION_PATTERNS:
@@ -240,9 +342,16 @@ def scan_file(filepath: str) -> List[Dict[str, Any]]:
                                     break
                         if excluded:
                             continue
+                        # Route WIP items to the "Worklog" type, separating
+                        # them from the standard incomplete/improper issues.
+                        issue_type = (
+                            "Worklog"
+                            if label in _SUPERSEDING_PATTERNS
+                            else "Incomplete/Improper"
+                        )
                         issues.append(
                             {
-                                "type": "Incomplete/Improper",
+                                "type": issue_type,
                                 "subtype": label,
                                 "file": str(filepath),
                                 "line": i + 1,

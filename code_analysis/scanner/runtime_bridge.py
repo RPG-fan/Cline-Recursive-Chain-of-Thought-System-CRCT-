@@ -88,6 +88,8 @@ class RuntimeIndex:
     def _build(self):
         self._all_methods = defaultdict(set)  # method_name -> set(Class_name)
         self._file_defined_classes = defaultdict(set)  # file_path -> set(Class_name)
+        # module_path -> {class_name: [method_names]} for class-method propagation
+        self._module_classes: Dict[str, Dict[str, List[str]]] = defaultdict(dict)
 
         for raw_path, finfo in self.raw.items():
             fp = self.norm(raw_path)
@@ -97,12 +99,16 @@ class RuntimeIndex:
                     cls_name = cls_any.get("name")
                     if cls_name:
                         self._file_defined_classes[fp].add(cls_name)
+                        meth_names: List[str] = []
                         meths = cls_any.get("methods") or []
                         for meth_any in meths:
                             if isinstance(meth_any, dict):
-                                method_name = meth_any.get("name")
-                                if method_name:
-                                    self._all_methods[method_name].add(cls_name)
+                                meth_name = meth_any.get("name")
+                                if meth_name:
+                                    self._all_methods[meth_name].add(cls_name)
+                                    meth_names.append(meth_name)
+                        # Store class→methods for this file's module path
+                        self._module_classes[fp][cls_name] = meth_names
 
         all_project_classes = set()
         for classes in self._file_defined_classes.values():
@@ -129,17 +135,31 @@ class RuntimeIndex:
             imports_list = finfo.get("imports") or []
             for imp in imports_list:
                 if isinstance(imp, dict):
-                    inm = imp.get("name") or imp.get("module")
+                    # Runtime inspector stores import paths under "path" key
+                    # (e.g. {"path": "agents.combat_agent"}). Check all common keys.
+                    inm = imp.get("name") or imp.get("module") or imp.get("path")
                     if inm in all_project_classes:
                         active_classes.add(inm)
                 elif isinstance(imp, str):
-                    for cls_name in all_project_classes:
-                        if cls_name in imp:
-                            active_classes.add(cls_name)
+                    # Fast O(L^2) substring checks against the O(1) set
+                    # Preserves exact substring matching semantics (including dotted names and partials)
+                    L = len(imp)
+                    for i in range(L):
+                        for j in range(i + 1, L + 1):
+                            sub = imp[i:j]
+                            if sub in all_project_classes:
+                                active_classes.add(sub)
 
             # Helper to record a reference (using fully qualified names where active)
             def _record_ref(ref_name: str):
                 self._refs[ref_name].add(file_path)
+                # Also index under the simple (unqualified) name so that
+                # caller lookups by plain function name can find references
+                # that were made via dotted import paths (e.g. "db_entities.delete_entity"
+                # also indexed as "delete_entity").
+                if "." in ref_name:
+                    simple_name = ref_name.rsplit(".", 1)[-1]
+                    self._refs[simple_name].add(file_path)
                 if ref_name in self._all_methods:
                     for cls_name in self._all_methods[ref_name]:
                         if cls_name in active_classes:
@@ -198,25 +218,67 @@ class RuntimeIndex:
             for call in calls_list:
                 n: Optional[str] = None
                 if isinstance(call, dict):
-                    n = cast(Optional[str], cast(Dict[Any, Any], call).get("name"))
+                    # Runtime inspector stores call targets under "target_name"
+                    # rather than "name" — check both keys for compatibility.
+                    call_dict = cast(Dict[Any, Any], call)
+                    n = cast(
+                        Optional[str],
+                        call_dict.get("name") or call_dict.get("target_name"),
+                    )
                 elif isinstance(call, str):
                     n = call
                 if n:
                     _record_ref(n)
 
-            # Imports
+            # Imports — also read "path" key used by runtime inspector
             imports_list = cast(List[Any], finfo.get("imports") or [])
             for imp in imports_list:
                 inm: Optional[str] = None
                 if isinstance(imp, dict):
                     imp_dict = cast(Dict[Any, Any], imp)
                     inm = cast(
-                        Optional[str], imp_dict.get("name") or imp_dict.get("module")
+                        Optional[str],
+                        imp_dict.get("name")
+                        or imp_dict.get("module")
+                        or imp_dict.get("path"),
                     )
                 elif isinstance(imp, str):
                     inm = imp
                 if inm:
                     _record_ref(inm)
+                    # Class-method propagation: if this import path matches a
+                    # module that defines classes, mark all public methods of
+                    # those classes as referenced by this file.
+                    for mod_fp, mod_classes in self._module_classes.items():
+                        # Match by module path suffix (e.g. "agents.combat_agent"
+                        # matches ".../src/agents/combat_agent.py")
+                        mod_suffix = inm.replace(".", "/")
+                        if mod_suffix in mod_fp.replace("\\", "/"):
+                            for cls_name, meth_names in mod_classes.items():
+                                _record_ref(cls_name)
+                                for meth_name in meth_names:
+                                    if not meth_name.startswith("_"):
+                                        _record_ref(meth_name)
+                                        _record_ref(f"{cls_name}.{meth_name}")
+
+            # File-level attribute_accesses — the runtime inspector stores
+            # these as dicts with "target_name" (e.g. {"target_name": "foo",
+            # "potential_source": "self", "line": [42]}). The current code only
+            # processed function-level attribute_accesses and only string entries,
+            # completely missing this rich file-level data source.
+            file_attrs = cast(List[Any], finfo.get("attribute_accesses") or [])
+            for attr in file_attrs:
+                attr_name: Optional[str] = None
+                if isinstance(attr, dict):
+                    attr_dict = cast(Dict[Any, Any], attr)
+                    attr_name = cast(
+                        Optional[str],
+                        attr_dict.get("target_name") or attr_dict.get("name"),
+                    )
+                elif isinstance(attr, str):
+                    attr_name = attr
+                if attr_name:
+                    _record_ref(attr_name)
 
         # ---- Load pre-computed connection maps from transparency_registry.json ----
         project_root = os.path.abspath(
@@ -308,14 +370,14 @@ class RuntimeIndex:
             return False
         orig = inh.get("_haystack_original")
         low = inh.get("_haystack_lower")
-        if orig is None or low is None:
+        if orig is None:
             bases = inh.get("bases") or []
             mro = inh.get("mro") or []
             orig = " ".join(bases) + " " + " ".join(mro)
             low = orig.lower()
             inh["_haystack_original"] = orig
             inh["_haystack_lower"] = low
-        return "ABC" in str(orig) or "abc." in str(low)
+        return "ABC" in orig or "abc." in low
 
 
 # ===========================================================================
@@ -372,6 +434,9 @@ def maybe_run_runtime_inspector(project_root_path: str) -> None:
             check=False,
             timeout=300,
         )
+    except subprocess.TimeoutExpired as e:
+        # SECURITY: Catching TimeoutExpired specifically to prevent unhandled exceptions upon timeout
+        print(f"[runtime] Auto-run timed out after {e.timeout}s")
     except Exception as e:
         print(f"[runtime] Auto-run failed: {e}")
 
@@ -440,6 +505,9 @@ def _should_suppress_issue(issue: Dict[str, Any], ctx: Dict[str, Any]) -> bool:
     if subtype in {"Empty/Stub Class", "Bare Class"} and (
         ctx.get("data_container_class")
         or heuristics.is_data_container_class(sym_for_checks)
+        or heuristics.is_data_container_from_source(
+            file_path, int(issue.get("line", 0) or 0)
+        )
     ):
         return True
 
@@ -495,14 +563,29 @@ def runtime_only_findings(idx: RuntimeIndex) -> List[Dict[str, Any]]:
             cls_ctx: Dict[str, Any] = cast(
                 Dict[str, Any], cls.get("source_context") or {}
             )
+            cls_line_range = cast(List[int], cls_ctx.get("line_range") or [])
+            if cls_line_range:
+                cls_line: int = cls_line_range[0]
+            else:
+                raw_cls_line = cls.get("line", 0)
+                if isinstance(raw_cls_line, (list, tuple)):
+                    cls_line = int(raw_cls_line[0]) if raw_cls_line else 0
+                else:
+                    cls_line = int(raw_cls_line or 0)
             inheritance = cast(Dict[str, Any], cls.get("inheritance") or {})
             if not (cls.get("methods") or []) and not (inheritance.get("bases") or []):
+                # Fallback: read the source file to check if this is actually
+                # a data container class (TypedDict, Enum, dataclass, NamedTuple,
+                # BaseModel) that the runtime inspector didn't capture
+                # inheritance/source_context for.
+                if heuristics.is_data_container_from_source(nf, cls_line):
+                    continue
                 findings.append(
                     {
                         "type": "Improper Implementation (runtime)",
                         "subtype": "Bare Class",
                         "file": nf,
-                        "line": cast(List[int], cls_ctx.get("line_range", [0]))[0],
+                        "line": cls_line,
                         "content": f"class {cls_name}: (no methods, no bases)",
                     }
                 )
@@ -533,7 +616,15 @@ def _emit_runtime_issues_for_symbol(
 ) -> None:
     name: str = cast(str, sym.get("name") or qualname)
     ctx: Dict[str, Any] = cast(Dict[str, Any], sym.get("source_context") or {})
-    line: int = cast(List[int], ctx.get("line_range", [0]))[0]
+    line_range = cast(List[int], ctx.get("line_range") or [])
+    if line_range:
+        line: int = line_range[0]
+    else:
+        raw_line = sym.get("line", 0)
+        if isinstance(raw_line, (list, tuple)):
+            line = int(raw_line[0]) if raw_line else 0
+        else:
+            line = int(raw_line or 0)
 
     is_trivial = heuristics.has_trivial_body(sym)
     annotated_return = heuristics.annotated_non_trivial_return(sym)
@@ -613,8 +704,16 @@ def _emit_runtime_issues_for_symbol(
                 }
             )
 
-    # 5. Orphan
+    # 5. Orphan / Dead Unexported Code
+    # Suppress these findings for non-Python files (.svelte, .js, .ts, .jsx, .tsx)
+    # because the runtime inspector's caller tracking is Python-centric and
+    # cannot accurately track cross-file references in JS/Svelte ecosystems
+    # (ESM imports, Svelte component events, template bindings, etc.).
     if name and not name.startswith("_"):
+        file_ext = os.path.splitext(file_path)[1].lower()
+        if file_ext not in (".py", ".pyw"):
+            return
+
         # For methods, query using qualname (which is Class.method).
         # For other kinds, query using name.
         query_name = qualname if kind == "method" else name
@@ -678,7 +777,9 @@ def enrich_issue(issue: Dict[str, Any], idx: RuntimeIndex) -> Dict[str, Any]:
         if sym.get("decorators"):
             ctx["decorators"] = sym["decorators"]
         if sym.get("inheritance"):
-            ctx["inheritance"] = {k: v for k, v in sym["inheritance"].items() if not k.startswith("_")}
+            ctx["inheritance"] = {
+                k: v for k, v in sym["inheritance"].items() if not k.startswith("_")
+            }
         scope: Dict[str, Any] = sym.get("scope_references") or {}
         if scope:
             ctx["scope_references"] = scope
@@ -688,7 +789,9 @@ def enrich_issue(issue: Dict[str, Any], idx: RuntimeIndex) -> Dict[str, Any]:
             ctx["attribute_accesses"] = list(sym["attribute_accesses"])[:25]
         ctx["abstract_method"] = heuristics.is_abstract_method(sym)
         if sym.get("_kind") == "class":
-            ctx["data_container_class"] = heuristics.is_data_container_class(sym)
+            ctx["data_container_class"] = heuristics.is_data_container_class(
+                sym
+            ) or heuristics.is_data_container_from_source(file_path, line)
         ctx["has_trivial_body"] = heuristics.has_trivial_body(sym)
 
         # Cross-file links
@@ -720,7 +823,11 @@ def enrich_issue(issue: Dict[str, Any], idx: RuntimeIndex) -> Dict[str, Any]:
                 enclosing_class
             )
         if not ctx.get("inheritance") and enclosing_class.get("inheritance"):
-            ctx["inheritance"] = {k: v for k, v in enclosing_class["inheritance"].items() if not k.startswith("_")}
+            ctx["inheritance"] = {
+                k: v
+                for k, v in enclosing_class["inheritance"].items()
+                if not k.startswith("_")
+            }
 
     ctx["severity"] = score_severity(issue, ctx)
     issue_copy = dict(issue)

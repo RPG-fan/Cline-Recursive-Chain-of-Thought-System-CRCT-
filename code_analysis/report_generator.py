@@ -45,6 +45,7 @@ from code_analysis.scanner.runtime_bridge import (
 from code_analysis.reporting.markdown_formatter import format_markdown
 from code_analysis.reporting.json_exporter import export_json
 from code_analysis.reporting.backlog_generator import generate_backlog
+from code_analysis.reporting.worklog_exporter import export_worklog
 from code_analysis.scanner.comment_index import scan_project_comments
 
 config = ConfigManager()
@@ -74,12 +75,14 @@ def main():
         # Redirect output to PYRIGHT_OUTPUT in the current working directory or project root
         pyright_output_path = os.path.join(safe_project_root, PYRIGHT_OUTPUT)
         with open(pyright_output_path, "w") as f:
+            # SECURITY: Added timeout=300 to prevent DoS via indefinitely hanging external process
             result = subprocess.run(
                 ["pyright", "--outputjson"],
                 stdout=f,
                 stderr=subprocess.STDOUT,
                 cwd=safe_project_root,
                 shell=(os.name == "nt"),
+                timeout=300,  # Prevent indefinite hang (Security)
             )
         if result.returncode == 0:
             print("Pyright analysis completed successfully.")
@@ -88,8 +91,22 @@ def main():
                 f"Pyright completed with warnings/errors (exit code {result.returncode}). "
                 f"Output file generated."
             )
+    except subprocess.TimeoutExpired as e:
+        # SECURITY: Catching TimeoutExpired specifically to prevent unhandled exceptions upon timeout
+        print(f"Warning: Pyright analysis timed out after {e.timeout}s.")
+        # SECURITY: Remove the incomplete output file to prevent downstream crashes from unparsable JSON
+        if os.path.exists(pyright_output_path):
+            try:
+                os.remove(pyright_output_path)
+            except OSError:
+                pass
     except Exception as e:
         print(f"Warning: Unexpected error running pyright: {e}")
+        if os.path.exists(pyright_output_path):
+            try:
+                os.remove(pyright_output_path)
+            except OSError:
+                pass
 
     # ---- runtime data ----
     maybe_run_runtime_inspector(project_root)
@@ -179,17 +196,38 @@ def main():
         f"across {len(comment_index)} files."
     )
 
-    # ---- Generate Reports ----
-    export_json(all_issues, unused_items, OUTPUT_JSON_FILE, comment_index=comment_index)
-    format_markdown(all_issues, unused_items, OUTPUT_FILE, comment_index=comment_index)
+    # ---- Split Worklog items from standard issues ----
+    # Worklog items (WIP markers) are tracked separately from the technical
+    # debt backlog. They represent reviewed work-in-progress markers that
+    # have been deliberately placed by developers and need different handling.
+    worklog_items = [it for it in all_issues if it.get("type") == "Worklog"]
+    standard_issues = [it for it in all_issues if it.get("type") != "Worklog"]
+
+    print(
+        f"[split] {len(worklog_items)} worklog items, "
+        f"{len(standard_issues)} standard issues."
+    )
+
+    # ---- Generate Reports (standard issues only) ----
+    export_json(
+        standard_issues, unused_items, OUTPUT_JSON_FILE, comment_index=comment_index
+    )
+    format_markdown(
+        standard_issues, unused_items, OUTPUT_FILE, comment_index=comment_index
+    )
 
     print(f"Report generated at {OUTPUT_FILE}")
     print(f"JSON report at {OUTPUT_JSON_FILE}")
 
-    # ---- Generate Backlog ----
+    # ---- Generate Backlog (standard issues only) ----
     backlog_path = os.path.join(project_root, "cline_docs", "technical_debt_backlog.md")
     print("Generating technical debt backlog...")
-    generate_backlog(all_issues, project_root, backlog_path, code_roots)
+    generate_backlog(standard_issues, project_root, backlog_path, code_roots)
+
+    # ---- Generate Strategy Work Pool (worklog items only) ----
+    worklog_path = os.path.join(project_root, "cline_docs", "strategy_work_pool.md")
+    print("Generating strategy work pool...")
+    export_worklog(worklog_items, project_root, worklog_path)
 
 
 if __name__ == "__main__":
