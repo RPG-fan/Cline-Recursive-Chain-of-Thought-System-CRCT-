@@ -66,14 +66,22 @@ def inherits_from(sym: Dict[str, Any], *needles: str) -> bool:
     bases = cast(List[str], inheritance.get("bases") or [])
     mro = cast(List[str], inheritance.get("mro") or [])
     haystack = " ".join(str(part) for part in [*bases, *mro]).lower()
-    return any(needle.lower() in haystack for needle in needles)
+    # Optimization: avoid generator overhead in any()
+    for needle in needles:
+        if needle.lower() in haystack:
+            return True
+    return False
 
 
 def source_mentions(sym: Dict[str, Any], *needles: str) -> bool:
     source_context = cast(Dict[str, Any], sym.get("source_context") or {})
     source_lines = cast(List[str], source_context.get("source_lines") or [])
     haystack = "\n".join(source_lines).lower()
-    return any(needle.lower() in haystack for needle in needles)
+    # Optimization: avoid generator overhead in any()
+    for needle in needles:
+        if needle.lower() in haystack:
+            return True
+    return False
 
 
 def is_protocol_class(sym: Dict[str, Any]) -> bool:
@@ -98,10 +106,14 @@ def is_exception_class(sym: Dict[str, Any]) -> bool:
     bases = cast(List[str], inheritance.get("bases") or [])
     mro = cast(List[str], inheritance.get("mro") or [])
     lineage = [name, *[str(item).split(".")[-1] for item in [*bases, *mro]]]
-    return any(
-        item.endswith(("Error", "Exception")) or item in {"Exception", "BaseException"}
-        for item in lineage
-    )
+    # Optimization: explicitly unrolled loop instead of any() with generator expression
+    for item in lineage:
+        if item.endswith(("Error", "Exception")) or item in {
+            "Exception",
+            "BaseException",
+        }:
+            return True
+    return False
 
 
 def is_marker_exception_class(sym: Dict[str, Any]) -> bool:
@@ -111,9 +123,11 @@ def is_marker_exception_class(sym: Dict[str, Any]) -> bool:
 
 def is_abstract_method(sym: Dict[str, Any]) -> bool:
     decorators = cast(List[str], sym.get("decorators") or [])
-    return any("abstract" in str(decorator).lower() for decorator in decorators) or (
-        source_mentions(sym, "@abstractmethod", "@abc.abstractmethod")
-    )
+    # Optimization: explicitly unrolled loop instead of any() with generator expression
+    for decorator in decorators:
+        if "abstract" in str(decorator).lower():
+            return True
+    return source_mentions(sym, "@abstractmethod", "@abc.abstractmethod")
 
 
 def is_data_container_class(sym: Dict[str, Any]) -> bool:
@@ -122,28 +136,26 @@ def is_data_container_class(sym: Dict[str, Any]) -> bool:
     bases = cast(List[str], inheritance.get("bases") or [])
 
     # Check naming conventions
-    if any(
-        suffix in name
-        for suffix in ("template", "schema", "dto", "enum", "dict", "model")
-    ):
-        return True
+    # Optimization: explicitly unrolled loop instead of any() with generator expression
+    for suffix in ("template", "schema", "dto", "enum", "dict", "model"):
+        if suffix in name:
+            return True
 
     # Check base class names
     for base in bases:
         base_lower = str(base).lower()
-        if any(
-            keyword in base_lower
-            for keyword in (
-                "template",
-                "schema",
-                "dto",
-                "enum",
-                "dict",
-                "model",
-                "basemodel",
-            )
+        # Optimization: explicitly unrolled loop instead of any() with generator expression
+        for keyword in (
+            "template",
+            "schema",
+            "dto",
+            "enum",
+            "dict",
+            "model",
+            "basemodel",
         ):
-            return True
+            if keyword in base_lower:
+                return True
 
     return inherits_from(
         sym,
@@ -159,3 +171,59 @@ def is_data_container_class(sym: Dict[str, Any]) -> bool:
         "str, Enum",
         "int, Enum",
     )
+
+
+# Patterns that indicate a data container class when reading source files
+_DATA_CONTAINER_SOURCE_PATTERNS = (
+    "TypedDict",
+    "Enum",
+    "IntEnum",
+    "NamedTuple",
+    "BaseModel",
+    "total=False",
+    "total=True",
+)
+
+
+def is_data_container_from_source(file_path: str, line: int) -> bool:
+    """Fallback: read the source file at *line* and check if the class
+    definition line (or the decorator line above it) indicates a data
+    container class (TypedDict, Enum, dataclass, NamedTuple, BaseModel).
+
+    This is used when the runtime inspector doesn't capture inheritance
+    or source_context for a class, causing is_data_container_class() to
+    return False even though the class is actually a data container.
+    """
+    if not file_path or not line:
+        return False
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            lines_list = f.readlines()
+    except Exception:
+        return False
+    # The runtime inspector may record a line number that's off by 1-2 lines
+    # (e.g. a blank line above the class definition). Check a small window
+    # around the target line for the class definition and its decorator.
+    idx = line - 1  # 0-based index for the reported line
+    if idx < 0 or idx >= len(lines_list):
+        return False
+
+    # Search a window of -2 to +2 lines around the reported line
+    start_idx = max(0, idx - 2)
+    end_idx = min(len(lines_list), idx + 3)
+
+    for check_idx in range(start_idx, end_idx):
+        check_line = lines_list[check_idx].strip()
+
+        # Check for @dataclass decorator on the line above a class definition
+        if check_line.startswith("@dataclass"):
+            return True
+
+        # Check class definition line for data container base classes
+        if check_line.startswith("class "):
+            class_lower = check_line.lower()
+            for pattern in _DATA_CONTAINER_SOURCE_PATTERNS:
+                if pattern.lower() in class_lower:
+                    return True
+
+    return False

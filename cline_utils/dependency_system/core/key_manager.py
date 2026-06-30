@@ -343,11 +343,14 @@ def generate_keys(
         """Recursively processes directories and files, generating contextual keys."""
         nonlocal path_to_key_info, newly_generated_keys, top_level_dir_count
 
+        # Optimization: Precompute tuple for native startswith check to bypass generator overhead
+        exclusion_prefixes = tuple(exclusion_set)
+
         try:
             norm_dir_path = normalize_path(dir_path)
 
             # 1. Skip excluded directories
-            if any(norm_dir_path.startswith(ex_path) for ex_path in exclusion_set):
+            if norm_dir_path.startswith(exclusion_prefixes):
                 # logger.debug(
                 #     f"Exclusion Check 1: Skipping excluded dir path: '{norm_dir_path}'"
                 # )
@@ -436,8 +439,8 @@ def generate_keys(
                     is_file = os.path.isfile(item_path)
 
                     # Apply standard exclusions (name, type, extension, etc.)
-                    if any(
-                        norm_item_path.startswith(ex_path) for ex_path in exclusion_set
+                    if norm_item_path.startswith(
+                        exclusion_prefixes
                     ):  # Check again for items potentially matching deeper patterns
                         # logger.debug(
                         #     f"Exclusion Check 1b: Skipping excluded item path: '{norm_item_path}'"

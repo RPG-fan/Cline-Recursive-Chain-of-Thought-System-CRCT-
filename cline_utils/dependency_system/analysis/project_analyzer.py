@@ -122,6 +122,22 @@ def analyze_project(
     excluded_extensions = set(config.get_excluded_extensions())
     excluded_file_patterns_config = config.config.get("excluded_file_patterns", [])
 
+    # Optimization: pre-compile fnmatch patterns into a single regex to avoid repeated
+    # fnmatch.fnmatch() generator evaluation inside the hot os.walk loop.
+    excluded_file_patterns_regex = None
+    if excluded_file_patterns_config:
+        try:
+            import re
+            import fnmatch
+
+            pattern_str = "|".join(
+                fnmatch.translate(os.path.normcase(p))
+                for p in excluded_file_patterns_config
+            )
+            excluded_file_patterns_regex = re.compile(pattern_str)
+        except Exception as e:
+            logger.warning(f"Failed to compile excluded file patterns regex: {e}")
+
     norm_project_root = normalize_path(project_root)
     if any(
         norm_project_root == excluded_path
@@ -295,17 +311,30 @@ def analyze_project(
 
                 is_excluded = (
                     file_path_abs in all_excluded_paths_abs_set
-                    or any(
-                        is_subpath(file_path_abs, excluded_path_iter)
-                        for excluded_path_iter in all_excluded_paths_abs_set
-                        if os.path.isdir(excluded_path_iter)
-                    )
                     or file_ext in excluded_extensions
-                    or any(
-                        fnmatch.fnmatch(file_basename, pattern)
-                        for pattern in excluded_file_patterns_config
-                    )  # Use original pattern list from config
+                    or (
+                        (
+                            excluded_file_patterns_regex is not None
+                            and excluded_file_patterns_regex.match(
+                                os.path.normcase(file_basename)
+                            )
+                            is not None
+                        )
+                        if excluded_file_patterns_regex is not None
+                        else any(
+                            fnmatch.fnmatch(file_basename, pattern)
+                            for pattern in excluded_file_patterns_config
+                        )
+                    )
                 )
+                if not is_excluded:
+                    for excluded_path_iter in all_excluded_paths_abs_set:
+                        if os.path.isdir(excluded_path_iter) and is_subpath(
+                            file_path_abs, excluded_path_iter
+                        ):
+                            is_excluded = True
+                            break
+
                 if is_excluded:
                     # logger.debug(f"Skipping excluded file: {file_path_abs}")
                     continue
@@ -1380,10 +1409,10 @@ def analyze_project(
             module_keys_to_visualize = []
             for key_info_obj_analyzer in path_to_key_info.values():
                 if key_info_obj_analyzer.is_directory:
-                    is_top_level_module_dir_analyzer = any(
-                        key_info_obj_analyzer.norm_path == acr_path_analyzer
-                        or key_info_obj_analyzer.parent_path == acr_path_analyzer
-                        for acr_path_analyzer in abs_code_roots
+                    # Optimization: replace O(N) any() generator equality check with O(1) set membership
+                    is_top_level_module_dir_analyzer = (
+                        key_info_obj_analyzer.norm_path in abs_code_roots
+                        or key_info_obj_analyzer.parent_path in abs_code_roots
                     )
                     if is_top_level_module_dir_analyzer:
                         module_keys_to_visualize.append(
@@ -1474,10 +1503,10 @@ def analyze_project(
                 module_keys_to_visualize: List[str] = []
                 for key_info_obj_analyzer in path_to_key_info.values():
                     if key_info_obj_analyzer.is_directory:
-                        is_top_level_module_dir_analyzer = any(
-                            key_info_obj_analyzer.norm_path == acr_path_analyzer
-                            or key_info_obj_analyzer.parent_path == acr_path_analyzer
-                            for acr_path_analyzer in abs_code_roots
+                        # Optimization: replace O(N) any() generator equality check with O(1) set membership
+                        is_top_level_module_dir_analyzer = (
+                            key_info_obj_analyzer.norm_path in abs_code_roots
+                            or key_info_obj_analyzer.parent_path in abs_code_roots
                         )
                         if is_top_level_module_dir_analyzer:
                             module_keys_to_visualize.append(

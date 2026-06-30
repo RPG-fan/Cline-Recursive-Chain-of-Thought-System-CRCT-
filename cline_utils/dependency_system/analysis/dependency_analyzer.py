@@ -1152,7 +1152,9 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                     # Top-level function (or nested in another function)
                     result["functions"].append(new_entry)
 
-                is_top_level_func = any(item is node for item in tree.body)
+                # Optimize checking for top-level nodes by utilizing O(1) attribute access from parent pointers
+                # populated during the initial ast.walk(), avoiding O(N) execution overhead per check of any()
+                is_top_level_func = getattr(node, "_parent", None) is tree
                 if not is_top_level_func:
                     for dec_node in node.decorator_list:
                         dec_name = _get_full_name_str(dec_node)
@@ -1236,7 +1238,9 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
                         )
             # Inheritance
             elif isinstance(node, ast.ClassDef):
-                is_top_level_class = any(item is node for item in tree.body)
+                # Optimize checking for top-level nodes by utilizing O(1) attribute access from parent pointers
+                # populated during the initial ast.walk(), avoiding O(N) execution overhead per check of any()
+                is_top_level_class = getattr(node, "_parent", None) is tree
                 if not is_top_level_class:
                     for dec_node in node.decorator_list:
                         dec_name = _get_full_name_str(dec_node)
@@ -1636,11 +1640,9 @@ def _analyze_javascript_file_ts(
                 # Filter for "meaningful" literals:
                 # - Paths or URLs (contains /)
                 # - Descriptive identifiers (long, contains space/underscore, or capital letters)
+                # Optimized uppercase check avoiding generator instantiation overhead
                 is_meaningful = len(text) > 5 and (
-                    "/" in text
-                    or " " in text
-                    or "_" in text
-                    or any(c.isupper() for c in text)
+                    "/" in text or " " in text or "_" in text or text != text.lower()
                 )
                 if is_meaningful and text not in result["literals"]:
                     result["literals"].append(text)
@@ -2480,6 +2482,10 @@ def _analyze_ts_script_content(
         # 2. Exports (Robust)
         # We query for the export statement and then inspect its children
         # This avoids grammar specific node naming issues in the query itself
+        # Optimization: use sets for O(1) membership testing instead of O(N) list comprehensions
+        existing_exports = {e["name"] for e in result.get("exports") or []}
+        existing_props = {p["name"] for p in result.get("props") or []}
+
         export_queries = ["(export_statement) @exp"]
 
         for q_str in export_queries:
@@ -2526,7 +2532,7 @@ def _analyze_ts_script_content(
                         )
                         line = name_node.start_point[0] + 1
 
-                        if name not in [e["name"] for e in result.get("exports", [])]:
+                        if name not in existing_exports:
                             cast(
                                 List[Dict[str, Any]], result.setdefault("exports", [])
                             ).append(
@@ -2536,13 +2542,15 @@ def _analyze_ts_script_content(
                                     "context": "module" if is_module else "instance",
                                 }
                             )
+                            existing_exports.add(name)
 
                         # If it's a prop (export let/var in instance), also add to props
                         if not is_module:
-                            if name not in [p["name"] for p in result.get("props", [])]:
+                            if name not in existing_props:
                                 cast(
                                     List[Dict[str, Any]], result.setdefault("props", [])
                                 ).append({"name": name, "line": line})
+                                existing_props.add(name)
 
         # 3. Functions (Robust)
         # Similar to exports, we use broad queries and inspect in Python

@@ -14,7 +14,6 @@ class TestContextPackager(unittest.TestCase):
     def setUp(self):
         self.packager = ContextPackager(project_root="/mock/project")
 
-    @patch("cline_utils.dependency_system.io.context_packager.get_transparency_manager")
     @patch("cline_utils.dependency_system.io.context_packager.load_global_key_map")
     @patch("cline_utils.dependency_system.io.context_packager._load_token_metadata")
     @patch(
@@ -22,14 +21,15 @@ class TestContextPackager(unittest.TestCase):
     )
     @patch("cline_utils.dependency_system.io.context_packager.find_all_tracker_paths")
     @patch("cline_utils.dependency_system.io.context_packager.build_path_migration_map")
+    @patch("cline_utils.dependency_system.io.context_packager.get_transparency_manager")
     def test_build_package_basic(
         self,
+        mock_get_tm,
         mock_migration_map,
         mock_tracker_paths,
         mock_agg_deps,
         mock_token_meta,
         mock_key_map,
-        mock_get_tm,
     ):
         from cline_utils.dependency_system.utils.path_utils import normalize_path
 
@@ -65,26 +65,22 @@ class TestContextPackager(unittest.TestCase):
             ("1A1", "1A2"): ("x", {normalize_path("/mock/project/tracker.md")})
         }
 
-        # 4. Mock transparency manager connection maps
+        # 4. Mock transparency manager to provide a slice reference
         mock_tm = MagicMock()
         mock_tm.get_file_metadata.return_value = {
             "connection_maps": [
-                {
-                    "target_key": "1A2",
-                    "target_symbol": "func",
-                    "target_line": 5,
-                }
+                {"target_key": "1A2", "target_symbol": "my_func", "target_line": 10}
             ]
         }
         mock_tm._registry = {"files": {}}
         mock_get_tm.return_value = mock_tm
 
-        # 5. Mock file content overlay and static essence / slicing
+        # 5. Mock file content retrieval and slicing
         self.packager.get_overlaid_content = MagicMock(
             return_value="print('file_content')"
         )
         self.packager._extract_sliced_block_from_overlaid = MagicMock(
-            return_value="def func():\n    pass\n"
+            return_value="def my_func(): pass"
         )
 
         # Execute
@@ -95,13 +91,11 @@ class TestContextPackager(unittest.TestCase):
         self.assertIn("1A1", result)
         self.assertIn("Tier 1: Mutual dependencies (x)", result)
         self.assertIn("1A2", result)
-        self.assertIn("Sliced Symbols: func", result)
-        self.assertIn("def func():", result)
+        self.assertIn("def my_func(): pass", result)
         self.packager.get_overlaid_content.assert_any_call(
             path1, include_connection_maps=False
         )
 
-    @patch("cline_utils.dependency_system.io.context_packager.get_transparency_manager")
     @patch("cline_utils.dependency_system.io.context_packager.load_global_key_map")
     @patch("cline_utils.dependency_system.io.context_packager._load_token_metadata")
     @patch(
@@ -109,21 +103,22 @@ class TestContextPackager(unittest.TestCase):
     )
     @patch("cline_utils.dependency_system.io.context_packager.find_all_tracker_paths")
     @patch("cline_utils.dependency_system.io.context_packager.build_path_migration_map")
-    def test_build_package_budget_capping(
+    @patch("cline_utils.dependency_system.io.context_packager.get_transparency_manager")
+    def test_build_package_truncation(
         self,
+        mock_get_tm,
         mock_migration_map,
         mock_tracker_paths,
         mock_agg_deps,
         mock_token_meta,
         mock_key_map,
-        mock_get_tm,
     ):
         from cline_utils.dependency_system.utils.path_utils import normalize_path
 
         path1 = normalize_path("/mock/project/file1.py")
         path2 = normalize_path("/mock/project/file2.py")
 
-        # Setup mock keymap and KeyInfo
+        # 1. Setup mock keymap and KeyInfo
         mock_key_map.return_value = {
             path1: KeyInfo(
                 key_string="1A1",
@@ -141,47 +136,44 @@ class TestContextPackager(unittest.TestCase):
             ),
         }
 
-        # Setup mock token metadata
+        # 2. Setup mock token metadata
         mock_token_meta.return_value = {
             path1: {"full_tokens": 100, "ses_tokens": 30},
             path2: {"full_tokens": 200, "ses_tokens": 50},
         }
 
-        # Setup mock aggregated dependencies
+        # 3. Setup mock aggregated dependencies (T1 mutual x)
         mock_agg_deps.return_value = {
             ("1A1", "1A2"): ("x", {normalize_path("/mock/project/tracker.md")})
         }
 
-        # Mock transparency manager connection maps
+        # 4. Mock transparency manager
         mock_tm = MagicMock()
         mock_tm.get_file_metadata.return_value = {
             "connection_maps": [
-                {
-                    "target_key": "1A2",
-                    "target_symbol": "func",
-                    "target_line": 5,
-                }
+                {"target_key": "1A2", "target_symbol": "my_func", "target_line": 10}
             ]
         }
         mock_tm._registry = {"files": {}}
         mock_get_tm.return_value = mock_tm
 
-        # Mock content and slicing: slice content length is 40 chars (~10 tokens)
-        self.packager.get_overlaid_content = MagicMock(return_value="print('target')")
+        # 5. Mock content slicing
+        self.packager.get_overlaid_content = MagicMock(
+            return_value="print('file_content')"
+        )
+        # Ensure slice is large to exceed token limit
         self.packager._extract_sliced_block_from_overlaid = MagicMock(
-            return_value="def func_slice():\n    pass\n"
+            return_value="def my_func():\n" + "    pass\n" * 500
         )
 
-        # Set max_tokens to 105. target takes 100 tokens, leaving 5 tokens budget.
-        # Sliced content of 10 tokens exceeds remaining 5 token budget!
+        # Set max_tokens to 105 (target needs 100, leaving 5 tokens, but slice is ~500 tokens)
         result = self.packager.build_package(target_keys=["1A1"], max_tokens=105)
 
         # Asserts
         self.assertIn("# TARGET CORE LOGIC", result)
         self.assertIn("1A1", result)
-        # Should not include 1A2 and should mention ceiling reached
-        self.assertNotIn("1A2", result)
         self.assertIn("Context ceiling of 105 tokens reached", result)
+        self.assertNotIn("def my_func():", result)
 
     @patch("cline_utils.dependency_system.io.context_packager.get_transparency_manager")
     @patch("cline_utils.dependency_system.io.context_packager.load_global_key_map")

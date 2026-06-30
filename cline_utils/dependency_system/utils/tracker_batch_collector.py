@@ -537,14 +537,16 @@ class TrackerBatchCollector:
             self._import_external_relationships(config, pr, d_roots)
 
             def key_in_doc_root(key_str: str) -> bool:
+                # Optimization: replace any() generator expressions with explicitly unrolled for loops with early return to avoid generator overhead
                 paths = self.key_to_paths.get(key_str, set())
-                return any(
-                    any(
-                        is_subpath(normalize_path(p), d) or normalize_path(p) == d
-                        for d in d_roots
-                    )
-                    for p in paths
-                )
+                for p in paths:
+                    norm_p = normalize_path(p)
+                    if norm_p in d_roots:
+                        return True
+                    for d in d_roots:
+                        if d and norm_p.startswith(d + "/"):
+                            return True
+                return False
 
             total_changes = 0
             total_suggestions = 0

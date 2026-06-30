@@ -130,9 +130,40 @@ class BatchProcessor:
             else None
         )
 
-        if context_manager:
-            with context_manager as tracker:
-                self.tracker = tracker
+        executor_max_workers = min(self.max_workers, max(1, self.total_items))
+        with ThreadPoolExecutor(max_workers=executor_max_workers) as shared_executor:
+            if context_manager:
+                with context_manager as tracker:
+                    self.tracker = tracker
+                    for i in range(0, self.total_items, actual_batch_size):
+                        batch_indices = range(
+                            i, min(i + actual_batch_size, self.total_items)
+                        )
+                        batch_items = [items[idx] for idx in batch_indices]
+
+                        if not batch_items:
+                            continue
+
+                        # Pass kwargs to the batch processing function
+                        batch_results_map = self._process_batch(
+                            batch_items, processor_func, shared_executor, **kwargs
+                        )
+
+                        # Place results back into the main list using original indices
+                        for original_idx, result_value in batch_results_map.items():
+                            global_index = i + original_idx
+                            if 0 <= global_index < self.total_items:
+                                results[global_index] = result_value
+                            else:
+                                logger.error(
+                                    f"Calculated invalid global index {global_index} from batch index {original_idx} (batch start {i})"
+                                )
+
+                        items_processed_in_batches += len(batch_items)
+                        self.processed_items = items_processed_in_batches
+                        tracker.update(len(batch_items))
+            else:
+                # No progress bar logic
                 for i in range(0, self.total_items, actual_batch_size):
                     batch_indices = range(
                         i, min(i + actual_batch_size, self.total_items)
@@ -142,12 +173,10 @@ class BatchProcessor:
                     if not batch_items:
                         continue
 
-                    # Pass kwargs to the batch processing function
                     batch_results_map = self._process_batch(
-                        batch_items, processor_func, **kwargs
+                        batch_items, processor_func, shared_executor, **kwargs
                     )
 
-                    # Place results back into the main list using original indices
                     for original_idx, result_value in batch_results_map.items():
                         global_index = i + original_idx
                         if 0 <= global_index < self.total_items:
@@ -159,31 +188,6 @@ class BatchProcessor:
 
                     items_processed_in_batches += len(batch_items)
                     self.processed_items = items_processed_in_batches
-                    tracker.update(len(batch_items))
-        else:
-            # No progress bar logic
-            for i in range(0, self.total_items, actual_batch_size):
-                batch_indices = range(i, min(i + actual_batch_size, self.total_items))
-                batch_items = [items[idx] for idx in batch_indices]
-
-                if not batch_items:
-                    continue
-
-                batch_results_map = self._process_batch(
-                    batch_items, processor_func, **kwargs
-                )
-
-                for original_idx, result_value in batch_results_map.items():
-                    global_index = i + original_idx
-                    if 0 <= global_index < self.total_items:
-                        results[global_index] = result_value
-                    else:
-                        logger.error(
-                            f"Calculated invalid global index {global_index} from batch index {original_idx} (batch start {i})"
-                        )
-
-                items_processed_in_batches += len(batch_items)
-                self.processed_items = items_processed_in_batches
 
         final_time = time.time() - self.start_time
         logger.debug(f"Processed {self.total_items} items in {final_time:.2f} seconds")
@@ -195,7 +199,7 @@ class BatchProcessor:
                 f"Result list length ({len(results)}) does not match total items ({self.total_items}). This is an internal error."
             )
 
-        if any(res is None for res in results):
+        if len(final_results) < len(results):
             logger.warning(
                 f"Some items failed processing ({len(results) - len(final_results)} errors). Results list contains None placeholders for failed items at corresponding indices to preserve 1-to-1 index correlation."
             )
@@ -275,7 +279,11 @@ class BatchProcessor:
 
     # <<< MODIFIED: Accept **kwargs and return Dict >>>
     def _process_batch(
-        self, batch: List[T], processor_func: Callable[..., R], **kwargs: Any
+        self,
+        batch: List[T],
+        processor_func: Callable[..., R],
+        executor: ThreadPoolExecutor,
+        **kwargs: Any,
     ) -> Dict[int, R]:
         """
         Process a single batch of items in parallel. Returns a dictionary mapping
@@ -284,6 +292,7 @@ class BatchProcessor:
         Args:
             batch: Batch of items to process
             processor_func: Function to process each item (can accept kwargs)
+            executor: Shared ThreadPoolExecutor instance
             **kwargs: Additional keyword arguments to pass to processor_func
         Returns:
             Dictionary mapping batch index (0-based) to the result for that item.
@@ -297,31 +306,27 @@ class BatchProcessor:
         # The executor will call partial_func(item)
         partial_func = functools.partial(processor_func, **kwargs)
 
-        # Keep executor saturated; use full pool size (bounded by batch length)
-        with ThreadPoolExecutor(
-            max_workers=min(self.max_workers, max(1, len(batch)))
-        ) as executor:
-            # Map future to the index within the current batch
-            future_to_idx = {
-                executor.submit(partial_func, item): i for i, item in enumerate(batch)
-            }
+        # Map future to the index within the current batch
+        future_to_idx = {
+            executor.submit(partial_func, item): i for i, item in enumerate(batch)
+        }
 
-            for future in as_completed(future_to_idx):
-                idx_in_batch = future_to_idx[future]
-                item_info = batch[idx_in_batch]  # For logging errors
-                try:
-                    result = future.result()
-                    batch_results_map[idx_in_batch] = result
-                except Exception as e:
-                    # Log the specific item that failed if possible
-                    item_repr = repr(item_info)
-                    if len(item_repr) > 100:
-                        item_repr = item_repr[:100] + "..."
-                    logger.error(
-                        f"Error processing item (batch index {idx_in_batch}): {item_repr} -> {e}",
-                        exc_info=True,
-                    )  # Log with traceback
-                    # Do not add to batch_results_map, indicating failure
+        for future in as_completed(future_to_idx):
+            idx_in_batch = future_to_idx[future]
+            item_info = batch[idx_in_batch]  # For logging errors
+            try:
+                result = future.result()
+                batch_results_map[idx_in_batch] = result
+            except Exception as e:
+                # Log the specific item that failed if possible
+                item_repr = repr(item_info)
+                if len(item_repr) > 100:
+                    item_repr = item_repr[:100] + "..."
+                logger.error(
+                    f"Error processing item (batch index {idx_in_batch}): {item_repr} -> {e}",
+                    exc_info=True,
+                )  # Log with traceback
+                # Do not add to batch_results_map, indicating failure
 
         return batch_results_map
 

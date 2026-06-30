@@ -306,7 +306,7 @@ def _download_with_retry(
                     f"Starting download for {description} (attempt {attempt + 1}/{max_retries})"
                 )
 
-            with urlopen(req) as response:
+            with urlopen(req, timeout=30) as response:
                 status: int = int(getattr(response, "status", 200))
                 headers = response.info()
                 content_len = int(headers.get("Content-Length", 0))
@@ -2160,7 +2160,8 @@ def preprocess_doc_structure(
             last_header_index + 2,
             last_header_index + 3,
         ):
-            if not any(line.startswith(c) for c in ["http", "file://"]):
+            # Optimization: Tuple-based startswith check bypassing generator overhead
+            if not line.startswith(("http", "file://")):
                 snippet = line
                 if len(snippet) > 500:
                     snippet = snippet[:500] + "..."
@@ -2179,9 +2180,8 @@ def preprocess_doc_structure(
 
         # If no headers, keep a few lead paragraphs.
         if last_header_index == -1 and len(essence_parts) < 12:
-            if not any(
-                line.startswith(c) for c in ["> ", "http", "file://", "```", "|"]
-            ):
+            # Optimization: Tuple-based startswith check bypassing generator overhead
+            if not line.startswith(("> ", "http", "file://", "```", "|")):
                 para = line[:500]
                 if para not in seen_lines:
                     seen_lines.add(para)
@@ -3501,7 +3501,9 @@ def _is_valid_file(file_path: str) -> bool:
             normalize_path(os.path.join(project_root, d))
             for d in config.get_excluded_dirs()
         ]
-        if any(norm_path.startswith(d + os.sep) for d in excluded_dirs):
+        # Optimization: Tuple-based startswith check bypassing generator overhead
+        excluded_dirs_prefixes = tuple(d + "/" for d in excluded_dirs)
+        if norm_path.startswith(excluded_dirs_prefixes):
             return False
 
         # Extensions

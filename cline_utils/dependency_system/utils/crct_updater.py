@@ -275,10 +275,14 @@ def _set_mtime(path: Path, ts: float) -> None:
         pass  # non-fatal
 
 
+# Optimization: Precompute tuple for native startswith check to bypass generator overhead
+_MANAGED_PATHS_PREFIXES = tuple(m + "/" for m in MANAGED_PATHS)
+
+
 def _is_managed(path: str) -> bool:
     """Return True if the forward-slash path falls under a managed directory."""
     p = path.replace("\\", "/")
-    return any(p == m or p.startswith(m + "/") for m in MANAGED_PATHS)
+    return p in MANAGED_PATHS or p.startswith(_MANAGED_PATHS_PREFIXES)
 
 
 def _is_excluded(path: str) -> bool:

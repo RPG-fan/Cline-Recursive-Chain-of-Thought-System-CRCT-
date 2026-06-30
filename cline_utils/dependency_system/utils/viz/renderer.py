@@ -27,12 +27,14 @@ def _find_mmdc_executable() -> str:
     """Dynamically finds the path to the 'mmdc' executable."""
     executable_name = "mmdc"
     try:
+        # SECURITY: Added timeout=30 to prevent DoS via indefinitely hanging external process
         process = subprocess.run(
             ["npm", "config", "get", "prefix"],
             capture_output=True,
             text=True,
             check=True,
             shell=(platform.system() == "Windows"),
+            timeout=30,
         )
         npm_prefix = process.stdout.strip()
         if platform.system() == "Windows":
@@ -43,7 +45,11 @@ def _find_mmdc_executable() -> str:
         if os.path.isfile(potential_path):
             logger.debug(f"Found 'mmdc' executable at: {potential_path}")
             return potential_path
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    except (
+        FileNotFoundError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ):
         logger.debug(
             "Could not query 'npm' for its prefix. Assuming 'mmdc' is in PATH."
         )
@@ -86,7 +92,7 @@ def drain_local_render_process_roots() -> List[int]:
 
 def _popen_render_subprocess(
     command: List[str], mermaid_syntax: str
-) -> subprocess.Popen[Any]:
+) -> subprocess.Popen[bytes]:
     """Start mmdc in an isolated process group for targeted teardown."""
     popen_kwargs: Dict[str, Any] = {
         "stdin": subprocess.PIPE,

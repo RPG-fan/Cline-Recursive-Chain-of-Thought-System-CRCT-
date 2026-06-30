@@ -130,20 +130,20 @@ import re
 # If a tag ends with a word character, append \b.
 _INCOMPLETE_REGEXES = {
     tag: re.compile(
-        (r"\b" if tag[0].isalnum() or tag[0] == "_" else "") +
-        re.escape(tag) +
-        (r"\b" if tag[-1].isalnum() or tag[-1] == "_" else ""),
-        re.IGNORECASE
+        (r"\b" if tag[0].isalnum() or tag[0] == "_" else "")
+        + re.escape(tag)
+        + (r"\b" if tag[-1].isalnum() or tag[-1] == "_" else ""),
+        re.IGNORECASE,
     )
     for tag in _INCOMPLETE_SUBTYPES
 }
 
 _AUDIT_REGEXES = {
     tag: re.compile(
-        (r"\b" if tag[0].isalnum() or tag[0] == "_" else "") +
-        re.escape(tag) +
-        (r"\b" if tag[-1].isalnum() or tag[-1] == "_" else ""),
-        re.IGNORECASE
+        (r"\b" if tag[0].isalnum() or tag[0] == "_" else "")
+        + re.escape(tag)
+        + (r"\b" if tag[-1].isalnum() or tag[-1] == "_" else ""),
+        re.IGNORECASE,
     )
     for tag in _AUDIT_SUBTYPES
 }
@@ -283,10 +283,10 @@ def _is_silenced_body(body: str, silenced_prefixes: Tuple[str, ...]) -> bool:
     Prefix-matching on the body (post-marker) makes silencing
     language-agnostic -- the same tuple works for all comment styles.
     """
-    for prefix in silenced_prefixes:
-        if body.startswith(prefix):
-            return True
-    return False
+    # Optimization: Tuple-based startswith check bypassing generator/loop overhead
+    if not isinstance(silenced_prefixes, tuple):
+        silenced_prefixes = tuple(silenced_prefixes)
+    return body.startswith(silenced_prefixes)
 
 
 def _detect_subtype(body: str) -> Tuple[Optional[str], Optional[str]]:
@@ -422,11 +422,11 @@ def scan_file_comments(
                         raw_body = raw_line[:idx_end]
                         in_block_comment = False
                         # Check for a trailing single-line comment after */
-                        remainder = raw_line[idx_end + 2:]
+                        remainder = raw_line[idx_end + 2 :]
                         for marker in comment_chars:
                             m_idx = remainder.find(marker)
                             if m_idx != -1:
-                                trailer = remainder[m_idx + len(marker):].lstrip()
+                                trailer = remainder[m_idx + len(marker) :].lstrip()
                                 if trailer:
                                     bodies.append(trailer)
                                 break
@@ -451,7 +451,9 @@ def scan_file_comments(
                                 matched_marker = marker
 
                     # Find block start if supported for this extension
-                    block_start_idx = raw_line.find("/*") if ext in _BLOCK_COMMENT_EXTS else -1
+                    block_start_idx = (
+                        raw_line.find("/*") if ext in _BLOCK_COMMENT_EXTS else -1
+                    )
 
                     if block_start_idx != -1 and (
                         first_marker_idx == -1 or block_start_idx < first_marker_idx
@@ -466,17 +468,17 @@ def scan_file_comments(
                             # Also scan the text after */ for a trailing single-line
                             # comment so lines like ``/* TODO */ // FIXME`` produce
                             # two entries instead of silently dropping the second tag.
-                            remainder = raw_line[block_end_idx + 2:]
+                            remainder = raw_line[block_end_idx + 2 :]
                             for marker in comment_chars:
                                 m_idx = remainder.find(marker)
                                 if m_idx != -1:
-                                    trailer = remainder[m_idx + len(marker):].lstrip()
+                                    trailer = remainder[m_idx + len(marker) :].lstrip()
                                     if trailer:
                                         bodies.append(trailer)
                                     break
                         else:
                             # Multi-line block: capture until closing */ on a later line
-                            raw_body = raw_line[block_start_idx + 2:]
+                            raw_body = raw_line[block_start_idx + 2 :]
                             in_block_comment = True
 
                         cleaned = raw_body.strip()
@@ -484,10 +486,10 @@ def scan_file_comments(
                             cleaned = cleaned[1:].lstrip()
                         if cleaned:
                             bodies.insert(0, cleaned)
-                    elif first_marker_idx != -1 and matched_marker is not None:
+                    elif first_marker_idx != -1:
                         # Single-line comment
                         bodies.append(
-                            raw_line[first_marker_idx + len(matched_marker):].lstrip()
+                            raw_line[first_marker_idx + len(matched_marker) :].lstrip()
                         )
 
                 if not bodies:

@@ -2800,17 +2800,21 @@ def handle_reconcile_transparency(args: argparse.Namespace) -> int:
                 with open(file_path, "r", encoding="utf-8") as f:
                     lines = f.readlines()
 
-                # Find markers and calculate shifts
+                # Find markers and calculate shifts - Optimized O(N) single-pass parser
                 sections: Dict[str, Tuple[int, int]] = {}
+                active_starts: Dict[str, int] = {}
                 for i, line in enumerate(lines):
                     stripped = line.strip()
                     if stripped.startswith("---") and stripped.endswith("_START---"):
                         section_name = stripped[3:-9]
-                        # Find end
-                        for j in range(i + 1, len(lines)):
-                            if lines[j].strip() == f"---{section_name}_END---":
-                                sections[section_name] = (i, j)
-                                break
+                        active_starts[section_name] = i
+                    elif stripped.startswith("---") and stripped.endswith("_END---"):
+                        section_name = stripped[3:-7]
+                        if section_name in active_starts:
+                            sections[section_name] = (
+                                active_starts.pop(section_name),
+                                i,
+                            )
 
                 # Dispatch based on transform
                 if args.transform == "restore":
