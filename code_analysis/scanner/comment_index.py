@@ -340,7 +340,9 @@ def _collect_project_files(
 
         for fname in filenames:
             ext = os.path.splitext(fname)[1].lower()
-            if ext not in excluded_exts_set:
+            if ext not in excluded_exts_set and not any(
+                fname.endswith(e) for e in excluded_exts if e.startswith(".")
+            ):
                 files.append(os.path.join(dirpath, fname))
 
     return files

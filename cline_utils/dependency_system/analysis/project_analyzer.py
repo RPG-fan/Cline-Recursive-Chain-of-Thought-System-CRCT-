@@ -33,7 +33,7 @@ from cline_utils.dependency_system.utils.cache_manager import (
     normalize_path_cached as normalize_path,
 )
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
-from cline_utils.dependency_system.utils.path_utils import is_subpath
+from cline_utils.dependency_system.utils.path_utils import is_subpath, is_path_excluded
 from cline_utils.dependency_system.utils.phase_tracker import PhaseTracker
 from cline_utils.dependency_system.utils.resource_validator import (
     get_cached_resource_metrics,
@@ -290,17 +290,11 @@ def analyze_project(
                 d
                 for d in dirs
                 if d not in excluded_dirs_rel
-                and normalize_path(os.path.join(norm_root, d))
-                not in all_excluded_paths_abs_set
+                and not is_path_excluded(
+                    os.path.join(norm_root, d), list(all_excluded_paths_abs_set)
+                )
             ]
-            is_root_excluded_by_path = False
-            if norm_root in all_excluded_paths_abs_set or any(
-                is_subpath(norm_root, excluded)
-                for excluded in all_excluded_paths_abs_set
-                if os.path.isdir(excluded)
-            ):  # Check against dirs in exclusion set
-                is_root_excluded_by_path = True
-            if is_root_excluded_by_path:
+            if is_path_excluded(norm_root, list(all_excluded_paths_abs_set)):
                 dirs[:] = []
                 continue
             for file_name in files:
@@ -310,8 +304,13 @@ def analyze_project(
                 file_ext = file_ext_tuple.lower()
 
                 is_excluded = (
-                    file_path_abs in all_excluded_paths_abs_set
+                    is_path_excluded(file_path_abs, list(all_excluded_paths_abs_set))
                     or file_ext in excluded_extensions
+                    or any(
+                        file_basename.endswith(e)
+                        for e in excluded_extensions
+                        if e.startswith(".")
+                    )
                     or (
                         (
                             excluded_file_patterns_regex is not None
@@ -327,13 +326,6 @@ def analyze_project(
                         )
                     )
                 )
-                if not is_excluded:
-                    for excluded_path_iter in all_excluded_paths_abs_set:
-                        if os.path.isdir(excluded_path_iter) and is_subpath(
-                            file_path_abs, excluded_path_iter
-                        ):
-                            is_excluded = True
-                            break
 
                 if is_excluded:
                     # logger.debug(f"Skipping excluded file: {file_path_abs}")

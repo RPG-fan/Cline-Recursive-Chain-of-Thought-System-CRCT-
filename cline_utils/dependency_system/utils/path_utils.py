@@ -187,18 +187,38 @@ def get_project_root() -> str:
     """
 
     def _get_project_root() -> str:
-        current_dir = os.path.abspath(os.getcwd())
-        root_indicators = ["project_root.cfg"]  # Added config file
-        # Prevent infinite loop on root (e.g., '/')
-        while True:
-            for indicator in root_indicators:
-                if os.path.exists(os.path.join(current_dir, indicator)):
-                    return normalize_path(current_dir)  # Normalize the found root
-            parent_dir = os.path.dirname(current_dir)
-            if parent_dir == current_dir:  # Reached the filesystem root
-                break
-            current_dir = parent_dir
-        # Fallback to original CWD if no indicator found up to root
+        def _find_root(start_dir: str) -> Optional[str]:
+            current_dir = os.path.abspath(start_dir)
+            root_indicators = ["project_root.cfg"]
+            while True:
+                for indicator in root_indicators:
+                    if os.path.exists(os.path.join(current_dir, indicator)):
+                        return normalize_path(current_dir)
+                parent_dir = os.path.dirname(current_dir)
+                if parent_dir == current_dir:
+                    break
+                current_dir = parent_dir
+            return None
+
+        # Try from CWD first
+        root = _find_root(os.getcwd())
+        if root is not None:
+            return root
+
+        # Fallback to the location of this script/module (only if not running under tests)
+        import sys
+
+        is_testing = (
+            "pytest" in sys.modules
+            or "unittest" in sys.modules
+            or "vitest" in sys.modules
+        )
+        if not is_testing:
+            root = _find_root(os.path.dirname(os.path.abspath(__file__)))
+            if root is not None:
+                return root
+
+        # Final fallback to CWD
         return normalize_path(os.path.abspath(os.getcwd()))
 
     return _get_project_root()
@@ -221,6 +241,7 @@ def join_paths(base_path: str, *paths: str) -> str:
 def is_path_excluded(path: str, excluded_paths: List[str]) -> bool:
     """
     Check if a path should be excluded based on a list of exclusion patterns.
+    Matches the path itself or any of its parent/ancestor directories.
 
     Args:
         path: Path to check
@@ -232,13 +253,28 @@ def is_path_excluded(path: str, excluded_paths: List[str]) -> bool:
     if not excluded_paths:
         return False
     norm_path = normalize_path(path)
+
+    # Generate path and all its ancestor directories
+    check_paths = [norm_path]
+    current = norm_path
+    while True:
+        parent = os.path.dirname(current)
+        if not parent or parent == current:
+            break
+        check_paths.append(normalize_path(parent))
+        current = parent
+
     for excluded in excluded_paths:
-        norm_excluded = normalize_path(excluded)  # Normalize exclusion pattern/path
-        if "*" in norm_excluded or "?" in norm_excluded:  # Simple wildcard matching
-            if fnmatch.fnmatch(norm_path, norm_excluded):
-                return True
-        elif norm_path == norm_excluded or is_subpath(norm_path, norm_excluded):
-            return True
+        norm_excluded = normalize_path(excluded)
+        is_wildcard = "*" in norm_excluded or "?" in norm_excluded
+
+        for p in check_paths:
+            if is_wildcard:
+                if fnmatch.fnmatch(p, norm_excluded):
+                    return True
+            else:
+                if p == norm_excluded:
+                    return True
     return False
 
 

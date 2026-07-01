@@ -20,6 +20,7 @@ from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.path_utils import (
     get_project_root,
     normalize_path,
+    is_path_excluded,
 )
 
 logger = logging.getLogger(__name__)
@@ -343,14 +344,11 @@ def generate_keys(
         """Recursively processes directories and files, generating contextual keys."""
         nonlocal path_to_key_info, newly_generated_keys, top_level_dir_count
 
-        # Optimization: Precompute tuple for native startswith check to bypass generator overhead
-        exclusion_prefixes = tuple(exclusion_set)
-
         try:
             norm_dir_path = normalize_path(dir_path)
 
             # 1. Skip excluded directories
-            if norm_dir_path.startswith(exclusion_prefixes):
+            if is_path_excluded(norm_dir_path, list(exclusion_set)):
                 # logger.debug(
                 #     f"Exclusion Check 1: Skipping excluded dir path: '{norm_dir_path}'"
                 # )
@@ -439,8 +437,8 @@ def generate_keys(
                     is_file = os.path.isfile(item_path)
 
                     # Apply standard exclusions (name, type, extension, etc.)
-                    if norm_item_path.startswith(
-                        exclusion_prefixes
+                    if is_path_excluded(
+                        norm_item_path, list(exclusion_set)
                     ):  # Check again for items potentially matching deeper patterns
                         # logger.debug(
                         #     f"Exclusion Check 1b: Skipping excluded item path: '{norm_item_path}'"
@@ -467,7 +465,11 @@ def generate_keys(
                     # Check extension exclusion only for files
                     if is_file:
                         _, ext = os.path.splitext(item_name)
-                        if ext in excluded_extensions:
+                        if ext in excluded_extensions or any(
+                            item_name.endswith(e)
+                            for e in excluded_extensions
+                            if e.startswith(".")
+                        ):
                             # logger.debug(
                             #     f"Exclusion Check 5: Skipping file '{item_name}' with extension '{ext}' in '{norm_dir_path}'"
                             # )
