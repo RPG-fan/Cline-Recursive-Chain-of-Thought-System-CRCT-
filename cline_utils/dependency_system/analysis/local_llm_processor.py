@@ -46,17 +46,119 @@ class LocalLLMProcessor:
         # Setup repair logging
         self._setup_repair_logging()
 
+    def _get_fresh_resources(self) -> Tuple[float, Optional[float]]:
+        """
+        Retrieves fresh available RAM (in MB) and VRAM (in MB, if GPU is available).
+        """
+        # Fresh RAM
+        try:
+            import psutil
+
+            available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
+        except Exception as e:
+            logger.warning(
+                f"Could not check system memory availability via psutil: {e}"
+            )
+            available_ram_mb = 1024.0  # Safe fallback estimate
+
+        # Fresh VRAM
+        available_vram_mb = None
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+                free_bytes, _ = torch.cuda.mem_get_info(0)
+                available_vram_mb = free_bytes / (1024 * 1024)
+            except Exception as e:
+                logger.debug(f"Failed to query fresh VRAM: {e}")
+
+        return available_ram_mb, available_vram_mb
+
     def save_pinned_state(self) -> None:
         """Saves the current KV cache state (e.g., after processing a system prompt)."""
-        if self._model and hasattr(self._model, "save_state"):
+        if not self._model or not hasattr(self._model, "save_state"):
+            return
+
+        # Fetch fresh resource snapshot
+        available_ram_mb, available_vram_mb = self._get_fresh_resources()
+
+        # Calculate exact or estimated state size
+        try:
+            import llama_cpp
+
+            state_size = llama_cpp.llama_get_state_size(self._model.ctx)
+        except Exception as e:
+            logger.debug(f"Could not retrieve exact llama state size: {e}")
+            # Fallback estimation: ~120KB per context token
+            state_size = self.current_n_ctx * 120 * 1024
+
+        state_size_mb = state_size / (1024 * 1024)
+        required_ram_mb = (
+            state_size_mb * 2
+        )  # Peak memory is ~2x due to ctypes-to-bytes copy
+        ram_safety_buffer = 500.0
+        vram_safety_buffer = 500.0
+
+        is_vram_active = (
+            self._current_n_gpu_layers > 0 and available_vram_mb is not None
+        )
+
+        if is_vram_active:
+            vram_falls_short = available_vram_mb < vram_safety_buffer
+            ram_falls_short = available_ram_mb < (required_ram_mb + ram_safety_buffer)
+
+            if vram_falls_short:
+                logger.info(
+                    f"VRAM falls short ({available_vram_mb:.1f}MB < {vram_safety_buffer}MB safety buffer). "
+                    f"Attempting to pin to system RAM."
+                )
+                if ram_falls_short:
+                    logger.warning(
+                        f"Both VRAM and system RAM fall short. Pinning bypassed. "
+                        f"VRAM: {available_vram_mb:.1f}MB, RAM: {available_ram_mb:.1f}MB (required: {required_ram_mb + ram_safety_buffer:.1f}MB)"
+                    )
+                    self._pinned_state = None
+                    return
+            else:
+                # VRAM is sufficient, but we still need sufficient system RAM to hold the bytes copy
+                if ram_falls_short:
+                    logger.warning(
+                        f"VRAM is sufficient ({available_vram_mb:.1f}MB), but system RAM falls short ({available_ram_mb:.1f}MB). Pinning bypassed."
+                    )
+                    self._pinned_state = None
+                    return
+        else:
+            # Model runs on CPU (RAM-only)
+            ram_falls_short = available_ram_mb < (required_ram_mb + ram_safety_buffer)
+            if ram_falls_short:
+                logger.warning(
+                    f"System RAM falls short for CPU model pinning: {available_ram_mb:.1f}MB available, "
+                    f"required: {required_ram_mb + ram_safety_buffer:.1f}MB. Pinning bypassed."
+                )
+                self._pinned_state = None
+                return
+
+        # Attempt to save state with exception handling
+        try:
             self._pinned_state = self._model.save_state()
             logger.info("KV cache state pinned successfully.")
+        except (MemoryError, Exception) as e:
+            logger.warning(
+                f"Failed to pin KV cache state (size: {state_size_mb:.1f}MB) "
+                f"due to memory or runtime error: {e}. Clearing state."
+            )
+            self._pinned_state = None
 
     def restore_pinned_state(self) -> None:
         """Restores the previously pinned KV cache state."""
         if self._model and self._pinned_state and hasattr(self._model, "load_state"):
-            self._model.load_state(self._pinned_state)
-            logger.info("Pinned KV cache state restored.")
+            try:
+                self._model.load_state(self._pinned_state)
+                logger.info("Pinned KV cache state restored.")
+            except (MemoryError, Exception) as e:
+                logger.warning(
+                    f"Failed to restore pinned KV cache state: {e}. Clearing state."
+                )
+                self._pinned_state = None
 
     def clear_pinned_state(self) -> None:
         """Releases the pinned KV cache state, freeing memory."""

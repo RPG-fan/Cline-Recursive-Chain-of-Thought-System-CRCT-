@@ -125,3 +125,89 @@ def test_local_llm_uses_tokenizer_factory_optimization(
     # With the optimization, Llama is never loaded for token counting.
     # It is only loaded once for the actual inference run.
     assert len(_FakeLlama.created) == 1
+
+
+def test_get_fresh_resources() -> None:
+    processor = llm_mod.LocalLLMProcessor(model_path="models/fake.gguf")
+    ram, vram = processor._get_fresh_resources()
+    assert isinstance(ram, float)
+    assert ram > 0
+    assert vram is None or isinstance(vram, float)
+    processor.close()
+
+
+def test_save_pinned_state_resource_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    processor = llm_mod.LocalLLMProcessor(model_path="models/fake.gguf")
+
+    # Mock model with save_state
+    mock_model = MagicMock()
+    mock_model.save_state.return_value = b"some_state"
+    mock_model.ctx = MagicMock()
+    processor._model = mock_model
+
+    # Mock llama_cpp.llama_get_state_size to return 10MB
+    import llama_cpp
+    monkeypatch.setattr(llama_cpp, "llama_get_state_size", lambda ctx: 10 * 1024 * 1024)
+
+    # Scenario 1: Model uses GPU, VRAM is sufficient, RAM is sufficient
+    processor._current_n_gpu_layers = 16
+    monkeypatch.setattr(processor, "_get_fresh_resources", lambda: (4000.0, 1000.0))
+    processor.save_pinned_state()
+    assert processor._pinned_state == b"some_state"
+    mock_model.save_state.assert_called_once()
+
+    # Scenario 2: Model uses GPU, VRAM falls short, RAM is sufficient (fallback to RAM)
+    processor.clear_pinned_state()
+    mock_model.save_state.reset_mock()
+    monkeypatch.setattr(processor, "_get_fresh_resources", lambda: (4000.0, 200.0))  # VRAM falls short
+    processor.save_pinned_state()
+    assert processor._pinned_state == b"some_state"  # Pinning still succeeds to RAM
+    mock_model.save_state.assert_called_once()
+
+    # Scenario 3: Model uses GPU, VRAM falls short AND RAM falls short (bypass pinning)
+    processor.clear_pinned_state()
+    mock_model.save_state.reset_mock()
+    monkeypatch.setattr(processor, "_get_fresh_resources", lambda: (400.0, 200.0))  # both fall short
+    processor.save_pinned_state()
+    assert processor._pinned_state is None
+    mock_model.save_state.assert_not_called()
+
+    # Scenario 4: Model uses CPU, RAM is sufficient
+    processor._current_n_gpu_layers = 0
+    processor.clear_pinned_state()
+    mock_model.save_state.reset_mock()
+    monkeypatch.setattr(processor, "_get_fresh_resources", lambda: (4000.0, None))
+    processor.save_pinned_state()
+    assert processor._pinned_state == b"some_state"
+    mock_model.save_state.assert_called_once()
+
+    # Scenario 5: Model uses CPU, RAM falls short
+    processor.clear_pinned_state()
+    mock_model.save_state.reset_mock()
+    monkeypatch.setattr(processor, "_get_fresh_resources", lambda: (400.0, None))  # RAM falls short
+    processor.save_pinned_state()
+    assert processor._pinned_state is None
+    mock_model.save_state.assert_not_called()
+
+
+def test_save_pinned_state_exception_safety(monkeypatch: pytest.MonkeyPatch) -> None:
+    processor = llm_mod.LocalLLMProcessor(model_path="models/fake.gguf")
+    mock_model = MagicMock()
+    mock_model.save_state.side_effect = MemoryError("Out of memory during bytes conversion")
+    mock_model.ctx = MagicMock()
+    processor._model = mock_model
+
+    # Ensure sufficient resources so save_state is actually called
+    monkeypatch.setattr(processor, "_get_fresh_resources", lambda: (16000.0, 8000.0))
+    import llama_cpp
+    monkeypatch.setattr(llama_cpp, "llama_get_state_size", lambda ctx: 10 * 1024 * 1024)
+
+    # Should catch MemoryError and clear state
+    processor.save_pinned_state()
+    assert processor._pinned_state is None
+
+    # Test restore exception safety
+    processor._pinned_state = b"some_pinned_state"
+    mock_model.load_state.side_effect = Exception("Runtime error in load_state")
+    processor.restore_pinned_state()
+    assert processor._pinned_state is None  # Should clear state on failure
