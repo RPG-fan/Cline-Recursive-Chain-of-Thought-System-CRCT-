@@ -389,22 +389,32 @@ def get_unused_items(project_root: Optional[str] = None) -> List[Dict[str, Any]]
     if os.path.exists(target_path):
         try:
             with open(target_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if "generalDiagnostics" in data:
-                    for diag in data["generalDiagnostics"]:
-                        if "is not accessed" in diag.get("message", ""):
-                            unused.append(
-                                {
-                                    "type": "Unused Item",
-                                    "subtype": "Pyright Diagnostic",
-                                    "file": diag.get("file", "unknown"),
-                                    "line": diag.get("range", {})
-                                    .get("start", {})
-                                    .get("line", 0)
-                                    + 1,
-                                    "content": diag.get("message", ""),
-                                }
-                            )
+                raw = f.read()
+            # Defensive: pyright may emit non-JSON warnings to the output file
+            # (e.g. when stderr/stdout were merged, or due to config issues).
+            first_brace = raw.find("{")
+            if first_brace > 0:
+                print(
+                    "Warning: pyright output had a non-JSON preamble; "
+                    "skipping it before parsing."
+                )
+                raw = raw[first_brace:]
+            data = json.loads(raw)
+            if "generalDiagnostics" in data:
+                for diag in data["generalDiagnostics"]:
+                    if "is not accessed" in diag.get("message", ""):
+                        unused.append(
+                            {
+                                "type": "Unused Item",
+                                "subtype": "Pyright Diagnostic",
+                                "file": diag.get("file", "unknown"),
+                                "line": diag.get("range", {})
+                                .get("start", {})
+                                .get("line", 0)
+                                + 1,
+                                "content": diag.get("message", ""),
+                            }
+                        )
         except Exception as e:
             print(f"Error parsing pyright output: {e}")
     else:

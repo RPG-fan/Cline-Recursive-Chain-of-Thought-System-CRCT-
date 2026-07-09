@@ -63,6 +63,20 @@ def main():
     code_roots = config.get_code_root_directories()
     excluded_paths = config.get_excluded_paths()
 
+    # Also exclude the canonical excluded directory *names* (e.g. venv, node_modules,
+    # __pycache__, tests, cline_utils, cline_docs). get_excluded_paths() only returns the
+    # narrow explicit excluded_paths list and does NOT include excluded_dirs, so without
+    # this expansion the static walk descends into venv/, node_modules/, etc. and performs
+    # wasted scans (mirrors dependency_analyzer.analyze_file() exclusion logic).
+    excluded_dirs = config.get_excluded_dirs()
+    expanded_excluded = list(excluded_paths)
+    for d in excluded_dirs:
+        # Skip already-absolute project-relative dirs handled by excluded_paths; add all names.
+        expanded_excluded.append(
+            path_utils.normalize_path(os.path.join(project_root, d))
+        )
+    excluded_paths = expanded_excluded
+
     # ---- pyright ----
     try:
         print("Running pyright for unused item analysis...")
@@ -74,16 +88,23 @@ def main():
 
         # Redirect output to PYRIGHT_OUTPUT in the current working directory or project root
         pyright_output_path = os.path.join(safe_project_root, PYRIGHT_OUTPUT)
+        # SECURITY: Capture stdout (JSON) separately from stderr. Pyright writes
+        # non-JSON warnings (e.g. "Config contains unrecognized setting") to stderr;
+        # merging them into the output file corrupts the JSON and breaks parsing.
         with open(pyright_output_path, "w") as f:
             # SECURITY: Added timeout=300 to prevent DoS via indefinitely hanging external process
             result = subprocess.run(
                 ["pyright", "--outputjson"],
                 stdout=f,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,
                 cwd=safe_project_root,
                 shell=(os.name == "nt"),
                 timeout=300,  # Prevent indefinite hang (Security)
             )
+        if result.stderr:
+            stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
+            if stderr_text:
+                print(f"Pyright stderr:\n{stderr_text}")
         if result.returncode == 0:
             print("Pyright analysis completed successfully.")
         else:
