@@ -146,7 +146,7 @@ def test_save_pinned_state_resource_validation(monkeypatch: pytest.MonkeyPatch) 
     processor._model = mock_model
 
     # Mock llama_cpp.llama_get_state_size to return 10MB
-    import llama_cpp
+    llama_cpp = pytest.importorskip("llama_cpp")
     monkeypatch.setattr(llama_cpp, "llama_get_state_size", lambda ctx: 10 * 1024 * 1024)
 
     # Scenario 1: Model uses GPU, VRAM is sufficient, RAM is sufficient
@@ -199,7 +199,7 @@ def test_save_pinned_state_exception_safety(monkeypatch: pytest.MonkeyPatch) -> 
 
     # Ensure sufficient resources so save_state is actually called
     monkeypatch.setattr(processor, "_get_fresh_resources", lambda: (16000.0, 8000.0))
-    import llama_cpp
+    llama_cpp = pytest.importorskip("llama_cpp")
     monkeypatch.setattr(llama_cpp, "llama_get_state_size", lambda ctx: 10 * 1024 * 1024)
 
     # Should catch MemoryError and clear state
