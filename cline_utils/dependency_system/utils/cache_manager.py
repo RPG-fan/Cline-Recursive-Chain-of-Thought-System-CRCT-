@@ -21,7 +21,13 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar, cast
-from .cache_support import alias_data, dealias_data
+from .cache_support import (
+    alias_data,
+    dealias_data,
+    NON_PERSISTENT_CACHES,
+    NON_PICKLABLE_KEYS,
+    strip_non_picklable_keys,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -784,6 +790,10 @@ class CacheManager:
 
         saved_count = 0
         for name, cache in self.caches.items():
+            # Skip caches that hold non-serializable objects (e.g. tree_sitter.Tree)
+            if name in NON_PERSISTENT_CACHES:
+                logger.debug(f"Skipping non-persistent cache '{name}' during save_all.")
+                continue
             cache.flush()  # Flush L1 to L2 first!
             if cache.modified:
                 self._save_cache(name)
@@ -866,6 +876,10 @@ class CacheManager:
                     for k, v in current_cache_data_items
                     if v[2] is None or v[2] > time.time()
                 }
+
+                # Strip non-picklable keys (e.g. _ts_tree) from dict-valued
+                # entries before serialization so the cache can be persisted.
+                raw_data = {k: strip_non_picklable_keys(v) for k, v in raw_data.items()}
 
                 # Alias data before saving
                 aliased_raw_data = alias_data(raw_data, cache_name)

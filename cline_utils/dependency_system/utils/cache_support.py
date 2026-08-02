@@ -1,8 +1,31 @@
-from typing import Any, cast, Dict, List
+from typing import Any, cast, Dict, List, Set
 
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Caches that hold non-serializable objects (e.g. tree_sitter.Tree) and should
+# never be persisted to disk.  These are ephemeral, in-memory-only caches.
+NON_PERSISTENT_CACHES: Set[str] = {"ts_ast_cache"}
+
+# Keys that may appear inside cached dict values but cannot be pickled.
+# They are stripped from dict-valued cache entries before serialization.
+NON_PICKLABLE_KEYS: Set[str] = {"_ts_tree"}
+
+
+def strip_non_picklable_keys(value: Any) -> Any:
+    """Return a copy of *value* with non-picklable keys removed.
+
+    If *value* is a dict, any key in ``NON_PICKLABLE_KEYS`` is dropped from
+    the returned copy.  Non-dict values are returned unchanged.  This is
+    used before serialization so that caches such as ``file_analysis`` can
+    be persisted even though they temporarily hold ``tree_sitter.Tree``
+    objects under the ``_ts_tree`` key.
+    """
+    if isinstance(value, dict):
+        value_dict = cast(Dict[str, Any], value)
+        return {k: v for k, v in value_dict.items() if k not in NON_PICKLABLE_KEYS}
+    return value
 
 
 def alias_data(data: Dict[str, Any], cache_name: str) -> Dict[str, Any]:

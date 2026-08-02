@@ -92,6 +92,120 @@ def test_throttled_cleanup(clear_cache):
     assert cache_manager._last_cleanup_time > time_cleanup_was_executed
 
 
+def test_non_persistent_cache_skipped(clear_cache):
+    """Caches in NON_PERSISTENT_CACHES should never be saved to disk."""
+    import os
+    from cline_utils.dependency_system.utils.cache_support import (
+        NON_PERSISTENT_CACHES,
+    )
+    from cline_utils.dependency_system.utils.cache_manager import CACHE_DIR
+
+    # Create a non-persistent cache and add data
+    for cache_name in NON_PERSISTENT_CACHES:
+        cache = cache_manager.get_cache(cache_name, ttl=0)
+        cache.set("test_key", "test_value", ttl=0)
+
+    # Flush to ensure data is in L2
+    for cache_name in NON_PERSISTENT_CACHES:
+        cache_manager.get_cache(cache_name).flush()
+
+    # Call save_all - should skip non-persistent caches
+    cache_manager.save_all()
+
+    # Verify no .pkl or .pkl.gz file was created for non-persistent caches
+    for cache_name in NON_PERSISTENT_CACHES:
+        for ext in (".pkl", ".pkl.gz"):
+            p = os.path.join(CACHE_DIR, f"{cache_name}{ext}")
+            assert not os.path.exists(
+                p
+            ), f"Non-persistent cache '{cache_name}' was saved to disk!"
+
+
+def test_non_picklable_keys_stripped(clear_cache):
+    """_strip_non_picklable_keys should remove _ts_tree from dict values."""
+    from cline_utils.dependency_system.utils.cache_support import (
+        strip_non_picklable_keys,
+    )
+
+    # Test with a dict containing _ts_tree
+    test_data = {
+        "imports": ["os", "sys"],
+        "functions": [{"name": "foo", "line": 1}],
+        "_ts_tree": "fake_tree_object",
+        "classes": [{"name": "MyClass", "line": 10}],
+    }
+
+    stripped = strip_non_picklable_keys(test_data)
+
+    # _ts_tree should be removed
+    assert "_ts_tree" not in stripped
+    # Other keys should be preserved
+    assert "imports" in stripped
+    assert "functions" in stripped
+    assert "classes" in stripped
+    assert stripped["imports"] == ["os", "sys"]
+    assert stripped["functions"] == [{"name": "foo", "line": 1}]
+
+    # Test with a non-dict value (should be returned unchanged)
+    assert strip_non_picklable_keys("string_value") == "string_value"
+    assert strip_non_picklable_keys(42) == 42
+    assert strip_non_picklable_keys(["a", "b"]) == ["a", "b"]
+
+
+def test_file_analysis_cache_persists_without_ts_tree(clear_cache):
+    """file_analysis cache should be saveable even when entries contain _ts_tree."""
+    import os
+    import pickle
+    import gzip
+    from cline_utils.dependency_system.utils.cache_manager import (
+        cache_manager,
+        CACHE_DIR,
+    )
+
+    # Simulate a file_analysis entry with _ts_tree (non-picklable in real usage)
+    fake_analysis = {
+        "file_path": "test.py",
+        "file_type": "py",
+        "imports": ["os", "sys"],
+        "functions": [{"name": "foo", "line": 1}],
+        "_ts_tree": None,  # Simulating the key exists (real value would be a Tree object)
+    }
+
+    cache = cache_manager.get_cache("file_analysis_test", ttl=0)
+    cache.set("test_key", fake_analysis, ttl=0)
+    cache.flush()
+
+    # Save the cache
+    cache_manager._save_cache("file_analysis_test")
+
+    # Verify the cache file was created
+    cache_file = os.path.join(CACHE_DIR, "file_analysis_test.pkl.gz")
+    if not os.path.exists(cache_file):
+        cache_file = os.path.join(CACHE_DIR, "file_analysis_test.pkl")
+    assert os.path.exists(cache_file), "Cache file was not created!"
+
+    # Load and verify _ts_tree was stripped
+    if cache_file.endswith(".pkl.gz"):
+        with gzip.open(cache_file, "rb") as f:
+            loaded = pickle.load(f)
+    else:
+        with open(cache_file, "rb") as f:
+            loaded = pickle.load(f)
+
+    loaded_data = loaded.get("data", {})
+    assert "test_key" in loaded_data
+    entry = loaded_data["test_key"]
+    assert "_ts_tree" not in entry, "_ts_tree was not stripped from saved cache!"
+    assert "imports" in entry, "Useful data was lost!"
+    assert "functions" in entry, "Useful data was lost!"
+
+    # Cleanup
+    try:
+        os.remove(cache_file)
+    except OSError:
+        pass
+
+
 def test_grid_cache_deterministic_hash(clear_cache):
     from cline_utils.dependency_system.core.key_manager import KeyInfo
     from cline_utils.dependency_system.core.dependency_grid import (

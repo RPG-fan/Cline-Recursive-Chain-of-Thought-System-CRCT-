@@ -1682,7 +1682,7 @@ def analyze_project(
     analysis_results["message"] = final_message
     logger.info(final_message)
 
-    # --- MODIFICATION: Clear the dedicated AST cache at the end of the project analysis ---
+    # --- MODIFICATION: Clear AST and TS AST caches at the end of the project analysis ---
     try:
         ast_cache_instance = cache_manager.get_cache("ast_cache")
         ast_cache_instance.data.clear()  # More direct way to clear
@@ -1691,6 +1691,17 @@ def analyze_project(
         # Catch any exception during cache clearing to prevent analyze_project from failing here
         logger.warning(
             f"Could not explicitly clear 'ast_cache' at the end of project analysis: {e_clear_ast}"
+        )
+
+    try:
+        ts_ast_cache_instance = cache_manager.get_cache("ts_ast_cache")
+        ts_ast_cache_instance.data.clear()
+        logger.info(
+            "Cleared in-memory TS AST cache ('ts_ast_cache') after project analysis."
+        )
+    except Exception as e_clear_ts_ast:
+        logger.warning(
+            f"Could not explicitly clear 'ts_ast_cache' at the end of project analysis: {e_clear_ts_ast}"
         )
     # --- END OF MODIFICATION ---
 
