@@ -220,14 +220,14 @@ This order is crucial because Mini-Trackers capture detailed cross-directory dep
                 * **Wait for Task Completion**: Allow the delegated task to complete and return results.
                 * **Review Results**: Examine the returned dependency determinations and reasoning.
                 * **Apply Dependencies**: Use `add-dependency` to apply accepted verified relationships from the delegated task results.
-            * **Correct/Confirm Dependencies**: Use `add-dependency`, specifying `--tracker <path_to_doc_tracker.md>`. The `--source-key` is always the `key_string` you are iterating on. The `--target-key` is the column key whose relationship you determined. Set the `--dep-type` based on your reasoned analysis. Batch multiple targets *for the same source key* if they share the *same new dependency type*.
+            * **Correct/Confirm Dependencies**: Use `add-dependency`. Omitting `--tracker` operates in **broadcast mode** (recommended default for standard dependencies), automatically updating all trackers containing both keys. Specify `--tracker <path_to_tracker.md>` if targeting a specific file or adding foreign keys to mini-trackers. The `--source-key` is always the `key_string` you are iterating on. The `--target-key` is the column key whose relationship you determined. Set the `--dep-type` based on your reasoned analysis. Batch multiple targets *for the same source key* if they share the *same new dependency type*.
 
               ```bash
-              # Example: Set '>' from 1A2 (source) to 2B1#3 (target) in doc_tracker.md
+              # Example (Broadcast Mode - Recommended): Set '>' from 1A2 (source) to 2B1#3 (target) across all trackers containing both keys
               # Reasoning: docs/setup.md (1A2) details steps required BEFORE using API described in docs/api/users.md (2B1). Thus, 2B1 depends on 1A2.
-              python -m cline_utils.dependency_system.dependency_processor add-dependency --tracker <path_to_doc_tracker.md> --source-key 1A2 --target-key 2B1#3 --dep-type ">"
+              python -m cline_utils.dependency_system.dependency_processor add-dependency --source-key 1A2 --target-key 2B1#3 --dep-type ">"
 
-              # Example: Set 'd' from 1A2 (source) to 3C1 (target) in doc_tracker.md
+              # Example (Targeted Mode): Set 'd' from 1A2 (source) to 3C1 (target) in specific tracker
               # Reasoning: While not a code call, 3C1 contains the user stories that 1A2 implements. 1A2 requires 3C1 for conceptual alignment.
               python -m cline_utils.dependency_system.dependency_processor add-dependency --tracker <path_to_doc_tracker.md> --source-key 1A2 --target-key 3C1 --dep-type "d"
               ```

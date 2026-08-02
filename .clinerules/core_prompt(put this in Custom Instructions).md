@@ -2,7 +2,7 @@
 
 This outlines the fundamental principles, required files, workflow structure, and essential procedures that govern CRCT, the overarching framework within which all phases of operation function. Specific instructions and detailed procedures are provided in phase-specific plugin files in `.clinerules/`.
 
-**Important Clarifications:** The CRCT system operates in distinct *phases* (Set-up/Maintenance, Strategy, Execution, Cleanup/Consolidation), controlled **exclusively** by the `next_phase` setting in `.clinerules`. "Plan Mode" or any other "Mode" is independent of this system's *phases*. Plugin loading is *always* dictated by `next_phase`.
+**Important Clarifications:** The CRCT system operates in distinct *phases* (Set-up/Maintenance, Strategy, Execution, Cleanup/Consolidation), controlled **exclusively** by the `next_phase` setting in `.clinerules/default-rules.md`. "Plan Mode" or any other "Mode" is independent of this system's *phases*. Plugin loading is *always* dictated by `next_phase`.
 
 The dependencies in tracker grids (e.g., `pso4p`) are listed in a *compressed* format. **Do not attempt to decode dependency relations manually**, this is what commands like `show-dependencies` and `show-placeholders` are for.
 *Do not rely on what you assume are 'p' relations in the raw grid output. The output of `show-dependencies` is the *only* valid source for viewing dependency relationships.*
@@ -74,7 +74,7 @@ Before proposing the use of any file modification tool, and **especially before 
 
 **Mandatory Validation**: Always validate planned actions against the current file system state before changes.
 
-**Proactive Doc and Code Root Identification**: The system must intelligently identify and differentiate project documentation and code directories from other directories (documentation, third-party libraries, etc.). This is done during **Set-up/Maintenance** (see Sections X & XI). Identified doc and code root directories are stored in `.clinerules`.
+**Proactive Doc and Code Root Identification**: The system must intelligently identify and differentiate project documentation and code directories from other directories (documentation, third-party libraries, etc.). This is done during **Set-up/Maintenance** (see Sections X & XI). Identified doc and code root directories are stored in `.clinerules/default-rules.md`.
 
 **Hierarchical Documentation:** Utilize the Hierarchical Design Token Architecture (HDTA) for project planning, organizing information into System Manifest, Domain Modules, Implementation Plans, Task Instructions, and other HDTA files. (see Section XII).
 
@@ -367,22 +367,32 @@ Located in `cline_utils/`. **All commands are executed via `python -m cline_util
     * **IMPORTANT**: The key used with `show-dependencies` is the *row*. The output keys listed are the *column* keys that have a dependency with the *row* key you provided to the `show-dependencies` command.
     * **Errors**: "Key Not Found" usually means the key doesn't exist in *any* tracker or `analyze-project` hasn't been run since the file was added/detected.
 
-3. **`add-dependency --tracker <tracker_file> --source-key <key> --target-key <key1> [<key2>...] --dep-type <char>`**:
-    * **Purpose**: Manually sets or updates the dependency relationship (`--dep-type`) between *one* **source key** (`--source-key`, the row) and *one or more* **target keys** (`--target-key`, the columns) *within the specified `<tracker_file>`*. Use this during Set-up/Maintenance (verification) or Execution (reflecting new code links) to correct suggestions or mark verified relationships ('<', '>', 'x', 'd', 'n').
+3. **`add-dependency [--tracker <tracker_file>] --source-key <key> --target-key <key1> [<key2>...] --dep-type <char>`**:
+    * **Purpose**: Manually sets or updates the dependency relationship (`--dep-type`) between *one* **source key** (`--source-key`, the row) and *one or more* **target keys** (`--target-key`, the columns). Use this during Set-up/Maintenance (verification) or Execution (reflecting new code links) to correct suggestions or mark verified relationships ('<', '>', 'x', 'd', 'n').
+    * **Tracker Parameter & Broadcast Mode**:
+        * **Broadcast Mode (Omit `--tracker`, Recommended)**: When `--tracker` is omitted, the system automatically finds *all* tracker files whose grid contains both the source key and target key(s) and broadcasts the dependency update to all of them. This is the recommended mode for standard dependency updates, as it ensures consistency across trackers and prevents matrix aggregation from overwriting manually set relationships.
+        * **Targeted Mode (Explicit `--tracker <tracker_file>`)**: Required when adding a foreign key to a mini-tracker (`*_module.md`) or when explicitly targeting a single tracker file.
     * **Workflow Note**: During verification (Set-up/Maintenance), the key analyzed with `show-placeholders` **always serves as the `--source-key`**. The related column keys identified from the `show-placeholders` output are used as the `--target-key`(s).
     * **IMPORTANT**: Before executing this command during the verification process (Set-up/Maintenance), you **MUST** state your reasoning for choosing the specific `--dep-type` based on your analysis of functional reliance between the source and target files/concepts.
-    **Example**:
+    
+    **Example (Broadcast Mode - Recommended Default)**:
+
+    ```python
+    python -m cline_utils.dependency_system.dependency_processor add-dependency --source-key 2Aa --target-key 1Bd 1Be --dep-type ">"
+    ```
+
+    **Example (Targeted Mode - Explicit Tracker File)**:
 
     ```python
     python -m cline_utils.dependency_system.dependency_processor add-dependency --tracker cline_docs/module_relationship_tracker.md --source-key 2Aa --target-key 1Bd 1Be --dep-type ">"
-     ```
+    ```
 
     *(Note: This command applies the *single* `--dep-type` to *all* specified target keys relative to the source key.)*
     *(Efficiency Tip: When verifying dependencies for a single source key, group multiple target keys that require the *same* dependency type into one command execution using multiple `--target-key` arguments.)*
 
     * *(Recommendation: Specify no more than five target keys at once for clarity.)*
 
-    * **Foreign Keys (Mini-Trackers)**: When targeting a mini-tracker (`*_module.md`), `--target-key` can be a key not defined locally *if* it exists globally (in `core/global_key_map.json`). The command adds the key definition to the mini-tracker automatically.
+    * **Foreign Keys (Mini-Trackers)**: When targeting a mini-tracker (`*_module.md`) to add a foreign key, you **MUST** explicitly specify `--tracker <path_to_mini_tracker>`. The `--target-key` can be a key not defined locally *if* it exists globally (in `core/global_key_map.json`). The command adds the key definition to the mini-tracker automatically.
         * Mechanism: The system will automatically:
             * Validate the foreign target key against the global map.
             * Add the foreign key's definition (key: path) to the mini-tracker's key list.
