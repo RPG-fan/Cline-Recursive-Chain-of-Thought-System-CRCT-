@@ -36,6 +36,7 @@ If you have already read a file and have not edited it since, *DO NOT* read it a
     *   All necessary HDTA documents (System Manifest, Domain Modules, Implementation Plans, Task Instructions) relevant to the planned work have been created or updated. No placeholders or incomplete sections relevant to the planned work remain.
     *   `Execution_*` tasks have been sequenced and prioritized within their respective areas and their final, unified sequence has been reviewed for inter-area consistency during the update of `project_roadmap.md`. *NOTE: Do not assign workers Execution tasks*.
     *   All HDTA documents are correctly linked (Tasks from Plans, Plans from Modules, Modules from Manifest).
+    *   **Pre-Execution WIP Beacon Pass**: All planned `Execution_*` tasks and Implementation Plans for the cycle have been checked against the target code files, and any required `# WIP` (or `# │ WIP:`) beacons have been instantiated or updated at specific code sites per `comment-skill-wip.md` and `comment-skill-crct.md`.
     *   All `Strategy_*` tasks identified and scoped for completion *during this Strategy phase* (including those created by Workers for sub-component planning or plan refinement) have been completed.
     *   The `project_roadmap.md` (incorporating this cycle's plan) reflects the completed planning state for all cycle goals.
     *   The `project_roadmap.md` has been updated with this cycle's plan, reviewed for coherence, and accurately reflects the unified roadmap for all cycle goals, including the explicit execution sequence for the Execution phase.
@@ -75,6 +76,55 @@ The Dispatcher reviews Worker outputs, ensures integration of planned work into 
 **(Overall System Principles Referenced by Dispatcher):**
 15. **Roadmap as Primary Output**: All activities contribute to building/refining `project_roadmap.md` via HDTA.
 16. **Minimal Context Handover**: Dispatcher's `<new_task>` message provides minimal pointers for Workers.
+17. **Work Pool as Primary Input**: The Dispatcher consumes `cline_docs/strategy_work_pool.md` as the authoritative inventory of WIP-tracked work items needing Strategy attention. Each row is a WIP Beacon anchor (file/line/content/module) ready to be promoted into a Strategy task. See Section I-A below for the full input-source inventory.
+
+## I-A. Strategy Phase Input Sources (Report Generator Outputs)
+
+Every CRCT-managed repository ships with the report generator at `code_analysis/report_generator.py`. It is the **authoritative producer** of the two planning ledgers the Dispatcher must consult at Strategy entry. Both files are **regenerated from the actual code state** on every report run — manual edits are transient and will be overwritten. The Dispatcher's job is to *consume* these ledgers, not edit them.
+
+**Regeneration command** (run from project root, in the project venv):
+```
+python code_analysis/report_generator.py --comment-index
+```
+The `--comment-index` flag forces a fresh comment-index scan so WIP Beacon prose is re-read and re-classified. Run this once at Strategy entry (Step 0) if the ledgers appear stale relative to `activeContext.md` or the most recent `last_action` in `.clinerules/default-rules.md`.
+
+**Ledger 1 — `cline_docs/strategy_work_pool.md` (PRIMARY INPUT):**
+- **Purpose**: Curated table of every WIP-tracked item in the codebase. One row per WIP Beacon anchor. Columns: `#`, `File`, `Line`, `Content` (the `# WIP: <tag> — <summary>` header line), `Module`.
+- **Source**: `report_generator.py` splits issues into `Worklog` (WIP markers) vs `standard` (static analysis debt). Worklog items are exported here via `code_analysis/reporting/worklog_exporter.py`.
+- **How the Dispatcher consumes it**:
+  1. **Cycle goal derivation**: Read the full table at Step 0. Group rows by `Module` and by `Content` tag (the token between `# WIP:` and the em-dash, e.g., `# WIP: <tag> — <summary>` → tag is `<tag>`). Each tag-cluster is a candidate "Area" for the cycle. The `Content` column's summary prose is the seed for Area objectives.
+  2. **HDTA_TASK materialization**: Each WIP Beacon's `HDTA_TASK:` field points to a placeholder path `cline_docs/tasks/strategy/task_<tag>.md`. The Dispatcher (or a delegated Worker) creates the actual task file at that path during Strategy, transforming the placeholder into a real reference.
+  3. **Beacon prose as task context**: The full beacon (INTENT/STATUS/NEXT/REQUIRES/CRCT_PHASE/HDTA_TASK fields surrounding the anchor line) is the richest available context for writing the task's Objective, Steps, and Dependencies sections. Workers should `read_file` the beacon anchor's surrounding lines (e.g., `read_file` with `offset`/`limit` around the listed `Line`) when decomposing an Area into tasks.
+  4. **Refresh cadence**: Re-run the report generator after *any* code change during Strategy (e.g., if a Worker installs a new WIP Beacon while planning). The worklog count grows when beacon prose contains classifier trigger words (`placeholder`, `for now`, `Bare Class`, `simplified`, `dead function`).
+- **Do NOT** edit this file manually — regeneration will discard the edit. The Dispatcher's notes about cycle goals belong in `activeContext.md` and `current_cycle_checklist.md`.
+
+**Ledger 2 — `cline_docs/technical_debt_backlog.md` (SECONDARY INPUT):**
+- **Purpose**: Static analysis debt (orphan exports, dead unexported code, TODO/FIXME roadmap placeholders, Bare Class stubs). Not WIP-tracked; these are *uncommented* gaps the static analyzer surfaced.
+- **Source**: `report_generator.py` standard issues → `code_analysis/reporting/backlog_generator.py`.
+- **How the Dispatcher consumes it**:
+  1. **Cross-reference with work pool**: A backlog entry (e.g., `Bare Class`, `Dead Unexported Code`) that *also* appears as a WIP Beacon in the work pool is already-tagged WIP — treat the beacon as the authoritative context, not the backlog row. A backlog entry with *no* corresponding WIP beacon is a candidate for a fresh beacon (the Worker's "NEW WIP DISCOVERY" task type per the comment-skill).
+  2. **Severity triage**: The backlog's severity column (Critical/High/Medium/Low) informs Area prioritization within the cycle. Critical/High items should be promoted to Areas before Medium/Low.
+  3. **Alpha-blocking filter**: Use the backlog's `Status / Strategy` column to identify alpha-blocking debt that must be sequenced first in the Unified Execution Sequence (Step 8.5).
+- **Do NOT** edit this file manually — regeneration will discard the edit.
+
+**Ledger 3 — `code_analysis/issues_report.md` + `code_analysis/issues_report.json` (DEEP-DIVE INPUT):**
+- **Purpose**: Full per-issue detail with runtime enrichment, context, and severity scoring. The Markdown form is for human review; the JSON form is for programmatic consumption if the Dispatcher needs to filter by `subtype`, `file`, or `severity` programmatically.
+- **How the Dispatcher consumes it**: Only when an Area's planning requires per-issue granularity (e.g., confirming whether a `Dead Unexported Code` row is a false positive by cross-referencing runtime callers). Prefer the two `cline_docs/` ledgers for high-level planning; drop into `issues_report.*` only for verification.
+
+**Comment-Skill WIP Beacon Format (reference for Workers):**
+When the Dispatcher delegates "promote WIP Beacon into Strategy task" work, the Worker should expect each beacon to carry these fields (per the project's comment-skill `SKILL.md` and WIP plugin, path listed in `.clinerules/default-rules.md` `[SKILLS_WORKFLOWS]`):
+```
+# WIP: <tag> — <summary>.
+# INTENT:   <prose>
+# STATUS:   <prose>
+# NEXT:     1. <executable step with file refs>
+# REQUIRES: <prereqs>
+# AVOID:    <optional>
+# BLOCKS:   <optional>
+# CRCT_PHASE: Strategy
+# HDTA_TASK: cline_docs/tasks/strategy/task_<tag>.md
+```
+The `NEXT:` field is pre-validated executable guidance — Workers should treat it as the seed for the Strategy task's "Steps" section. The `REQUIRES:` field seeds the task's "Dependencies" section. The `BLOCKS:` field (when present) informs Step 8.5 sequencing — a blocking task must precede the blocked task in the Unified Execution Sequence.
 
 ## II. Dispatcher Workflow: Orchestrating Granular Roadmap Construction
 
@@ -85,7 +135,9 @@ This section details the procedures for the **Dispatcher** instance.
 *   **Action A (CRITICAL Core System Initialization & Overall Cycle Goal Definition)**:
     *   1. **Read `.clinerules`**: Confirm current state.
     *   2. **CRITICAL PRE-CONDITION: Assess Current Project State**: Review `progress.md`, `system_manifest.md`, `activeContext.md`. If specific areas are targets, skim their existing HDTA and code. State: "Initial project state assessment complete."
-    *   3. **Define/Confirm Overall Cycle Goals**: Formulate goals. Use `ask_followup_question` if unclear. Update `activeContext.md`. State: "Confirmed overall cycle goals... Documented in `activeContext.md`."
+    *   3. **Load Strategy Work Pool (PRIMARY INPUT)**: Read `cline_docs/strategy_work_pool.md` in full. This is the authoritative inventory of WIP-tracked work items. Group rows by `Module` and by tag (parsed from the `Content` column's `# WIP: <tag> — ...` prefix). Each tag-cluster is a candidate Area; each row's `File`/`Line` is a beacon anchor whose surrounding INTENT/STATUS/NEXT/REQUIRES prose seeds the Area's objective and the eventual Strategy task's Steps/Dependencies. If the work pool appears stale relative to `activeContext.md` or the most recent `.clinerules` `last_action`, first run `python code_analysis/report_generator.py --comment-index` to regenerate it (and `technical_debt_backlog.md`) from the current code state. See Section I-A for the full input-source contract. State: "Loaded strategy_work_pool.md — N worklog items across M modules. Candidate Areas identified: [list]."
+    *   4. **Load Technical Debt Backlog (SECONDARY INPUT)**: Read `cline_docs/technical_debt_backlog.md`. Cross-reference its severity column with the work pool: backlog entries (e.g., `Bare Class`, `Dead Unexported Code`) that also appear as WIP Beacons are already-tagged WIP — treat the beacon as authoritative. Backlog entries with no corresponding beacon are candidates for fresh WIP discovery. Use severity (Critical/High/Medium/Low) to prioritize Areas within the cycle. State: "Loaded technical_debt_backlog.md — N standard issues, severity breakdown: [counts]."
+    *   5. **Define/Confirm Overall Cycle Goals**: Formulate goals grounded in the work pool's tag-clusters and the backlog's severity ranking. Use `ask_followup_question` if unclear or if the user's directive conflicts with the work pool's apparent priorities. Update `activeContext.md`. State: "Confirmed overall cycle goals... Documented in `activeContext.md`."
 
 *   **Action B (Initialize/Load Core HDTA & Project Roadmap)**:
     *   1. **Initialize/Load `project_roadmap.md` (CRITICAL)**: Check for `project_roadmap.md`. If new, create from `project_roadmap_template.md`, perform initial population using `system_manifest.md` and dependency visualization (`visualize-dependencies`), and save. If exists, load. State creation/load status.
@@ -93,7 +145,7 @@ This section details the procedures for the **Dispatcher** instance.
     *   3. **Preliminary Identification of Relevant Domain Modules**: Based on cycle goals and manifest, list relevant `*_module.md` files. Check existence (do not read content). State: "Preliminarily identified relevant modules... Checked existence."
 
 *   **Action C (Identify Areas for Current Cycle & Initialize/Load Cycle-Specific Trackers)**:
-    *   1. **Identify Relevant Areas from Manifest**: Based on cycle goals and manifest, identify "Areas" for planning. State: "Identified Areas for cycle: `[List]`."
+    *   1. **Identify Relevant Areas from Manifest + Work Pool**: Based on cycle goals, the `system_manifest.md` Domain Module list, AND the work pool tag-clusters loaded in Action A.3, identify "Areas" for planning. Each Area should map to one or more work pool tag-clusters (e.g., an Area for tag `<foo>` maps to all `<foo>`-tagged beacons across the files where they appear). If a cycle goal has no work pool coverage, flag it — it may require a fresh WIP Beacon installation (Worker "NEW WIP DISCOVERY" task per the comment-skill) before planning can proceed. State: "Identified Areas for cycle: `[List]` (grounded in work pool tag-clusters)."
     *   2. **Handle `hierarchical_task_checklist_*.md`**: Search for existing checklists. If found and relevant, `ask_followup_question` to continue/consolidate/new. Create/load/update `current_cycle_checklist.md`. Populate with Areas from C.1, status `[ ] Unplanned`. State: "Active cycle checklist set to: `current_cycle_checklist.md`. Populated/updated."
     *   3. **Initialize `hdta_review_progress_[session_id].md`**: Create from template. State: "Initialized HDTA Review Progress Tracker."
 
@@ -275,7 +327,28 @@ This section details the procedures for the **Dispatcher** instance.
             ```
         5.  **Use `apply_diff` or `write_to_file` to update `project_roadmap.md`**.
     *   State: "Updated main `project_roadmap.md` with the cycle summary and the unified, sequenced execution task list."
-    *   **Update `.clinerules` `[LAST_ACTION_STATE]`**: `next_action: "Final Checks and Exit Strategy Phase"`. Update `activeContext.md` to note completion of Step 8.5
+    *   **Update `.clinerules` `[LAST_ACTION_STATE]`**: `next_action: "Perform Pre-Execution WIP Beacon Pass"`. Update `activeContext.md` to note completion of Step 8.5.
+
+*   **(Dispatcher) Step 8.7: Pre-Execution WIP Beacon Pass.**
+*   **Directive**: As a mandatory final pass before phase transition to Execution, the Dispatcher verifies and ensures that all planned cycle work (from Implementation Plans and `Execution_*` task files) has active, well-formed `# WIP` (or `# │ WIP:`) beacons instantiated or updated at target code sites in source files per `comment-skill-wip.md` and `comment-skill-crct.md`.
+*   **Action A (Scan Cycle Tasks and Target Files)**:
+    *   Iterate through all `Execution_*` task files in the Unified Execution Sequence.
+    *   Identify the target source code files and functions/classes specified for modification or creation in each task.
+*   **Action B (Verify/Dispatch Worker Beacon Instantiation)**:
+    *   For each target source code site:
+        *   Check if a corresponding `# WIP` (or `# │ WIP:`) beacon exists.
+        *   If missing or stale, dispatch a Strategy Worker (or perform an in-line pass) to instantiate/update the beacon following `comment-skill-wip.md` and `comment-skill-crct.md`.
+        *   Ensure each beacon includes:
+            - `INTENT`: Concise statement of goal based on task objective.
+            - `STATUS`: Current implementation state / scaffold condition.
+            - `NEXT`: Executable steps copied/adapted from the `Execution_*.md` task.
+            - `REQUIRES`: Prerequisites identified in the task.
+            - `CRCT_PHASE`: `Execution`
+            - `HDTA_TASK`: Relative path to the governing `tasks/exec/Execution_*.md` file.
+    *   Note: Maintain box-drawing syntax awareness (`# │ WIP:`) when searching or updating beacons.
+*   **Action C (Update MUP State)**:
+    *   State: "Dispatcher completed Pre-Execution WIP Beacon Pass. All cycle Execution tasks have active WIP beacons instantiated at code sites."
+    *   **Update `.clinerules` `[LAST_ACTION_STATE]`**: `next_action: "Final Checks and Exit Strategy Phase"`. Update `activeContext.md` to note completion of Step 8.7.
 
 *   **(Dispatcher) Step 9: Final Checks and Exit Strategy Phase.**
 *   **Directive**: As the Dispatcher, verify all conditions for exiting the *entire* Strategy phase are met, ensuring the roadmap for the current cycle goals is complete, consistent, and actionable.
@@ -334,6 +407,9 @@ This section details the procedures for the **Dispatcher** instance.
 *   **Step 9: Final Checks and Exit**: Verify completion criteria. If OK: MUP for Execution. Pause. If Not OK: Plan corrections, MUP for corrective step. Output: Validated roadmap, updated `.clinerules`.
 
 **Key Trackers & Files (Dispatcher Perspective):**
+*   `cline_docs/strategy_work_pool.md` (**PRIMARY INPUT**): Auto-generated inventory of WIP-tracked items; one row per WIP Beacon anchor. Consumed at Step 0 to derive Areas. Regenerated by `python code_analysis/report_generator.py --comment-index`. Do NOT edit manually.
+*   `cline_docs/technical_debt_backlog.md` (**SECONDARY INPUT**): Auto-generated static-analysis debt ledger; cross-referenced with the work pool for severity triage and fresh-WIP discovery. Regenerated by the same command. Do NOT edit manually.
+*   `code_analysis/issues_report.{md,json}` (**DEEP-DIVE INPUT**): Per-issue detail with runtime enrichment; consult only when verifying backlog entries.
 *   `current_cycle_checklist.md`: Tracks high-level Area planning status for the cycle.
 *   `activeContext.md`: Overall cycle goals, current orchestration area, sub-task handoff details, revision notes.
 *   `hdta_review_progress_[session_id].md`: Tracks Dispatcher's review of `project_roadmap.md`.

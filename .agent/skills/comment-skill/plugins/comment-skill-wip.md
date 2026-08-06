@@ -53,8 +53,17 @@ The incoming agent's first action in a file is to read the Station Header and th
   dangerously complex. Create a **Master WIP Beacon** at the top of the file (below
   the Station Header) that summarizes the file-wide state and links to the local
   beacons.
-- **WIP Completion**: When a task is finished, **DELETE** the WIP Beacon. Do not
+- **WIP Completion**: When a task is finished, **DELETE** the WIP Beacon block. Do not
   convert it to `DONE:`. Success is documented in the git commit.
+- **NEXT-Item Re-Anchor Rule (MANDATORY)**: Removing a `# WIP` (or `# │ WIP:`) beacon whose
+  `NEXT` field lists remaining/uncompleted items REQUIRES re-anchoring each remaining item
+  as its own proper WIP beacon at its respective code site BEFORE the referencing parent beacon
+  is deleted — recording them only in plan files or activeContext is information loss.
+  - *Remediation pattern*: Audit every removed beacon's `NEXT` list; for each uncompleted item,
+    create a new `# │ WIP: <topic> — <follow-up title>` block (`INTENT`, `STATUS`, `NEXT`,
+    `REQUIRES`, `CRCT_PHASE`, `HDTA_TASK`) at the relevant code site.
+- **Grep Syntax & Box-Drawing**: Always use whitespace- and box-drawing-tolerant searches
+  (e.g., `#\s*│?\s*WIP:`) so box-drawing `# │ WIP:` beacons are never missed by regex scans.
 
 ---
 
@@ -113,12 +122,17 @@ The incoming agent's first action in a file is to read the Station Header and th
 
 ## CRCT Integration
 
-In CRCT-managed projects, WIP Beacons are often the first thing an agent writes after
-an implementation plan is approved.
+In CRCT-managed projects:
 
-1.  **Phase Alignment**: Ensure `CRCT_PHASE` matches `.clinerules/default-rules.md`.
-2.  **Task Linking**: Always include `HDTA_TASK` to allow the agent to jump to the
-    full task requirements if the `INTENT` is too brief.
+1.  **Strategy Pre-Execution Beacon Pass**: Before transitioning from Strategy to Execution,
+    the Strategy Dispatcher runs Step 8.7 (`.clinerules/strategy_dispatcher_plugin.md`). Strategy
+    Workers instantiate or update `# WIP` (or `# │ WIP:`) beacons at target code sites for all
+    planned `Execution_*` tasks and Implementation Plans for the cycle.
+2.  **Phase Alignment**: Ensure `CRCT_PHASE` matches `.clinerules/default-rules.md` (e.g., `Execution`).
+3.  **Task Linking**: Always include `HDTA_TASK` pointing to `tasks/exec/Execution_*.md` (or strategy task file).
+4.  **Execution Lifecycle & Re-Anchoring**: During Execution (`.clinerules/execution_plugin.md`),
+    completed beacons are deleted (not kept as `DONE:`), and any parent beacon removed with remaining `NEXT`
+    items triggers the **NEXT-Item Re-Anchor Rule** to instantiate new beacons at code sites before deletion.
 
 → For core rules: SKILL.md
 → For CRCT fields: plugins/comment-skill-crct.md

@@ -21,6 +21,9 @@ next_phase: "Set-up/Maintenance"
 
 [LEARNING_JOURNAL]
 
+<<**NO AGENT HAS THE AUTHORITY TO DEFER A TASK**>>
+<<**MANDATORY INTEGRITY WARNING: DO NOT CHEAT. All implementations must be genuine. DO NOT hardcode test results or create dummy implementations.**>>
+
 - **Verification Rigor ("NO TRUST ENVIRONMENT!")**: It is critical to explicitly re-verify task outcomes by examining actual code and documentation, rather than solely relying on task file status. This is essential to identify placeholder logic, unaddressed gaps, or inconsistencies between documented status and actual implementation.
 - **`apply_diff` Best Practices**: Exercise extreme caution with `apply_diff` operations. Always re-read the target file immediately before constructing an `apply_diff` to ensure an exact match in the `SEARCH` block (including subtle formatting). Avoid using `:start_line:` in the `REPLACE` section.
 - **Proactive Task Management**: Proactively creating missing task files based on higher-level implementation plans and scaffolding execution tasks can significantly improve workflow efficiency and prevent context switching.

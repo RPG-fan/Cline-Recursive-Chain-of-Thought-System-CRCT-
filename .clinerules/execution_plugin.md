@@ -64,11 +64,64 @@
 
 2.  **Load Parent Plan (Context)**: Read the parent `implementation_plan_*.md` file (or relevant section of `*_module.md`) that contains the task. This provides higher-level objectives and context. State: "Reading parent plan `{plan_name}.md` for task context."
 3.  **Load Task Instruction**: Read the specific `Execution_{task_name}.md` file.
+
+### `build-context` Command Reference
+
+Use `build-context` as the **primary** method for loading tracker-backed dependency context during Execution. It assembles a token-budgeted Markdown package centered on target keys, with tiered dependencies and SES fallbacks.
+
+**Invocation** (always via `execute_command`):
+
+```bash
+python -m cline_utils.dependency_system.dependency_processor build-context \
+  --keys <KEY1> \
+  --output cline_docs/temp_context/{key}_context.md
+```
+
+| Argument | Required | Purpose |
+|----------|----------|---------|
+| `--keys` | Yes | Comma-separated target keys |
+| `--mode` | No | `auto` (default), `local` (~20k token ceiling), `cloud` (~100k token ceiling) |
+| `--max-tokens` | No | Override budget; clamped to mode ceiling |
+| `--output` | Recommended | Write Markdown package to disk (avoids flooding `execute_command` stdout) |
+
+**Prerequisites:**
+* Run `analyze-project` first if the global key map is missing (error: `"Global key map not found. Please run analyze-project first."`).
+* Resolve ambiguous keys (`3Ba2#1`) before passing to `--keys`. Directory keys are omitted by the packager — do not use them as targets.
+* Create `cline_docs/temp_context/` if missing. Packages are ephemeral execution artifacts (not changelog entries); cleanup occurs in Consolidation phase.
+
+**Output format** (what the LLM must parse from the generated package):
+* `# TARGET CORE LOGIC` — full content of target file(s)
+* `# Tier N: ...` — tiered dependencies: `x` (Tier 1) → `<`/`>` (Tier 2) → `d` (Tier 3) → `S` (Tier 4) → `s` (Tier 5)
+* `(Full Content)` vs `(SES Signatures Only)` — full file vs structural/signature fallback
+* Truncation marker: `> Context ceiling of N tokens reached...` — outer-ring deps were dropped
+
 4.  **Load Dependencies (MANDATORY PRE-EXECUTION STEP)**:
-    *   **Identify Dependencies**: Review the `Context/Dependencies` section of the Task Instruction file *and* run `show-dependencies --key <key>` for the primary file(s) being modified by this task. (Find the key using `analyze-project` output or by convention if unsure). State: "Checking dependencies for task target(s) using `show-dependencies`."
-    *   **In-Code Verification**: When modifying source files, look for `[AUTO] STATION_HEADER` (to verify the file's primary key) and `[AUTO] CONNECTION_MAP` comments near class/function definitions. These provide immediate, localized context of the file's established dependencies.
-    *   **Read Dependent Files**: **Crucially, use `read_file` to load the content of files identified as direct dependencies** ('<', '>', 'x', 'd' relationships relevant to the task) from `show-dependencies` output, the task's explicit context list, and any in-code `CONNECTION_MAP`. **Failure to gather context from dependent files before coding/modification is a HIGH RISK for introducing errors and logical inconsistencies.** State: "Reading content of dependent files: `{file_path_1}`, `{file_path_2}`..."
-    *   **Load Other Explicit Context**: Use `read_file` to load any other specific Task Instructions, documentation files, or code snippets explicitly listed as required context in the current task file.
+
+    **Phase A — Resolve Keys**
+    *   Determine what the current key for the target file is. The simplest method is to search for the target file name in `cline_utils\dependency_system\core\state\global_key_map.json`
+    *   Confirm keys via `[AUTO] STATION_HEADER` when modifying source files.
+    *   Disambiguate with `show-keys` if a base key is globally duplicated (use `KEY#N` suffix).
+
+    **Phase B — Build Context Package (PRIMARY)**
+    *   Run `build-context` with `--output` to `cline_docs/temp_context/{key}_context.md`.
+    *   `read_file` the generated package.
+    *   Summarize coverage: which keys loaded as Full Content vs SES Signatures Only vs truncated/omitted.
+
+    **Phase C — Fallback Gap Fill**
+    *   **Trigger fallback** when any of:
+        *   `build-context` exits non-zero or output contains `# Error:`
+        *   Package shows truncation and the task requires omitted tier files
+        *   Task lists explicit non-tracked context (Strategy docs, CRCT task files, plans) not in the package — *note: `show-dependencies` does not work on task files*
+        *   SES-only content is insufficient for the planned code change
+    *   **Fallback steps:**
+        1.  Run `show-dependencies --key <key>` for affected keys.
+        2.  `read_file` only the **missing** files (do not re-read content already in the package).
+        3.  State: "Filling context gaps via `show-dependencies` + `read_file`: `{file_path_1}`, `{file_path_2}`..."
+    *   **Failure to gather required context before coding/modification is a HIGH RISK for introducing errors and logical inconsistencies.**
+
+    **In-Code Verification**: When modifying source files, look for `[AUTO] STATION_HEADER` (to verify the file's primary key) and `[AUTO] CONNECTION_MAP` comments near class/function definitions. These provide immediate, localized context of the file's established dependencies.
+
+    **Load Other Explicit Context**: Use `read_file` to load any other specific Task Instructions, documentation files, or code snippets explicitly listed as required context in the current task file (e.g., Strategy task docs referenced in Execution steps).
 
 ---
 
@@ -80,8 +133,9 @@
 1.  **Iterate Through Steps:** For each numbered step in the Task Instruction file:
     *   **A. Understand the Step**: Read the step's description. Clarify the specific action required, considering the overall task objective and the context from the parent Implementation Plan (loaded in Section II).
     *   **B. Review Dependencies & Context (MANDATORY REINFORCEMENT)**: **Before generating or modifying *any* code or significant file content for this specific step:**
-        *   Re-check dependencies using `show-dependencies --key <target_file_key>` if the step involves complex interactions or if context might be stale.
-        *   **CRITICAL**: Ensure you have **read and understood the relevant content (`read_file`) of the directly dependent files** identified in Section II.4. How does this step interact with those dependencies (e.g., calling functions, using data structures, implementing interfaces)? State: "Confirming understanding of interaction with dependencies `{key_1}`, `{key_2}` based on previously read files before proceeding with step."
+        *   **Complex or multi-file steps**: Re-run `build-context` with updated target keys if the prior package may be stale or new files are in scope.
+        *   **Localized steps**: Use `show-dependencies --key <target_file_key>` for quick relationship spot-checks (not full re-load).
+        *   **CRITICAL**: Ensure you have **read and understood the relevant content from the Section II.4 context package and/or gap-fill `read_file` results**. How does this step interact with those dependencies (e.g., calling functions, using data structures, implementing interfaces)? State: "Confirming understanding of interaction with dependencies `{key_1}`, `{key_2}` based on context package and/or read files before proceeding with step."
     *   **C. Pre-Action Verification (MANDATORY for File Modifications)**: Before using tools that modify files (`replace_in_file`, `write_to_file` on existing files, `execute_command` that changes files):
         *   Re-read the specific target file(s) for this step using `read_file`.
         *   Generate a "Pre-Action Verification" Chain-of-Thought:
@@ -94,7 +148,7 @@
             ```
             Pre-Action Verification:
             1. Intended Change: Replace line 55 in `game_logic.py` (Key: 2Ca1) with `new_score = calculate_score(data, multipliers)`.
-            2. Dependency Context Summary: `calculate_score` is imported from `scoring_utils.py` (Key: 2Cb3, dependency confirmed via show-dependencies & read_file). It expects `data` (dict) and `multipliers` (list). `game_logic.py` has access to these variables in scope.
+            2. Dependency Context Summary: `calculate_score` is imported from `scoring_utils.py` (Key: 2Cb3, confirmed via build-context package Tier 2). It expects `data` (dict) and `multipliers` (list). `game_logic.py` has access to these variables in scope.
             3. Expected Current State: Line 55 contains the old calculation `new_score = data['base'] * 1.1`.
             4. Actual Current State: Line 55 is `new_score = data['base'] * 1.1`.
             5. Validation: Match confirmed. Change is consistent with dependency context. Proceeding with `replace_in_file`.
@@ -116,7 +170,7 @@
     *   Apply MUP post-resolution before continuing.
 
 3.  **Code Generation and Modification Guidelines:**
-    *(Reminder: Before generating/modifying code, ensure Step III.1.B 'Review Dependencies & Context' including reading dependent files was performed)*
+    *(Reminder: Before generating/modifying code, ensure Step III.1.B 'Review Dependencies & Context' including the Section II.4 context package was performed)*
     When performing actions that involve writing or changing code, adhere strictly to the following:
     1.  **Context-Driven**:
      - Code **must** align with the interactions, interfaces, data formats, and requirements identified during dependency review (III.1.B) and pre-action verification (III.1.C).
@@ -143,8 +197,12 @@
      - If code changes introduce *new functional dependencies* between project files, prepare to update the relevant mini-tracker (see MUP Additions, Section IV).
     9.  **Security**:
      - Follow secure coding practices to mitigate vulnerabilities (e.g., avoid injection risks, secure credential handling).
-    10. **WIP Markings (CRITICAL)**:
-     - Note that any areas or code blocks that require additional steps, deferred logic, or future modifications **require** a clear, descriptive `# WIP` tag (or language-appropriate comment syntax like `// WIP` or `<!-- WIP -->`) directing to the additional work needed. The system is blind without these markers to direct it during subsequent sweeps or handoffs. Reference the `comment-skill` package path defined under `[SKILLS_WORKFLOWS]` in `.clinerules/default-rules.md` for proper in-file comment-based navigation and standards.
+    10. **WIP Markings & Lifecycle Protocol (CRITICAL)**:
+     - Note that any areas or code blocks that require additional steps, deferred logic, or future modifications **require** a clear, descriptive `# WIP` tag (or `# │ WIP:` box-drawing tag, or language-appropriate comment syntax like `// WIP` or `<!-- WIP -->`) directing to the additional work needed. Reference the `comment-skill` package path defined under `[SKILLS_WORKFLOWS]` in `.clinerules/default-rules.md`.
+     - **Beacon Removal on Completion**: When a task step fully satisfies and verifies the work described in a `# WIP` beacon, **DELETE** the beacon block. Do not convert it to `DONE:` or retain dead comment scaffolding — git commit history records completion.
+     - **NEXT-Item Re-Anchor Rule (MANDATORY)**: Prior to removing any `# WIP` (or `# │ WIP:`) beacon whose `NEXT` field contains uncompleted or follow-up items, the executing agent **MUST** instantiate each remaining item as its own proper, standalone `# WIP` (or `# │ WIP:`) beacon at the specific code site where that work belongs *BEFORE* the parent beacon is deleted. Recording remaining items only in plan files or activeContext is prohibited as it causes information loss.
+       - Each re-anchored beacon must include proper fields per `comment-skill-wip.md`: `INTENT`, `STATUS`, `NEXT` (quoting or detailing the item), `REQUIRES`, `CRCT_PHASE`, and `HDTA_TASK` (or plan reference).
+     - **Grep Syntax Awareness**: Always use whitespace- and box-drawing-tolerant searches (e.g. regex `#\s*│?\s*WIP:`) to avoid missing indented or box-drawing formatted beacons. Anchor on unique beacon prose rather than line numbers.
 
 4.  **Execution Flowchart**
 
@@ -158,9 +216,9 @@ flowchart TD
     end
 
     subgraph Task Execution
-        Load_Task_File --> Load_Context[Load Parent Plan & Dependencies]
+        Load_Task_File --> Load_Context["Load Parent Plan & build-context Package<br>(fallback: show-dependencies + read_file)"]
         Load_Context --> A[Start Step] --> B[Understand Step]
-        B --> C[Review Dependencies & Read Context Files<br>MANDATORY]
+        B --> C["Review Dependencies & Context Package<br>MANDATORY"]
         C --> D{File Modification?}
         D -- Yes --> E[Pre-Action Verification<br> with Context]
         D -- No --> G[Perform Action]
@@ -201,8 +259,11 @@ After Core MUP steps (Section VI of Core Prompt), performed *after each step* of
         python -m cline_utils.dependency_system.dependency_processor add-dependency --tracker path/to/module_C/module_C_module.md --source-key 2Ca1 --target-key 2Ca3 --dep-type "<"
         ```
         *(Use correct dep-type: '<' if A calls B, '>' if B calls A, 'x' if mutual, 'd' if essential doc link)*
-3.  **Update Domain Module / Implementation Plan Documents (If Significant)**: If the task execution led to a significant design change or outcome not captured in the original plan, briefly note this in the relevant Domain Module (`*_module.md`) or Implementation Plan (`implementation_plan_*.md`).
-4.  **Update `.clinerules` [LAST_ACTION_STATE]:** Update `last_action`, `current_phase`, `next_action`, `next_phase`.
+3.  **Update WIP Beacons (Completion Cleanup & NEXT Re-anchoring)**:
+    *   **Completed Work**: If this step completed the implementation of a `# WIP` (or `# │ WIP:`) beacon, **delete** the beacon block.
+    *   **NEXT Re-Anchoring**: If deleting a beacon whose `NEXT` list contains remaining/uncompleted items, verify that each remaining item has been instantiated as a standalone `# WIP` beacon at its respective code site before deleting the parent beacon.
+4.  **Update Domain Module / Implementation Plan Documents (If Significant)**: If the task execution led to a significant design change or outcome not captured in the original plan, briefly note this in the relevant Domain Module (`*_module.md`) or Implementation Plan (`implementation_plan_*.md`).
+5.  **Update `.clinerules` [LAST_ACTION_STATE]:** Update `last_action`, `current_phase`, `next_action`, `next_phase`.
     *   After a step:
         ```
         [LAST_ACTION_STATE]
@@ -226,14 +287,14 @@ After Core MUP steps (Section VI of Core Prompt), performed *after each step* of
 ## V. Quick Reference
 - **Objective**: Execute planned `Execution_*` tasks step-by-step, modifying files/code according to instructions, dependencies, and quality guidelines.
 - **Key Actions**:
-    - Load context: Parent Plan -> Task Instruction -> Dependencies (`show-dependencies` + `read_file`).
+    - Load context: Parent Plan -> Task Instruction -> **`build-context` package** (fallback: `show-dependencies` + `read_file` for gaps).
     - Execute steps sequentially.
-    - **MANDATORY**: Review dependencies & **read context files** before coding/modification.
+    - **MANDATORY**: Review dependencies & **context package** before coding/modification.
     - **MANDATORY**: Perform pre-action verification for file modifications.
     - Follow code quality guidelines.
     - Document results (Mini-CoT) after each action.
     - Perform MUP after each action.
     - Update mini-trackers (`add-dependency`) if new functional dependencies are created.
-- **Key Inputs**: Prioritized Task list (from Strategy), `implementation_plan_*.md`, `Execution_*.md`, dependency tracker info (`show-dependencies`), content of dependent files (`read_file`).
+- **Key Inputs**: Prioritized Task list (from Strategy), `implementation_plan_*.md`, `Execution_*.md`, context packages (`cline_docs/temp_context/*_context.md` via `build-context`), gap-fill reads (`show-dependencies` + `read_file`).
 - **Key Outputs**: Modified project files (code, docs), updated `activeContext.md`, updated task instruction files, potentially updated mini-trackers, updated `.clinerules`.
 - **MUP Additions**: Update instruction files (step completion, notes), mini-trackers (if needed), potentially Plans/Modules, and `.clinerules`.

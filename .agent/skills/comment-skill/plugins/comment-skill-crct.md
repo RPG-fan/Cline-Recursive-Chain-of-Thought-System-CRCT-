@@ -163,8 +163,8 @@ Read `.clinerules/default-rules.md` to determine current phase before commenting
 | CRCT Phase | Comment Priority | Primary Action |
 |---|---|---|
 | **Set-up/Maintenance** | Station Headers + CONNECTION_MAP lines | Run `populate_comments.py` (utility); install `[AUTO]` scaffolds |
-| **Strategy** | WIP Beacons | Install `INTENT` + `NEXT` fields from HDTA implementation plans; add `HDTA_TASK` refs |
-| **Execution** | All categories, live updates | Agents update WIP Beacons as tasks progress; Goto Pointers at specific call sites |
+| **Strategy** | WIP Beacons | Install `INTENT` + `NEXT` fields from HDTA implementation plans; add `HDTA_TASK` refs; run Pre-Execution WIP Beacon Pass (Step 8.7) before transition to Execution |
+| **Execution** | All categories, live updates | Agents update WIP Beacons as tasks progress; delete completed beacons; enforce NEXT-item re-anchor rule before parent beacon deletion |
 | **Cleanup/Consolidation** | Tear Down | Remove completed WIP Beacons; re-run populate script after renames; audit stale `[AUTO]` entries |
 
 ---

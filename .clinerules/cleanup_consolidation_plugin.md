@@ -43,6 +43,8 @@
 
 **Workflow Order**: Consolidation MUST happen *before* Cleanup.
 
+Your context window is automatically managed and CRCT is designed to account for your context limitations via the MUP to track progress. This is not a task you can skimp on, do not concern yourself with context or time considerations.
+
 ---
 
 ## III. Consolidation Workflow
@@ -135,6 +137,35 @@
                         - **Action**: Record this information in `consolidation_notes.md` in `cline_docs/`, appending each piece with a reference to the source file and batch number (e.g., "Batch 3, roadmap_v3.md: Updated milestone priorities based on task delays").
                 - **Action**: After fully processing all files in the current batch (i.e., all files have been read, consolidated, updated, and their consolidatable information recorded in `consolidation_notes.md`), document the completion of the batch in `activeContext.md` (e.g., "Completed verification and extraction for batch Z containing trackers [tracker1, tracker2, ...]. Information recorded in `consolidation_notes.md`."). Only then proceed to the next batch.
                 - **Purpose**: Processing each batch as a standalone task ensures manageable processing of Strategic Trackers, maintaining comprehensive consolidation.
+                - **Note**: The `### Unified Execution Sequence` section within the roadmap is handled separately in Step 1h below.
+    *   **h. Consolidate and Remove Completed Unified Execution Sequence Cycles (CRITICAL)**:
+        *   **Purpose**: To integrate the outcomes, decisions, and achievements from completed execution cycles into the main roadmap Phase/Epic sections, then **remove** the now-redundant cycle entries from the Unified Execution Sequence. This ensures the roadmap's main sections reflect all completed work while keeping the execution sequence focused on pending/in-progress work only.
+        *   **Procedure**:
+            i. **Action**: Read the `### Unified Execution Sequence` section in `cline_docs/project_roadmap.md` (typically located under `## 6. Unified Strategy-First Execution Sequence`).
+            ii. **Action**: For each completed cycle (all tasks marked `[x]` or `[COMPLETE]`):
+                1. **Identify Target Phase/Epic**: Determine which Phase/Epic section(s) in `## 2. Major Project Phases / Epics` the cycle contributes to based on the cycle's scope description and parent plan references.
+                2. **Extract Consolidatable Information**:
+                   - Key outcomes and deliverables (e.g., "8 tasks completed", "All 13 beacon remediation tasks verified")
+                   - Architecture decisions made during execution (e.g., "NPC materialisation uses direct `core_db_lib.insert_row()`")
+                   - Status changes (e.g., "Implemented and verified", "COMPLETE AND VERIFIED")
+                   - Any surfaced tech debt or follow-up items noted in the cycle
+                   - Milestone achievements worth promoting to `## 4. Key Project-Wide Milestones`
+                3. **Integrate into Phase/Epic**: Update the target Phase/Epic's:
+                   - `Status` field (if the cycle changes the phase's overall status)
+                   - `Notes/Key Deliverables` section (append cycle outcomes with cycle reference, e.g., "**Cycle 20260710_PCGPipelineWiring:** 8 PCG pipeline tasks completed — dungeon decoupled, build context wired, all generation triggers added.")
+                   - `Next Steps` section (update if cycle outcomes affect next steps)
+                4. **Update Milestones**: If the cycle achieved a milestone-worthy outcome, add it to `## 4. Key Project-Wide Milestones` with the cycle reference.
+                5. **Record in consolidation_notes.md**: Document what was consolidated and where (e.g., "Cycle 20260710_PCGPipelineWiring: 8 tasks consolidated into Phase/Epic: LLM Integration & Agents, Notes/Key Deliverables section").
+            iii. **Action (CRITICAL)**: After all completed cycles have been consolidated into their respective Phase/Epic sections, **remove** the entire cycle entries from the `### Unified Execution Sequence` section. This includes:
+                 - The `#### Cycle: YYYYMMDD_CycleName` heading
+                 - The `**Scope**:` description
+                 - The `**Parent Plan**:` reference
+                 - The `**Unified Execution Sequence**:` task list
+                 - Any cycle-specific notes (design decisions, architecture decisions, surfaced tech debt)
+                 - The completion status line (e.g., "**All X tasks for cycle ... are COMPLETE.**")
+            iv. **Action**: If the Unified Execution Sequence section becomes empty after removal (no pending/in-progress cycles remain), update the parent section `## 6. Unified Strategy-First Execution Sequence` to indicate: "No pending execution cycles. Awaiting next Strategy phase."
+            v. **Action**: Update the `**Last Updated**:` date at the top of `project_roadmap.md` to reflect the consolidation date.
+        *   **Outcome**: The roadmap's main Phase/Epic sections reflect all completed work with cycle references, and the Unified Execution Sequence contains only pending/in-progress cycles (or is marked as empty/awaiting next Strategy phase).
 
 2.  **Identify All Information for Consolidation (CRITICAL)**:
     *   Based on the comprehensive review performed in Step 1 (covering all task instructions, implementation plans, strategic trackers, and core state files), **CRITICALLY** list all specific pieces of information that represent lasting design decisions, architectural changes, significant outcomes, refined requirements, important operational learnings, "gotchas," or any other vital knowledge that **MUST** be integrated into persistent project documentation. This list is not limited to findings from only the most recent operational cycle but encompasses the entire project history as reviewed. (Excluding changelog structural reorganization for this step, which is handled in Step 3b).
@@ -211,6 +242,7 @@
         *   Refer to the outcomes of Section III, Step 1f and 1g. Strategy task files whose objectives have been fully met by downstream Execution tasks (which themselves are verified complete and consolidated) and whose own content has been fully consolidated are candidates for archival.
     *   **c. Identify Obsolete Temporary Session Files and Trackers**:
         *   Refer to the outcomes of Section III, Step 1g. Older versions of strategic tracking documents (roadmaps, checklists, review progress files) that have had all their pending items and unique valuable information consolidated into a newer active version (or into persistent HDTA documents) are candidates for archival.
+        *   **Cycle Checklist Files**: Identify `current_cycle_checklist_*.md` files in `cline_docs/archive/` that correspond to cycles whose outcomes have been fully consolidated into the roadmap's Phase/Epic sections (per Section III, Step 1h). These are candidates for archival or can remain in archive as historical records.
         *   Identify any other temporary session-specific files (e.g., ad-hoc notes from a past phase that are now fully processed and consolidated) that are no longer relevant to the current project state.
     *   **d. Identify Temporary Consolidation Notes File**:
         *   **Action**: Identify `consolidation_notes.md` in `cline_docs/` as a temporary file created during the Consolidation Workflow (Section III). Since its contents have been fully processed and integrated into persistent documentation in Section III, Step 3, it is now obsolete and a candidate for archival.
@@ -355,12 +387,13 @@ flowchart TD
         2.  For ALL Task Instructions: Read, **MANUALLY VERIFY OUTCOMES** (if outcome unverified, update task file & all references to show NOT complete; unverified tasks are NOT archived as complete). Extract ALL learnings/design choices.
         3.  For ALL Impl. Plans: Read, cross-reference task verification, update plan status, extract strategic info.
         4.  For ALL Strategic Trackers: Review, consolidate older versions into newest, update status based on verified tasks.
-        5.  Identify ALL information for consolidation from the above reviews.
-        6.  Update HDTA docs (`system_manifest.md`, `*_module.md`, `implementation_plan_*.md`).
-        7.  Update Core Files: `progress.md`, `userProfile.md`.
-        8.  Review, Refine, & Update `default-rules.md` `[LEARNING_JOURNAL]` (group, combine, remove inappropriate, add new).
-        9.  Reorganize ENTIRE `changelog.md` (Parse->Group by Component->Sort by Date->Format->Write).
-        10. Update `activeContext.md` to reflect fully consolidated project baseline.
+        5.  **Consolidate & Remove Completed Unified Execution Sequence Cycles**: Integrate cycle outcomes into roadmap Phase/Epic sections, update milestones, then **remove** completed cycle entries from `### Unified Execution Sequence`.
+        6.  Identify ALL information for consolidation from the above reviews.
+        7.  Update HDTA docs (`system_manifest.md`, `*_module.md`, `implementation_plan_*.md`).
+        8.  Update Core Files: `progress.md`, `userProfile.md`.
+        9.  Review, Refine, & Update `default-rules.md` `[LEARNING_JOURNAL]` (group, combine, remove inappropriate, add new).
+        10. Reorganize ENTIRE `changelog.md` (Parse->Group by Component->Sort by Date->Format->Write).
+        11. Update `activeContext.md` to reflect fully consolidated project baseline.
     - **Tools**: `list_files`, `read_file`, `write_to_file`, `apply_diff`.
 - **Cleanup (Section IV)**:
     - **Inputs (Derived from Section III)**: Verified list of fully completed & consolidated Task Instructions; Fulfilled Strategy Tasks; Obsolete (fully consolidated) session files/trackers; Other confirmed obsolete files.
