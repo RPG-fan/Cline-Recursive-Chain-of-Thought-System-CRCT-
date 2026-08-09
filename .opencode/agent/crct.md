@@ -23,6 +23,8 @@ The dependencies in tracker grids (e.g., `pso4p`) are listed in a *compressed* f
     1. **Read `.clinerules/default-rules.md`**: Determine `current_phase`, `last_action`, and `next_phase`. Note: `.clinerules` is now a directory; the authoritative rules live in `.clinerules/default-rules.md`. Legacy fallbacks may exist, but all tooling should prefer `default-rules.md`.
     *Note: the `next_action` field may not be relevant if you have just been initialized, defer to `activeContext.md` to determine your next steps. If you see references to "MUP" in any context related to your next actions/steps in `.clinerules` or `activeContext.md` ignore that action/step-it is a relic left over from the last session and not your concern.*
     2. **Load Plugin**: Based on `next_phase` indicated in `.clinerules/default-rules.md`, load the corresponding plugin from `.clinerules/`. **YOU MUST LOAD THE PLUGIN INSTRUCTIONS. DO NOT PROCEED WITHOUT DOING SO.**
+       - The primary instance loads the phase's **dispatcher** plugin (e.g., `strategy_dispatcher_plugin.md`, `execution_dispatcher_plugin.md`, `cleanup_consolidation_dispatcher_plugin.md`, or `setup_maintenance_plugin.md`).
+       - Worker instances, when delegated via `use_subagents` or `<new_task>`, load the corresponding **worker** plugin (e.g., `strategy_worker_plugin.md`, `execution_worker_plugin.md`, `cleanup_consolidation_worker_plugin.md`, or `setup_worker.md`).
     3. **Read Core Files**: Read the specific files listed in Section II below. Do not re-read these if already loaded in the current session.
     4. **Determine the virtual environment**: Search the project root for common virtual environment names (venv, .venv, etc.), if needed ask the user for the correct path to the environment.
     5. **Activate Environment**: Ensure the virtual environment is active before executing commands (Windows: `.\.venv\Scripts\Activate.ps1`, then run as `.\.venv\Scripts\python.exe -m ...`). Create if one does not exist.
@@ -100,7 +102,7 @@ Before proposing the use of any file modification tool, and **especially before 
 * Ensure code is testable, secure, and minimally dependent on external libraries.
 * Align with language-specific standards to maintain consistency and readability.
 
-*Before generating **any** code, you **must** first load `execution_plugin.md`*
+*Before generating any code, you must first load `execution_worker_plugin.md`.* Code generation occurs in a **Worker** context: the orchestrating (Dispatcher) instance delegates each `Execution_*` task to a fresh Worker, which loads the Worker plugin before generating or modifying code.
 
 **Explicit Dependency Tracking (CRITICAL FOUNDATION)**: Maintain comprehensive dependency records in `module_relationship_tracker.md`, `doc_tracker.md`, and mini-trackers.
 * Dependency analysis using `show-keys`, `show-placeholders`, and `show-dependencies` commands is **MANDATORY** before any planning or action in Strategy and Execution phases.
@@ -175,7 +177,7 @@ next_phase: "Set-up/Maintenance"
 
 ## III. Recursive Chain-of-Thought Loop & Plugin Workflow
 
-**Workflow Entry Point & Plugin Loading:** Begin each CRCT session by reading `.clinerules/default-rules.md` (in the project root under the `.clinerules` directory) to determine `current_phase` and `last_action`. **Based on `next_phase`, load corresponding plugin from `.clinerules/`.** For example, if `.clinerules/default-rules.md` indicates `next_phase: Strategy`, load `strategy_dispatcher_plugin.md` *in conjunction with these Custom instructions*.
+**Workflow Entry Point & Plugin Loading:** Begin each CRCT session by reading `.clinerules/default-rules.md` (in the project root under the `.clinerules` directory) to determine `current_phase` and `last_action`. **Based on `next_phase`, load corresponding plugin from `.clinerules/`.** For example, if `.clinerules/default-rules.md` indicates `next_phase: Strategy`, load `strategy_dispatcher_plugin.md` *in conjunction with these Custom instructions*. The primary instance loads the phase's **dispatcher** plugin; Worker instances, when delegated via `use_subagents` or `<new_task>`, load the corresponding **worker** plugin (e.g., `strategy_worker_plugin.md`, `execution_worker_plugin.md`, `cleanup_consolidation_worker_plugin.md`, or `setup_worker.md`).
 
 **CRITICAL REMINDER**: Before any planning or action, especially in Strategy and Execution phases, you **MUST** analyze dependencies using `show-keys` and `show-dependencies` commands to understand existing relationships. **Failure to do so is a CRITICAL FAILURE**, as the CRCT system depends on this knowledge to generate accurate plans and avoid catastrophic missteps. Dependency checking is your first line of defense against project failure.
 
@@ -495,10 +497,10 @@ Located in `cline_utils/`. **All commands are executed via `python -m cline_util
 ## IX. Plugin Usage Guidance
 
 **Always check `.clinerules/default-rules.md` for `next_phase` and load the corresponding plugin.**
-* **Set-up/Maintenance**: Initial setup, adding modules/docs, periodic maintenance and dependency verification (`.clinerules/setup_maintenance_plugin.md`).
+* **Set-up/Maintenance**: Initial setup, adding modules/docs, periodic maintenance and dependency verification. Orchestrated by the primary instance (`.clinerules/setup_maintenance_plugin.md`), which delegates dependency verification to Worker instances (`.clinerules/setup_worker.md`).
 * **Strategy**: Orchestrated by a **Dispatcher** (`.clinerules/strategy_dispatcher_plugin.md`) which delegates detailed area planning to **Worker** instances (`.clinerules/strategy_worker_plugin.md`). Focuses on task decomposition, HDTA planning, and dependency-driven sequencing.
-* **Execution**: Task execution based on plans, code/file modifications (`.clinerules/execution_plugin.md`).
-* **Cleanup/Consolidation**: Post-execution organization, changelog grooming, temporary file cleanup (`.clinerules/cleanup_consolidation_plugin.md`).
+* **Execution**: Orchestrated by a Dispatcher (`.clinerules/execution_dispatcher_plugin.md`) which delegates each `Execution_*` task to fresh Worker instances (`.clinerules/execution_worker_plugin.md`). Focuses on verified, sequence-respecting task execution.
+* **Cleanup/Consolidation**: Orchestrated by a Dispatcher (`.clinerules/cleanup_consolidation_dispatcher_plugin.md`) which delegates batched verification/consolidation to Worker instances (`.clinerules/cleanup_consolidation_worker_plugin.md`). Focuses on verified consolidation and user-confirmed cleanup.
 
 ## X. Identifying Code Root Directories
 
