@@ -263,15 +263,25 @@ def handle_determine_dependency(args: argparse.Namespace) -> int:
             logger.warning(f"Failed to load token metadata: {e}")
 
     # Resolve source key
-    source_ki = resolve_key_global_instance_to_ki(args.source_key, global_map)
+    src_parts = args.source_key.split("#")
+    src_inst = (
+        int(src_parts[1]) if len(src_parts) > 1 and src_parts[1].isdigit() else None
+    )
+    source_ki = get_globally_resolved_key_info_for_cli(
+        src_parts[0], src_inst, global_map, "source"
+    )
     if not source_ki:
-        print(f"Error: Could not resolve source key '{args.source_key}'")
         return 1
 
     # Resolve target key
-    target_ki = resolve_key_global_instance_to_ki(args.target_key, global_map)
+    tgt_parts = args.target_key.split("#")
+    tgt_inst = (
+        int(tgt_parts[1]) if len(tgt_parts) > 1 and tgt_parts[1].isdigit() else None
+    )
+    target_ki = get_globally_resolved_key_info_for_cli(
+        tgt_parts[0], tgt_inst, global_map, "target"
+    )
     if not target_ki:
-        print(f"Error: Could not resolve target key '{args.target_key}'")
         return 1
 
     source_path = normalize_path(source_ki.norm_path)
@@ -835,45 +845,9 @@ def handle_add_dependency(args: argparse.Namespace) -> int:
             )
             return 1
 
-    matching_source_infos = [
-        info
-        for info in global_map.values()
-        if info.key_string.split("#")[0] == src_base_key_str
-    ]
-    if not matching_source_infos:
-        print(
-            f"Error: Base source key '{src_base_key_str}' not found in global key map."
-        )
-        return 1
-
-    matching_source_infos.sort(key=lambda ki: ki.norm_path)
-    resolved_source_ki: Optional[KeyInfo] = None
-    if src_user_global_instance_num is not None:
-        source_key_to_find = f"{src_base_key_str}#{src_user_global_instance_num}"
-        found_ki = next(
-            (ki for ki in matching_source_infos if ki.key_string == source_key_to_find),
-            None,
-        )
-        if found_ki:
-            resolved_source_ki = found_ki
-        else:
-            print(
-                f"Error: Source key '{source_key_arg_raw}' specifies an invalid global instance number."
-            )
-            print(f"Available instances for '{src_base_key_str}':")
-            for ki in matching_source_infos:
-                print(f"  - {ki.key_string} (Path: {ki.norm_path})")
-            return 1
-    else:
-        if len(matching_source_infos) > 1:
-            print(
-                f"Error: Source key '{src_base_key_str}' is globally ambiguous. Please specify which instance you mean using '#<num>':"
-            )
-            for ki in matching_source_infos:
-                print(f"  - {ki.key_string} (Path: {ki.norm_path})")
-            return 1
-        resolved_source_ki = matching_source_infos[0]
-
+    resolved_source_ki = get_globally_resolved_key_info_for_cli(
+        src_base_key_str, src_user_global_instance_num, global_map, "source"
+    )
     if not resolved_source_ki:
         return 1
 
@@ -913,68 +887,13 @@ def handle_add_dependency(args: argparse.Namespace) -> int:
                 )
                 continue
 
-        matching_target_infos = [
-            info
-            for info in global_map.values()
-            if info.key_string.split("#")[0] == tgt_base_key_str
-        ]
-        if not matching_target_infos:
-            print(
-                f"Error: Base target key '{tgt_base_key_str}' not found in global key map."
-            )
-            rejected_targets.append(
-                (tgt_key_arg_item_raw, "Base key not found in global map.")
-            )
-            continue
-
-        matching_target_infos.sort(key=lambda ki: ki.norm_path)
-        resolved_target_ki: Optional[KeyInfo] = None
-        if tgt_user_global_instance_num is not None:
-            target_key_to_find = f"{tgt_base_key_str}#{tgt_user_global_instance_num}"
-            found_ki = next(
-                (
-                    ki
-                    for ki in matching_target_infos
-                    if ki.key_string == target_key_to_find
-                ),
-                None,
-            )
-            if found_ki:
-                resolved_target_ki = found_ki
-            else:
-                print(
-                    f"Error: Target key '{tgt_key_arg_item_raw}' specifies an invalid global instance number."
-                )
-                print(f"Available instances for '{tgt_base_key_str}':")
-                for ki in matching_target_infos:
-                    print(f"  - {ki.key_string} (Path: {ki.norm_path})")
-                rejected_targets.append(
-                    (tgt_key_arg_item_raw, "Invalid global instance number.")
-                )
-                continue
-        else:
-            if len(matching_target_infos) > 1:
-                print(
-                    f"Error: Target key '{tgt_base_key_str}' is globally ambiguous. Please specify which instance you mean using '#<num>':"
-                )
-                for ki in matching_target_infos:
-                    print(f"  - {ki.key_string} (Path: {ki.norm_path})")
-                rejected_targets.append(
-                    (tgt_key_arg_item_raw, "Globally ambiguous key.")
-                )
-                continue
-            else:
-                resolved_target_ki = matching_target_infos[0]
-
+        resolved_target_ki = get_globally_resolved_key_info_for_cli(
+            tgt_base_key_str, tgt_user_global_instance_num, global_map, "target"
+        )
         if not resolved_target_ki:
-            # Safeguard — ambiguity/resolution logic above covers this, but be explicit.
-            if (
-                tgt_key_arg_item_raw,
-                "Could not be resolved globally.",
-            ) not in rejected_targets:
-                rejected_targets.append(
-                    (tgt_key_arg_item_raw, "Could not be resolved globally.")
-                )
+            rejected_targets.append(
+                (tgt_key_arg_item_raw, "Could not be resolved globally.")
+            )
             continue
 
         # Skip self-dependency
@@ -1419,39 +1338,9 @@ def handle_show_dependencies(args: argparse.Namespace) -> int:
             )
             return 1
 
-    # Resolve the user-provided key to a specific KeyInfo object (target_ki_to_show)
-    # This target_ki_to_show's path and global instance string will be the focus.
-    matching_source_infos = [
-        info
-        for info in current_global_map.values()
-        if info.key_string.split("#")[0] == base_key_to_show
-    ]
-    if not matching_source_infos:
-        print(
-            f"Error: Base source key '{base_key_to_show}' not found in global key map."
-        )
-        return 1
-
-    matching_source_infos.sort(key=lambda ki: ki.norm_path)
-    target_ki_to_show: Optional[KeyInfo] = None
-    if user_instance_num_to_show is not None:
-        if 0 < user_instance_num_to_show <= len(matching_source_infos):
-            target_ki_to_show = matching_source_infos[user_instance_num_to_show - 1]
-        else:
-            print(
-                f"Error: Source key '{user_provided_key_arg}' specifies an invalid global instance number. Max is {len(matching_source_infos)}."
-            )
-            return 1
-    elif len(matching_source_infos) > 1:
-        print(
-            f"Error: Source key '{base_key_to_show}' is globally ambiguous. Please specify which instance you mean using '#<num>':"
-        )
-        for i, ki in enumerate(matching_source_infos):
-            print(f"  [{i+1}] {ki.key_string} (Path: {ki.norm_path})")
-        return 1
-    else:
-        target_ki_to_show = matching_source_infos[0]
-
+    target_ki_to_show = get_globally_resolved_key_info_for_cli(
+        base_key_to_show, user_instance_num_to_show, current_global_map, "source"
+    )
     if not target_ki_to_show:
         return 1
 
@@ -1472,9 +1361,9 @@ def handle_show_dependencies(args: argparse.Namespace) -> int:
     )
 
     # Pre-calculate global counts for display formatting
-    global_key_string_counts: defaultdict[str, int] = defaultdict(int)
+    global_base_key_counts: defaultdict[str, int] = defaultdict(int)
     for ki_count in current_global_map.values():
-        global_key_string_counts[ki_count.key_string] += 1
+        global_base_key_counts[ki_count.key_string.split("#")[0]] += 1
 
     all_tracker_paths = find_all_tracker_paths(config, project_root)
 
@@ -1613,7 +1502,7 @@ def handle_show_dependencies(args: argparse.Namespace) -> int:
             # Prepare display name for the interacting key (use base key if not globally duplicated)
             interacting_base_key = interacting_key_gi.split("#")[0]
             display_name_interacting = interacting_key_gi
-            if global_key_string_counts.get(interacting_base_key, 0) <= 1:
+            if global_base_key_counts.get(interacting_base_key, 0) <= 1:
                 display_name_interacting = interacting_base_key
 
             token_count = token_map.get(interacting_ki.norm_path)
@@ -1658,10 +1547,10 @@ def handle_show_keys(args: argparse.Namespace) -> int:
         global_map_for_instance_check = global_map
 
     # Pre-calculate global counts for each base key string to identify duplicates
-    global_key_string_counts: defaultdict[str, int] = defaultdict(int)
+    global_base_key_counts: defaultdict[str, int] = defaultdict(int)
     if global_map:
         for ki in global_map.values():
-            global_key_string_counts[ki.key_string] += 1
+            global_base_key_counts[ki.key_string.split("#")[0]] += 1
 
     try:
         with open(tracker_path, "r", encoding="utf-8") as f:
@@ -1700,9 +1589,9 @@ def handle_show_keys(args: argparse.Namespace) -> int:
 
             # Determine if this key_str_in_file is globally duplicated and add #GI
             global_instance_suffix = ""
-            # key_str_in_file could be "KEY" or "KEY#GI". We need its base key for global_key_string_counts.
+            # key_str_in_file could be "KEY" or "KEY#GI". We need its base key for global_base_key_counts.
             base_key_from_label = key_str_in_file.split("#")[0]
-            if global_map and global_key_string_counts.get(base_key_from_label, 0) > 1:
+            if global_map and global_base_key_counts.get(base_key_from_label, 0) > 1:
                 key_info_for_this_entry = global_map.get(path_str_in_file)
                 if key_info_for_this_entry:  # Check if path is in global map
                     # Get the canonical KEY#GI for this path from the global map

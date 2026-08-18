@@ -87,7 +87,9 @@ def get_globally_resolved_key_info_for_cli(
     This is now a simple pass-through since the global map is authoritative.
     """
     key_to_find = (
-        f"{base_key_str}#{user_instance_num}" if user_instance_num else base_key_str
+        f"{base_key_str}#{user_instance_num}"
+        if user_instance_num is not None
+        else base_key_str
     )
     for ki in global_map.values():
         if ki.key_string == key_to_find:
@@ -95,23 +97,38 @@ def get_globally_resolved_key_info_for_cli(
 
     # Handle ambiguity or not found
     matching_infos = [
-        info for info in global_map.values() if info.key_string.startswith(base_key_str)
+        info
+        for info in global_map.values()
+        if info.key_string.split("#")[0] == base_key_str
     ]
     if not matching_infos:
         print(
             f"Error: Base {key_role} key '{base_key_str}' not found in global key map."
         )
         return None
-    if len(matching_infos) > 1 and not user_instance_num:
+
+    matching_infos.sort(key=lambda k: k.norm_path)
+
+    if user_instance_num is not None:
+        print(
+            f"Error: {key_role.capitalize()} key '{base_key_str}#{user_instance_num}' specifies an invalid global instance number."
+        )
+        print(f"Available instances for '{base_key_str}':")
+        for ki in matching_infos:
+            print(f"  - {ki.key_string} (Path: {ki.norm_path})")
+        return None
+
+    if len(matching_infos) > 1:
         print(
             f"Error: {key_role.capitalize()} key '{base_key_str}' is globally ambiguous. Please specify which instance you mean using '#<num>':"
         )
-        for i, ki in enumerate(sorted(matching_infos, key=lambda k: k.norm_path)):
+        for i, ki in enumerate(matching_infos):
             print(
                 f"  [{i+1}] {ki.key_string} (Path: {ki.norm_path})  (Use as '{ki.key_string}')"
             )
         return None
-    return None  # Should be found in the loop above
+
+    return matching_infos[0]
 
 
 # --- END OF GLOBAL INSTANCE RESOLUTION HELPERS ---

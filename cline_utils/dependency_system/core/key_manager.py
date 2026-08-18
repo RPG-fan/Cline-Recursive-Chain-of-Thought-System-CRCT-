@@ -138,9 +138,9 @@ def _apply_global_instance_suffixes(
 ) -> Dict[str, KeyInfo]:
     """
     Ensure that for any base key that appears more than once globally,
-    each KeyInfo.key_string is suffixed with a stable '#<n>' instance number.
+    each KeyInfo.key_string is suffixed with a sequential '#<n>' instance number (1..N)
+    based on deterministic alphabetical order of the normalized path.
     If only one occurrence exists for a base key, it remains unsuffixed.
-    Instance numbers are stabilized using the old_map whenever possible.
     """
     if not path_to_key_info:
         return path_to_key_info
@@ -150,14 +150,6 @@ def _apply_global_instance_suffixes(
     for ki in path_to_key_info.values():
         base_key = _strip_instance_suffix(ki.key_string)
         base_key_to_kis[base_key].append(ki)
-
-    # Build previous path -> instance number map if old_map provided
-    prev_instance_by_path: Dict[str, int] = {}
-    if old_map:
-        for old_path, old_ki in old_map.items():
-            inst = _parse_instance_suffix(old_ki.key_string)
-            if inst is not None and inst > 0:
-                prev_instance_by_path[normalize_path(old_path)] = inst
 
     # We will create updated KeyInfos only where necessary
     updated_map: Dict[str, KeyInfo] = {}
@@ -177,40 +169,10 @@ def _apply_global_instance_suffixes(
                 updated_map[ki.norm_path] = new_ki
             continue
 
-        # Duplicated base key: assign instance numbers
-        # Use stable ordering: sort by norm_path
+        # Duplicated base key: assign sequential instance numbers 1..N based on sorted norm_path
         kis_sorted = sorted(kis, key=lambda k: k.norm_path)
-
-        # First, try to reuse previous instance numbers
-        assigned_instances: Dict[str, int] = {}  # path -> instance
-        used_numbers: Set[int] = set()
-        for ki in kis_sorted:
-            prev_inst = prev_instance_by_path.get(ki.norm_path)
-            if (
-                prev_inst is not None
-                and prev_inst > 0
-                and prev_inst not in used_numbers
-            ):
-                assigned_instances[ki.norm_path] = prev_inst
-                used_numbers.add(prev_inst)
-
-        # Then assign remaining, using the next available positive integers
-        next_num = 1
-        for ki in kis_sorted:
-            if ki.norm_path in assigned_instances:
-                continue
-            while next_num in used_numbers:
-                next_num += 1
-            assigned_instances[ki.norm_path] = next_num
-            used_numbers.add(next_num)
-            next_num += 1
-
-        # Update KeyInfos with suffixes
-        for ki in kis_sorted:
-            inst = assigned_instances.get(ki.norm_path, None)
-            if inst is None:
-                continue
-            desired_key = f"{base_key}#{inst}"
+        for idx, ki in enumerate(kis_sorted, start=1):
+            desired_key = f"{base_key}#{idx}"
             if ki.key_string != desired_key:
                 new_ki = KeyInfo(
                     desired_key, ki.norm_path, ki.parent_path, ki.tier, ki.is_directory
@@ -922,6 +884,12 @@ def get_path_from_key(
     matching_infos = [
         info for info in path_to_key_info.values() if info.key_string == key_string
     ]
+    if not matching_infos and "#" not in key_string:
+        matching_infos = [
+            info
+            for info in path_to_key_info.values()
+            if info.key_string.split("#")[0] == key_string
+        ]
 
     if not matching_infos:
         logger.debug(f"Key string '{key_string}' not found in path_to_key_info map.")
