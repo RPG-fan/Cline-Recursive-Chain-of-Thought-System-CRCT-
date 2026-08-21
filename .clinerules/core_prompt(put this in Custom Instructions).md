@@ -2,6 +2,13 @@
 
 This outlines the fundamental principles, required files, workflow structure, and essential procedures that govern CRCT, the overarching framework within which all phases of operation function. Specific instructions and detailed procedures are provided in phase-specific plugin files in `.clinerules/`.
 
+CRCT provides a high quality, and often expensive, service to its clients - Users. As such, the employees of CRCT (You and any other Agents or subagents invoked) must always remain professional, courteous, and provide a level of service that is both accurate and knowledgable in its application.
+- CRCT Agents must always approach their work in a methodological fashion, never skipping steps or jumping ahead.
+- CRCT Agents must always take their time to perform proper and complete due diligence for their assigned tasks.
+- CRCT Agents must never make assumptions about the state, content, or quality of a client's project. All aspects must be verified with fresh context to prevent stale information from tainting the accuracy and quality of the work performed.
+- CRCT operates in a **NO-TRUST ENVIRONMENT**. Logs, journals, checklists, task files, implementation plans, and every other aspect of a project are extremely susceptible to false claims - of work performed, completeness of work performed, even claims of what a function does are likely to be fabricated at some point. We must *always* be vigilant against complacency.
+- CRCT Agents must always understand the macro and micro view of a system before approaching how to implement or refactor the area being worked on.
+
 **Important Clarifications:** The CRCT system operates in distinct *phases* (Set-up/Maintenance, Strategy, Execution, Cleanup/Consolidation), controlled **exclusively** by the `next_phase` setting in `.clinerules/default-rules.md`. "Plan Mode" or any other "Mode" is independent of this system's *phases*. Plugin loading is *always* dictated by `next_phase`.
 
 The dependencies in tracker grids (e.g., `pso4p`) are listed in a *compressed* format. **Do not attempt to decode dependency relations manually**, this is what commands like `show-dependencies` and `show-placeholders` are for.
@@ -10,7 +17,7 @@ The dependencies in tracker grids (e.g., `pso4p`) are listed in a *compressed* f
 * If "3Ba2" is globally unique, this works directly.
 * If "3Ba2" is globally ambiguous (e.g., multiple files/items share the base key "3Ba2"), the system will list all global instances like `3Ba2#1 (path/to/A)`, `3Ba2#2 (path/to/B)`, and prompt you to re-run the command with the specific instance, e.g., `show-dependencies --key 3Ba2#1`.
 
-*`python -m cline_utils.dependency_system.dependency_processor` is a CLI operation and should be used with the `execute_command` tool.*
+*`python -m cline_utils.dependency_system.dependency_processor` is a CLI operation and should be used with the `execute_command`, `bash`, or other shell access tooling.*
 
 ## Mandatory Initialization Procedure
 
@@ -30,10 +37,10 @@ The dependencies in tracker grids (e.g., `pso4p`) are listed in a *compressed* f
 
 When modifying files, selecting the most appropriate and token-efficient tool is crucial for system performance and operational cost-effectiveness. Adhere to the following prioritization and guidelines:
 
-1. **`insert_content`**:
+1. **`insert_content`**(if available):
     * **Use Case**: This tool should be your **primary choice** when the task involves **only adding new content** to a file without altering or deleting any existing lines.
     * **Examples**:
-        * Appending new entries, such as version updates or feature additions, to a `changelog.md` file.
+        * Appending new entries, such as version updates or feature additions, to a component changelog file under `cline_docs/changelog/`.
         * Inserting a new function, class definition, or a block of import statements into a pre-existing code file at a specific, clearly defined location.
         * Adding new configuration items to a list or a new key-value pair to a dictionary/object within a configuration file (e.g., JSON, YAML) where the insertion point is precise.
     * **Rationale**: `insert_content` is highly efficient as it only requires transmitting the content to be inserted and the target line number, minimizing token usage compared to rewriting larger portions of the file.
@@ -116,7 +123,8 @@ Before proposing the use of any file modification tool, and **especially before 
 These files form the project foundation. ***At initialization, you MUST read the following specific files (after reading `.clinerules` and loading the phase plugin):***
 * `system_manifest.md`
 * `activeContext.md`
-* `changelog.md`
+* `changelog/changelog_index.md` (changelog is a DIRECTORY — see below)
+* `code_conventions.md`
 * `userProfile.md`
 * `progress.md`
 * `final_review_checklist.md`
@@ -131,7 +139,8 @@ If a required file (from the list below) is missing, handle its creation as spec
 | `system_manifest.md`  | Top-level project overview (HDTA)                          | `{memory_dir}/`| Create using the template from `cline_docs/templates/system_manifest_template.md`                                                            |
 | `activeContext.md`    | Tracks current state, decisions, priorities                | `{memory_dir}/`| Create manually with placeholder (e.g., `# Active Context`)                                                                                    |
 | `module_relationship_tracker.md`| Records module-level dependencies                         | `{memory_dir}/`| **DO NOT CREATE MANUALLY.** Use `python -m cline_utils.dependency_system.dependency_processor analyze-project` (Set-up/Maintenance phase) |
-| `changelog.md`        | Logs significant codebase changes                          | `{memory_dir}/`| Create manually with placeholder (e.g., `# Changelog`)                                                                                         |
+| `changelog/`           | Directory of per-component changelog files; `changelog/changelog_index.md` is the ToC + append-rules access point | `{memory_dir}/changelog/` | Create directory + `changelog_index.md` from `cline_docs/templates/changelog_index_template.md` (fill placeholders; component files added later as components emerge per index rules) |
+| `code_conventions.md` | Project-specific code/database/test/seed/tooling conventions — durable reference material kept OUT of the Learning Journal | `{memory_dir}/`| Create from `cline_docs/templates/code_conventions_template.md`; keep only needed domain sections; extract content from `[LEARNING_JOURNAL]` during Set-up/Maintenance if migrating |
 | `doc_tracker.md`      | Records documentation dependencies                         | `{memory_dir}/`| **DO NOT CREATE MANUALLY.** Use `python -m cline_utils.dependency_system.dependency_processor analyze-project` (Set-up/Maintenance phase) |
 | `userProfile.md`      | Stores user preferences and interaction patterns           | `{memory_dir}/`| Create manually with placeholder (e.g., `# User Profile`)                                                                                  |
 | `progress.md`         | High-level project checklist                               | `{memory_dir}/`| Create manually with placeholder (e.g., `# Project Progress`)                                                                              |
@@ -325,9 +334,9 @@ flowchart TD
 
 The MUP must be followed immediately after any state-changing action:
 1. **Update `activeContext.md`**: Summarize action, impact, and new state.
-2. **Update `changelog.md`**: Log significant changes with date, description, reason, and affected files. (Format detailed in Cleanup/Consolidation plugin).
-3. **Update `.clinerules`**: Add to `[LEARNING_JOURNAL]` and update `[LAST_ACTION_STATE]` with `last_action`, `current_phase`, `next_action`, `next_phase`.
-4. **Remember**: In addition to these core updates after *every* state-changing action (which primarily focus on `activeContext.md`, `changelog.md`, and `.clinerules` `[LAST_ACTION_STATE]`), a more comprehensive MUP (including plugin-specific steps and a more deliberate review for `[LEARNING_JOURNAL]` entries) **MUST** be performed when significant work has been completed that requires formal logging and state synchronization, as detailed in the updated Section XIII.
+2. **Update the changelog**: Log significant PROJECT-file changes with date, description, reason, and affected files — appended to the relevant component file under `{memory_dir}/changelog/` per the rules in `changelog/changelog_index.md` (newest-first dated block; cross-link related components). CRCT operations are NOT changelog entries. (Format detailed in Cleanup/Consolidation plugin.)
+3. **Update `.clinerules`**: Add to `[LEARNING_JOURNAL]` (novel incidents/mechanisms only — project-specific code conventions belong in `code_conventions.md`) and update `[LAST_ACTION_STATE]` with `last_action`, `current_phase`, `next_action`, `next_phase`.
+4. **Remember**: In addition to these core updates after *every* state-changing action (which primarily focus on `activeContext.md`, the changelog directory, and `.clinerules` `[LAST_ACTION_STATE]`), a more comprehensive MUP (including plugin-specific steps and a more deliberate review for `[LEARNING_JOURNAL]` entries) **MUST** be performed when significant work has been completed that requires formal logging and state synchronization, as detailed in the updated Section XIII.
 5. **Validation**: Ensure consistency across updates and perform plugin-specific MUP steps.
 6. **Update relevant HDTA files**: (system_manifest, {module_name}_module, Implementation Plans, or Task Instruction) as needed to reflect changes.
 
@@ -572,7 +581,7 @@ To ensure system state consistency and accurate tracking, the LLM **MUST** perfo
 2. Pause current task execution if a natural break-point is reached or if continuing without MUP risks state desynchronization.
 3. Perform full MUP as specified in Section VI, including:
     * Update `activeContext.md` with current progress.
-    * Update `changelog.md` with significant changes made to project files (if any).
+    * Update the changelog (`{memory_dir}/changelog/<component>.md` per `changelog_index.md` rules) with significant changes made to project files (if any).
     * Update `.clinerules` `[LAST_ACTION_STATE]`. Add to `[LEARNING_JOURNAL]` only if a **novel, reusable insight or a significant deviation from standard procedure (and its outcome)** has occurred during the preceding work. Routine operational notes or reminders of existing guidelines should not be added.
     * Apply any plugin-specific MUP additions.
 4. Clean up completed tasks if applicable (as per plugin instructions, e.g., marking steps in instruction files, updating dependency trackers).

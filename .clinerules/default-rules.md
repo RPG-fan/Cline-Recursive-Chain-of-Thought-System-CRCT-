@@ -162,6 +162,7 @@ This section is dedicated to specific, critical corrections of previously held i
 ---
 
 **IMPORTANT**
+
 1. Understand the Objective: Clearly define the goal of the current step.
 2. Analyze the Error: Understand the error message and its context.
 3. Formulate a Plan: Develop a plan to address the error, step-by-step.
@@ -169,5 +170,6 @@ This section is dedicated to specific, critical corrections of previously held i
 4. Execute the Plan (Tool Use): Use the appropriate tool to execute *one* step of the plan.
 5. Validate the Result: Check if the tool use was successful and if it addressed the error.
 6. Iterate: If the error persists, go back to step 2 and refine the plan based on the new information.
-**The Changelog is for tracking changes to the *project's* files, not CRCT operations. CRCT operations are tracked in the HDTA documents.**
-**Tracker files serve as their own changelog, dependency operations do not belong in Changelog.md**
+
+**The Changelog tracks changes to the *project's* files, not CRCT operations (CRCT operations are tracked in the HDTA documents and dispatch logs). The changelog lives at `cline_docs/changelog/` as a DIRECTORY: `changelog_index.md` (ToC + append rules) + one file per major component. Append cycle entries to the relevant component file per the index rules; cross-link related components with markdown links. Do not recreate a single monolithic changelog file.**
+**Tracker files serve as their own changelog; dependency operations do not belong in the changelog. Project-specific code conventions live in `cline_docs/code_conventions.md` — keep `[LEARNING_JOURNAL]` lean per its curation standard.**

@@ -35,7 +35,7 @@ cleanup itself.
 
 ### Exiting — Completion Criteria
 - Consolidation Areas 1–7 (Section II) complete: all batches verified, all consolidation
-  notes integrated, changelog reorganized, Learning Journal refined, `activeContext.md`
+  notes integrated, changelog directory audited/organized (per changelog_index.md rules), Learning Journal + code_conventions.md refined, `activeContext.md`
   reflects the consolidated baseline.
 - Cleanup complete: targets identified from verified outputs, archive commands confirmed
   and executed, removal verified with `list_files`.
@@ -50,7 +50,7 @@ Exit state (typical):
 ## I. Phase Objective & Guiding Principles
 
 **Objective:** Systematically verify ALL project artifacts via fresh-context Workers,
-consolidate lasting knowledge into persistent documentation, reorganize the changelog,
+consolidate lasting knowledge into persistent documentation, organize the changelog directory,
 and clean up obsolete files — preserving verified history and discarding only what is
 confirmed complete and consolidated.
 
@@ -74,7 +74,7 @@ do not concern yourself with context or time considerations.
 ### Step 0: Initialize Consolidation Cycle & Build Inventory
 
 **Action A (Core Initialization):** Read `default-rules.md`, `activeContext.md`,
-`changelog.md` (header structure), `progress.md`. State assessment.
+`changelog/changelog_index.md` (+ skim component files' newest blocks), `progress.md`. State assessment.
 
 **Action B (Build Comprehensive Inventory):**
 1. Review `cline_docs/templates/` for HDTA structure expectations.
@@ -239,7 +239,7 @@ Be mindful of shell-specific syntax for multiple directories or force options.)*
 ### Step 9: Final Checks and Exit
 
 Verify all Completion Criteria. If met: final MUP — verify `activeContext.md` and
-`changelog.md` state, update `default-rules.md` exit state, add Learning Journal insights,
+the changelog directory state, update `default-rules.md` exit state, add Learning Journal insights,
 PAUSE for user action. If unmet: state failures, determine corrective loop (back to the
 relevant Area or cleanup action), update `default-rules.md` accordingly, continue.
 
@@ -267,7 +267,7 @@ user-confirmed archival → Step 9 exit.
   - All Task Instruction files (from `tasks/` and `cline_docs/archive/`)
   - All Implementation Plan files (from Code Root directories)
   - All Strategic Tracking documents (roadmaps, checklists from `cline_docs/`, etc.)
-  - Core state files: `activeContext.md`, `changelog.md` (entire history), `progress.md`
+  - Core state files: `activeContext.md`, the changelog directory (`changelog/changelog_index.md` + component files), `code_conventions.md`, `progress.md`
 - **Actions (All Mandatory & CRITICAL)**:
   1. Review HDTA templates; List all Task Instructions, Impl. Plans, Strategic Trackers.
      Process in batches of ≤10 files; **fully process each batch as a standalone Worker task**.
@@ -284,9 +284,9 @@ user-confirmed archival → Step 9 exit.
   6. Identify ALL information for consolidation from the above reviews.
   7. Update HDTA docs (Type F): `system_manifest.md`, `*_module.md`, `implementation_plan_*.md`.
   8. Update Core Files: `progress.md`, `userProfile.md`.
-  9. Review, Refine, & Update `default-rules.md` `[LEARNING_JOURNAL]` (Type E: group,
+  9. Review, Refine, & Update `default-rules.md` `[LEARNING_JOURNAL]` + `code_conventions.md` curation (Type E: group,
      combine, remove inappropriate, add new).
-  10. Reorganize ENTIRE `changelog.md` (Type D: Parse → Group by Component → Sort by Date
+  10. Audit & organize the changelog DIRECTORY per `changelog/changelog_index.md` rules (Type D: audit → Group by Component → Sort by Date
       → Format → Write).
   11. Update `activeContext.md` to reflect fully consolidated project baseline.
 - **Tools**: `list_files`, `read_file`, `write_to_file`, `apply_diff`, `<new_task>`.

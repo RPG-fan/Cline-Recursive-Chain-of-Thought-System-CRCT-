@@ -38,10 +38,11 @@
 
 **Procedure:**
 
-1. **Check for Existence**: Check if each required file listed in Core Prompt Section II (`.clinerules`, `system_manifest.md`, `activeContext.md`, `module_relationship_tracker.md`, `changelog.md`, `doc_tracker.md`, `userProfile.md`, `progress.md`) exists in its specified location.
+1. **Check for Existence**: Check if each required file listed in Core Prompt Section II (`.clinerules`, `system_manifest.md`, `activeContext.md`, `module_relationship_tracker.md`, the changelog directory (`changelog/changelog_index.md`), `code_conventions.md`, `doc_tracker.md`, `userProfile.md`, `progress.md`) exists in its specified location.
 2. **Identify Code and Documentation Directories**: If `[CODE_ROOT_DIRECTORIES]` or `[DOC_DIRECTORIES]` in `.clinerules` are empty or missing, **stop** other initialization and follow the procedures in Core Prompt Sections X and XI to identify and populate these sections first. Update `.clinerules` and perform MUP. Resume initialization checks afterwards.
 3. **Trigger Creation of Missing Files:**
-    * **Manual Creation Files** (`.clinerules`, `activeContext.md`, `changelog.md`, `userProfile.md`, `progress.md`): If missing, use `write_to_file` to create them with minimal placeholder content as described in Core Prompt Section II table. State: "File `{file_path}` missing. Creating with placeholder content."
+    * **Manual Creation Files** (`.clinerules`, `activeContext.md`, `userProfile.md`, `progress.md`, `code_conventions.md`, plus the changelog DIRECTORY (`changelog/changelog_index.md` with ToC + append rules + component routing keywords)): If missing, use `write_to_file` to create them with minimal placeholder content as described in Core Prompt Section II table. State: "File `{file_path}` missing. Creating with placeholder content."
+        * **Template-based creation:** For `code_conventions.md` and the changelog model, use the generic templates as the base — `cline_docs/templates/code_conventions_template.md` and `cline_docs/templates/changelog_index_template.md`. Copy the template, fill its `{placeholders}`, keep only the domain/section skeletons the project actually needs, and strip the instruction comments. The changelog index is created together with its directory; component changelog files are added later as components emerge (per the index's §Component Routing + Append Rules), NOT pre-created empty.
         * Example Initial `.clinerules` (if creating):
 
             ```markdown

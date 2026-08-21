@@ -52,7 +52,7 @@ Triggered by a Dispatcher message. Proceed directly to Section I.
 1. `read_file` the task file.
 2. Verify outcome manually:
    - Execution tasks: examine the target artifact (`read_file` the code/doc, or
-     `list_files` for existence). Consult `changelog.md` entries if helpful.
+     `list_files` for existence). Consult `changelog/` component-file entries (via `changelog_index.md`) if helpful.
    - Strategy tasks: confirm the planned output (document, analysis, requirements) exists
      and meets the task's objectives.
 3. If NOT verified: update the task file status to invalidate "Completed"; record the
@@ -78,22 +78,29 @@ Triggered by a Dispatcher message. Proceed directly to Section I.
    for shared docs go to the Dispatcher; in-batch tracker files you may edit).
 3. Extract insights; append to `consolidation_notes.md`.
 
-**Type D — Changelog Reorganization** (single job):
-1. `read_file` the full `changelog.md`.
-2. Parse entries (Date, Summary, Description, Impact, Files Modified).
-3. Determine primary component per entry from file paths (module, documentation category,
-   CRCT System, Cross-Cutting, General).
-4. Group by component; sort entries newest-first within each group.
-5. Reconstruct the full file: `# Changelog`, component headings, preserved entry structure,
-   `---` separators. Overwrite with `write_to_file` (justified: complete restructure).
+**Type D — Changelog Directory Reorganization** (single job):
+1. `read_file` `changelog/changelog_index.md`, then every component file it lists.
+2. Audit organization: entries sitting in the wrong component file, missing dated-block
+   structure (`### <date>` newest-first within each file), missing cross-links between
+   related components, index ToC rows stale (section counts / latest-entry dates).
+3. Produce in your Worker Output file: per-file corrections to apply (moves of misfiled
+   sections between component files with their exact line ranges, index table updates,
+   any NEW component file proposals with routing keyword). DO NOT rewrite entry prose —
+   migration is verbatim; history is never paraphrased or dropped.
+4. The Dispatcher applies corrections (or dispatches per-component extraction agents using
+   the one-agent-per-component + coverage-audit pattern for large migrations).
 
-**Type E — Learning Journal Refinement** (single job):
-1. Read `[LEARNING_JOURNAL]` from `default-rules.md` (READ ONLY — do not write
-   `default-rules.md` yourself).
-2. Produce in your Worker Output file the refined journal: combined duplicates, removed
-   granular/transient entries, clarified wording, plus NEW entries sourced from
-   `consolidation_notes.md`.
-3. The Dispatcher applies the refined journal to `default-rules.md`.
+**Type E — Learning Journal + Code Conventions Refinement** (single job):
+1. Read `[LEARNING_JOURNAL]` from `default-rules.md` and `code_conventions.md`
+   (READ ONLY — do not write `default-rules.md` yourself).
+2. Curation standard (2026-08-21): the journal carries ONLY genuinely novel incidents,
+   mechanisms, or counter-intuitive findings — prune prompt/plugin restatements and
+   standard-practice code knowledge; project-specific code/database/test/seed/tooling
+   conventions MOVE to `code_conventions.md` (organized under its domain sections).
+3. Produce in your Worker Output file: the refined journal (combined duplicates, removed
+   restatements, clarified wording, new entries sourced from `consolidation_notes.md`)
+   AND proposed `code_conventions.md` additions/extractions.
+4. The Dispatcher applies both to `default-rules.md` and `code_conventions.md`.
 
 **Type F — HDTA Document Update** (per assigned document):
 1. `read_file` the target document (`system_manifest.md`, `*_module.md`, or
