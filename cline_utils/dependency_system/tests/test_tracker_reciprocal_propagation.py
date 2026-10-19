@@ -111,5 +111,6 @@ def test_update_tracker_direct_reciprocal_suggestions_write_both_directions(
     row_map = dict(rows)
 
     assert headers == ["1A", "1B"]
-    assert row_map["1A"] == compress("ox")
-    assert row_map["1B"] == compress("xo")
+    # '>' from 1A plus its '<' reciprocal is one directional edge, not a mutual one.
+    assert row_map["1A"] == compress("o>")
+    assert row_map["1B"] == compress("<o")

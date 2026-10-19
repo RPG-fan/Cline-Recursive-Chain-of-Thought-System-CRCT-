@@ -2451,11 +2451,16 @@ def update_tracker(
                     current_row_ki = path_to_key_info.get(target_row_path)
                     if not current_row_ki and new_global_key_for_row:
                         for p, ki in path_to_key_info.items():
-                            if ki.key_string == new_global_key_for_row and p in final_path_to_new_idx:
+                            if (
+                                ki.key_string == new_global_key_for_row
+                                and p in final_path_to_new_idx
+                            ):
                                 current_row_ki = ki
                                 break
                     if current_row_ki:
-                        new_final_row_idx = final_path_to_new_idx.get(current_row_ki.norm_path)
+                        new_final_row_idx = final_path_to_new_idx.get(
+                            current_row_ki.norm_path
+                        )
 
                 if new_final_row_idx is None:
                     continue
@@ -2498,11 +2503,16 @@ def update_tracker(
                             current_col_ki = path_to_key_info.get(target_col_path)
                             if not current_col_ki and new_global_key_for_col:
                                 for p, ki in path_to_key_info.items():
-                                    if ki.key_string == new_global_key_for_col and p in final_path_to_new_idx:
+                                    if (
+                                        ki.key_string == new_global_key_for_col
+                                        and p in final_path_to_new_idx
+                                    ):
                                         current_col_ki = ki
                                         break
                             if current_col_ki:
-                                new_final_col_idx = final_path_to_new_idx.get(current_col_ki.norm_path)
+                                new_final_col_idx = final_path_to_new_idx.get(
+                                    current_col_ki.norm_path
+                                )
 
                         if new_final_col_idx is None:
                             continue
@@ -2622,6 +2632,9 @@ def update_tracker(
 
         # This flag tracks if any forced suggestion was "actioned" enough to update metadata and potentially the timestamp
         any_forced_suggestion_processed_for_metadata = False
+        # Cell pairs promoted to a mutual 'x' during this pass; their mirror
+        # suggestion must not overwrite the 'x' with a directional char.
+        mutual_pairs_this_pass: Set[Tuple[int, int]] = set()
 
         for (
             src_key_global_instance_str,
@@ -2711,24 +2724,44 @@ def update_tracker(
                     tgt_local_idx
                 ]
                 final_char_to_set_in_grid = dep_char_sugg
+                promoted_to_mutual = False
 
-                if final_char_to_set_in_grid in ("<", ">"):
+                if final_char_to_set_in_grid in ("<", ">") and (
+                    force_apply_suggestions or existing_char_in_grid != "n"
+                ):
                     char_in_reverse_cell = temp_decomp_grid_rows[tgt_local_idx][
                         src_local_idx
                     ]
-                    if (
-                        final_char_to_set_in_grid == ">" and char_in_reverse_cell == "<"
-                    ) or (
-                        final_char_to_set_in_grid == "<" and char_in_reverse_cell == ">"
+                    # '<' in [A][B] and '>' in [B][A] is the normal mirrored encoding
+                    # of ONE edge (A depends on B). A genuine mutual dependency is
+                    # formed when the reverse cell already holds the same arrow, or
+                    # when the forward cell itself already holds the opposite arrow.
+                    has_reverse_edge = (
+                        final_char_to_set_in_grid == char_in_reverse_cell
+                        or (
+                            existing_char_in_grid in ("<", ">")
+                            and existing_char_in_grid != final_char_to_set_in_grid
+                        )
+                    )
+                    if has_reverse_edge and (
+                        force_apply_suggestions or char_in_reverse_cell != "n"
                     ):
                         logger.debug(
                             f"    Mutual dependency formed for {src_ki_in_this_tracker.norm_path} <-> {tgt_ki_in_this_tracker.norm_path}. Upgrading to 'x'."
                         )
                         final_char_to_set_in_grid = "x"
-                        if temp_decomp_grid_rows[tgt_local_idx][src_local_idx] != "x":
-                            temp_decomp_grid_rows[tgt_local_idx][src_local_idx] = "x"
-                            suggestion_applied_flag = True
-                            suggestion_applied_count += 1
+                        promoted_to_mutual = True
+
+                if (
+                    dep_char_sugg in ("<", ">")
+                    and (
+                        min(src_local_idx, tgt_local_idx),
+                        max(src_local_idx, tgt_local_idx),
+                    )
+                    in mutual_pairs_this_pass
+                    and final_char_to_set_in_grid != "x"
+                ):
+                    continue  # mirror of an edge already promoted to 'x' in this pass
 
                 apply_this_suggestion_to_cell = False
                 if force_apply_suggestions:
@@ -2772,6 +2805,18 @@ def update_tracker(
                         logger.debug(
                             f"    Applied to grid (forward): {src_ki_in_this_tracker.norm_path} -> {tgt_ki_in_this_tracker.norm_path} = '{final_char_to_set_in_grid}'"
                         )
+
+                    if promoted_to_mutual:
+                        mutual_pairs_this_pass.add(
+                            (
+                                min(src_local_idx, tgt_local_idx),
+                                max(src_local_idx, tgt_local_idx),
+                            )
+                        )
+                        if temp_decomp_grid_rows[tgt_local_idx][src_local_idx] != "x":
+                            temp_decomp_grid_rows[tgt_local_idx][src_local_idx] = "x"
+                            suggestion_applied_flag = True
+                            suggestion_applied_count += 1
 
                     # Populate metadata if forced (even if char was same)
                     if force_apply_suggestions:
