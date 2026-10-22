@@ -4,6 +4,7 @@ from cline_utils.dependency_system.core.dependency_grid import compress, decompr
 from cline_utils.dependency_system.core.key_manager import KeyInfo
 from cline_utils.dependency_system.io import update_main_tracker
 from cline_utils.dependency_system.io.tracker_io import update_tracker
+from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.tracker_batch_collector import (
     TrackerBatchCollector,
     apply_reciprocal_dependencies_to_grid,
@@ -83,6 +84,17 @@ def test_update_tracker_direct_reciprocal_suggestions_write_both_directions(
     source = _key("1A", tmp_path / "a", directory=True)
     target = _key("1B", tmp_path / "b", directory=True)
     tracker_path = tmp_path / "main_tracker.md"
+    # 'backups_dir' resolves to an absolute path in the real repo; keep backups in tmp_path.
+    real_get_path = ConfigManager.get_path
+    monkeypatch.setattr(
+        ConfigManager,
+        "get_path",
+        lambda self, path_type, default_path=None: (
+            str(tmp_path / "backups")
+            if path_type == "backups_dir"
+            else real_get_path(self, path_type, default_path)
+        ),
+    )
     monkeypatch.setitem(
         update_main_tracker.main_tracker_data,
         "get_tracker_path",

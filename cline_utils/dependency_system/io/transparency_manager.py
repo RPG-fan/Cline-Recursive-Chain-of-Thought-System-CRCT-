@@ -43,20 +43,38 @@ _core_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "core")
 REGISTRY_PATH = resolve_state_path("transparency_registry.json", _core_dir)
 
 
-def _load_symbol_map_for_transparency() -> Dict[str, Dict[str, Any]]:
-    """Load symbol map data without importing analysis modules to prevent import cycles."""
-    try:
-        from cline_utils.dependency_system.utils.cache_manager import cache_manager
+_symbol_map_cache: Dict[str, Tuple[Tuple[int, int], Dict[str, Dict[str, Any]]]] = {}
+_symbol_map_cache_lock = threading.Lock()
 
-        cached_map = cache_manager.get_cache("project_symbol_map_data")
-        if isinstance(cached_map, dict):
-            return cached_map
+
+def _load_symbol_map_for_transparency() -> Dict[str, Dict[str, Any]]:
+    """Load symbol map data without importing analysis modules to prevent import cycles.
+
+    Parsed once per version of the file (mtime_ns, size) and shared; callers only
+    read it. It used to look in cache_manager.get_cache(...), which returns a Cache
+    object and never a dict, so every call re-parsed the whole file (12 MB, ~160ms):
+    once per file in bulk_virtualize_connection_maps, ~115s for 702 files.
+    """
+    try:
         map_path = resolve_state_path("project_symbol_map.json", _core_dir)
-        if os.path.exists(map_path):
+        try:
+            st = os.stat(map_path)
+        except OSError:
+            return {}
+        version = (st.st_mtime_ns, st.st_size)
+        cached = _symbol_map_cache.get(map_path)
+        if cached is not None and cached[0] == version:
+            return cached[1]
+        with _symbol_map_cache_lock:
+            cached = _symbol_map_cache.get(map_path)
+            if cached is not None and cached[0] == version:
+                return cached[1]
             with open(map_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if isinstance(data, dict):
-                    return data
+            if not isinstance(data, dict):
+                return {}
+            _symbol_map_cache[map_path] = (version, data)
+            return data
     except Exception as e:
         logger.debug(f"Could not load project symbol map in transparency_manager: {e}")
     return {}

@@ -355,6 +355,154 @@ def _get_ts_node_text(node: Any, content_bytes: bytes) -> str:
     )
 
 
+# --- Shared helpers for the JS/TS/TSX tree-sitter analyzers ---
+
+_JS_SIMPLE_CHAIN_RE = re.compile(r"^[A-Za-z_$#][\w$#]*(\.[A-Za-z_$#][\w$#]*)*$")
+
+
+def _run_ts_query_matches(
+    language: Any, query_str: str, root_node: Any, result: Dict[str, Any]
+) -> List[Dict[str, List[Any]]]:
+    """
+    Runs one tree-sitter query and returns one {capture_name: [nodes]} dict per match.
+    A query that is invalid for the grammar is skipped with a warning recorded in
+    result["analysis_warnings"], so one bad pattern cannot abort the other sections.
+    """
+    try:
+        q = Query(language, query_str)
+    except Exception as e:
+        first_line = query_str.strip().splitlines()[0].strip() if query_str.strip() else ""
+        msg = f"Query skipped ({first_line[:60]}): {e}"
+        logger.warning(f"{result.get('file_path', '?')}: {msg}")
+        result.setdefault("analysis_warnings", []).append(msg)
+        return []
+    return [captures_dict for _idx, captures_dict in QueryCursor(q).matches(root_node)]
+
+
+def _run_ts_query(
+    language: Any, query_str: str, root_node: Any, result: Dict[str, Any]
+) -> List[Tuple[Any, str]]:
+    """Flat (node, capture_name) pairs for a query; see _run_ts_query_matches."""
+    return [
+        (node, cap_name)
+        for captures_dict in _run_ts_query_matches(language, query_str, root_node, result)
+        for cap_name, nodes in captures_dict.items()
+        for node in nodes
+    ]
+
+
+def _strip_js_string_quotes(text: str) -> str:
+    if len(text) >= 2 and text[0] in ('"', "'", "`") and text[-1] == text[0]:
+        return text[1:-1]
+    return text
+
+
+def _js_call_record(fn_node: Any, content_bytes: bytes) -> Optional[Dict[str, Any]]:
+    """
+    Builds a call record from a call_expression's `function` node, using the same keys
+    as the Python analyzer: target_name (full dotted callee) and potential_source (object).
+    `require(...)` and dynamic `import(...)` are imports, not calls.
+    """
+    if fn_node.type == "import":
+        return None
+    line = fn_node.start_point[0] + 1
+    if fn_node.type == "identifier":
+        name = _get_ts_node_text(fn_node, content_bytes)
+        if name == "require":
+            return None
+        return {"target_name": name, "potential_source": None, "line": line}
+    if fn_node.type == "member_expression":
+        prop = fn_node.child_by_field_name("property")
+        obj = fn_node.child_by_field_name("object")
+        if prop is None:
+            return None
+        full = _get_ts_node_text(fn_node, content_bytes).replace("?.", ".")
+        if obj is not None and _JS_SIMPLE_CHAIN_RE.match(full):
+            return {
+                "target_name": full,
+                "potential_source": full.rsplit(".", 1)[0],
+                "line": line,
+            }
+        # Complex receiver (call result, subscript, ...): keep only the method name.
+        return {
+            "target_name": _get_ts_node_text(prop, content_bytes),
+            "potential_source": None,
+            "line": line,
+        }
+    return None
+
+
+_JS_CALLS_QUERY = "(call_expression function: (_) @call.fn)"
+_JS_EXTRA_QUERY = """
+[
+  (comment) @comment
+  (string) @literal
+]
+"""
+
+
+def _collect_js_calls(
+    language: Any, root_node: Any, content_bytes: bytes, result: Dict[str, Any]
+) -> None:
+    for node, cap in _run_ts_query(language, _JS_CALLS_QUERY, root_node, result):
+        if cap == "call.fn":
+            record = _js_call_record(node, content_bytes)
+            if record:
+                result["calls"].append(record)
+
+
+def _collect_js_comments_and_literals(
+    language: Any, root_node: Any, content_bytes: bytes, result: Dict[str, Any]
+) -> None:
+    """Comments and meaningful string literals for SES (JS, TS and TSX)."""
+    result.setdefault("comments", [])
+    result.setdefault("literals", [])
+    for node, cap in _run_ts_query(language, _JS_EXTRA_QUERY, root_node, result):
+        text = _get_ts_node_text(node, content_bytes)
+        if cap == "comment":
+            clean = text.strip("/ \n*")
+            if len(clean) > 5 and clean not in result["comments"]:
+                result["comments"].append(clean)
+        elif cap == "literal":
+            text = _strip_js_string_quotes(text)
+            # Meaningful: paths/URLs (contain /) or descriptive identifiers
+            # (long, contains space/underscore, or capital letters).
+            is_meaningful = len(text) > 5 and (
+                "/" in text or " " in text or "_" in text or text != text.lower()
+            )
+            if is_meaningful and text not in result["literals"]:
+                result["literals"].append(text)
+
+
+def _js_reexport_record(source_node: Any, content_bytes: bytes) -> Dict[str, Any]:
+    """
+    Export record for `export ... from "x"`. `export *` gets name "*" (kind "star"),
+    `export * as ns` gets name "ns" (kind "namespace"); `export {a} from` gets a
+    nameless record (kind "named") because its names come from the specifiers.
+    """
+    record: Dict[str, Any] = {
+        "from": _strip_js_string_quotes(_get_ts_node_text(source_node, content_bytes)),
+        "line": source_node.start_point[0] + 1,
+    }
+    stmt = source_node.parent
+    child_types = [c.type for c in stmt.children] if stmt is not None else []
+    if "export_clause" in child_types:
+        record["kind"] = "named"
+    elif "namespace_export" in child_types:
+        ns_node = stmt.children[child_types.index("namespace_export")]
+        ident = [c for c in ns_node.children if c.type in ("identifier", "string")]
+        record["name"] = (
+            _strip_js_string_quotes(_get_ts_node_text(ident[-1], content_bytes))
+            if ident
+            else "*"
+        )
+        record["kind"] = "namespace"
+    else:
+        record["name"] = "*"
+        record["kind"] = "star"
+    return record
+
+
 def _normalize_sql_identifier_text(text: str) -> str:
     """
     Normalizes an SQL identifier string.
@@ -411,10 +559,49 @@ def _normalize_imports(result: Dict[str, Any]) -> None:
     result["imports"] = norm_imports
 
 
+def _python_import_bindings(tree: ast.AST) -> List[Dict[str, Any]]:
+    """
+    Every import statement anywhere in the module (ast.walk order, so nested imports
+    in functions and try blocks are included): the names each one binds in scope.
+    `imports` keeps only the top-level module strings (explicit edges, SES); this
+    field is what the structural step resolves names against.
+    """
+    bindings: List[Dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            bindings.append(
+                {
+                    "kind": "import",
+                    "module": "",
+                    "level": 0,
+                    "names": [{"name": a.name, "asname": a.asname} for a in node.names],
+                }
+            )
+        elif isinstance(node, ast.ImportFrom):
+            bindings.append(
+                {
+                    "kind": "from",
+                    "module": node.module or "",
+                    "level": node.level or 0,
+                    "names": [{"name": a.name, "asname": a.asname} for a in node.names],
+                }
+            )
+    return bindings
+
+
 # --- Main Analysis Function ---
+# Bump when analyze_file's output schema changes: cached analyses of unchanged files
+# would otherwise lack the new fields (v2: Python `import_bindings`; v3: JS/TS
+# `end_line`, `signature`, `docstring`, `decorators` and `decorators_used`).
+ANALYSIS_SCHEMA_VERSION = 3
+
+
 def _analyze_file_key(file_path: str, force: bool = False) -> str:
     mtime = os.path.getmtime(str(file_path)) if os.path.exists(str(file_path)) else 0
-    return f"analyze_file:{normalize_path(str(file_path))}:{mtime}:{force}"
+    return (
+        f"analyze_file:v{ANALYSIS_SCHEMA_VERSION}:{normalize_path(str(file_path))}:"
+        f"{mtime}:{force}"
+    )
 
 
 @cached(
@@ -649,7 +836,8 @@ def analyze_file(file_path: str, force: bool = False) -> Dict[str, Any]:
         # --- ADDED: Consolidate all fields (Global) ---
         # Define grouping keys for each field
         consolidation_map = {
-            "calls": ["target_name", "potential_source"],
+            # kind keeps JSX usage (kind "jsx") apart from calls of the same name.
+            "calls": ["target_name", "potential_source", "kind"],
             "functions": ["name"],
             "classes": ["name"],
             "globals_defined": ["name"],
@@ -934,6 +1122,7 @@ def _analyze_python_file(file_path: str, content: str, result: Dict[str, Any]) -
     try:
         tree = ast.parse(content, filename=file_path)
         result["_ast_tree"] = tree
+        result["import_bindings"] = _python_import_bindings(tree)
 
         # logger.debug(
         #     f"DEBUG DA: Parsed {file_path}. AST tree assigned to result['_ast_tree']. Type: {type(result['_ast_tree'])}"
@@ -1491,622 +1680,817 @@ def _analyze_java_file_ts(file_path: str, content: str, result: Dict[str, Any]) 
         result["analysis_kind"] = "java"
 
 
-def _analyze_javascript_file_ts(
-    file_path: str, content: str, result: Dict[str, Any]
+def _js_export_statement_of(node: Any) -> Optional[Any]:
+    """Nearest export_statement ancestor of a node (or the node itself)."""
+    cur = node
+    while cur is not None and cur.type != "export_statement":
+        cur = cur.parent
+    return cur
+
+
+def _collect_js_exports(
+    language: Any,
+    root_node: Any,
+    content_bytes: bytes,
+    result: Dict[str, Any],
+    queries: List[str],
 ) -> None:
     """
-    Tree-sitter based analysis for JavaScript (.js) files using minimal, grammar-safe patterns:
-      - import paths
-      - function declarations
-      - class declarations
-      - simple identifier call expressions
+    Module-level exports. Records keep the existing schema: {name, alias?, line} for
+    names (`export {b as c}` -> name "b", alias "c"; defaults -> name "default",
+    alias <local name>), plus {from, kind, name?} records for re-exports.
+    Exports nested in `namespace` / `declare module` blocks are not module exports.
+    CommonJS and anonymous default exports: see _collect_js_cjs_and_default_exports.
     """
-    result.setdefault("imports", [])
-    result.setdefault("functions", [])
-    result.setdefault("classes", [])
-    result.setdefault("calls", [])
-    result.setdefault("exports", [])
+    seen: Set[Tuple[Any, Any, Any]] = set()
+
+    def add(record: Dict[str, Any]) -> None:
+        key = (record.get("name"), record.get("alias"), record.get("from"))
+        if key not in seen:
+            seen.add(key)
+            result["exports"].append(record)
+
+    for query_str in queries:
+        for caps in _run_ts_query_matches(language, query_str, root_node, result):
+            first = next(iter(caps.values()))[0]
+            stmt = _js_export_statement_of(first)
+            if stmt is None or stmt.parent is None or stmt.parent.type != "program":
+                continue
+            line = first.start_point[0] + 1
+            if "export.orig" in caps:
+                record = {
+                    "name": _get_ts_node_text(caps["export.orig"][0], content_bytes),
+                    "line": line,
+                }
+                if caps.get("export.alias"):
+                    record["alias"] = _get_ts_node_text(
+                        caps["export.alias"][0], content_bytes
+                    )
+                add(record)
+            elif "export.name" in caps:
+                add({"name": _get_ts_node_text(caps["export.name"][0], content_bytes), "line": line})
+            elif "export.from" in caps:
+                add(_js_reexport_record(caps["export.from"][0], content_bytes))
+            elif "export.default" in caps:
+                add({"name": "default", "alias": _get_ts_node_text(caps["export.default"][0], content_bytes), "line": line})
+            elif "export.decl" in caps:
+                name = _get_ts_node_text(caps["export.decl"][0], content_bytes)
+                if any(c.type == "default" for c in stmt.children):
+                    add({"name": "default", "alias": name, "line": line})
+                else:
+                    add({"name": name, "line": line})
+
+    _collect_js_cjs_and_default_exports(root_node, content_bytes, add)
+
+
+# Query table for the JS-family analyzers: patterns for things that can occur anywhere
+# in a file. Module-scope declarations, import symbols and CJS exports are collected by
+# walking the top-level statements instead (see _iter_js_module_declarations).
+_JS_REQUIRE_IMPORT_QUERY = """
+[
+  (call_expression function: (identifier) @require.fn arguments: (arguments . (string) @require.path))
+  (call_expression function: (import) arguments: (arguments . (string) @dynamic.path))
+]
+"""
+_JSX_REFS_QUERY = """
+[
+  (jsx_opening_element name: (_) @jsx.name)
+  (jsx_self_closing_element name: (_) @jsx.name)
+]
+"""
+_TS_TYPE_REF_QUERIES = (
+    ("(type_annotation (type_identifier) @type.name)", "type_annotation"),
+    ("(generic_type (type_identifier) @type.name)", "generic_type"),
+)
+_JS_EXPORTS_QUERY = """
+[
+  (export_statement (export_clause (export_specifier name: (_) @export.name !alias)))
+  (export_statement (export_clause (export_specifier name: (_) @export.orig alias: _ @export.alias)))
+  (export_statement source: (string) @export.from)
+  (export_statement value: (identifier) @export.default)
+  (export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @export.decl)))
+  (export_statement declaration: (variable_declaration (variable_declarator name: (identifier) @export.decl)))
+  (export_statement declaration: (function_declaration name: (_) @export.decl))
+  (export_statement declaration: (generator_function_declaration name: (_) @export.decl))
+  (export_statement declaration: (class_declaration name: (_) @export.decl))
+]
+"""
+_TS_EXTRA_EXPORTS_QUERY = """
+[
+  (export_statement declaration: (abstract_class_declaration name: (_) @export.decl))
+  (export_statement declaration: (interface_declaration name: (_) @export.decl))
+  (export_statement declaration: (type_alias_declaration name: (_) @export.decl))
+  (export_statement declaration: (enum_declaration name: (_) @export.decl))
+  (export_statement declaration: (function_signature name: (_) @export.decl))
+  (export_statement declaration: (internal_module name: (identifier) @export.decl))
+]
+"""
+
+_JS_FUNCTION_DECL_TYPES = (
+    "function_declaration",
+    "generator_function_declaration",
+    "function_signature",
+)
+_JS_FUNCTION_VALUE_TYPES = (
+    "arrow_function",
+    "function_expression",
+    "function",
+    "generator_function",
+)
+_JS_CLASS_DECL_TYPES = ("class_declaration", "abstract_class_declaration")
+_JS_TYPE_DECL_KINDS = {
+    "interface_declaration": "interface",
+    "type_alias_declaration": "type_alias",
+    "enum_declaration": "enum",
+}
+_JS_METHOD_TYPES = ("method_definition", "abstract_method_signature", "method_signature")
+_JS_FIELD_TYPES = ("public_field_definition", "field_definition")
+_JS_MEMBER_MODIFIERS = (
+    "static", "abstract", "async", "get", "set", "readonly", "override", "declare",
+)
+
+
+def _run_js_section(result: Dict[str, Any], label: str, fn: Any, *args: Any) -> None:
+    """
+    Runs one analysis section. A failure is logged and recorded in
+    result["analysis_warnings"] so the rest of the file's analysis survives
+    (results carrying "error" are dropped from the project symbol map).
+    """
+    try:
+        fn(*args)
+    except Exception as e:
+        logger.exception(f"{result.get('file_path', '?')}: JS {label} section failed: {e}")
+        result.setdefault("analysis_warnings", []).append(f"{label} section failed: {e}")
+
+
+def _iter_js_module_declarations(root_node: Any) -> Any:
+    """
+    Yields (statement, declaration) pairs at module scope: direct children of `program`,
+    with `export_statement` / `ambient_declaration` unwrapped and `namespace X {}`
+    (expression_statement > internal_module) surfaced. The statement is the top-level
+    node (where JSDoc and `@dec export class` decorators attach). Bodies of namespaces
+    and `declare module` blocks are not module scope and are not descended into.
+    """
+    for stmt in root_node.named_children:
+        node = stmt
+        if node.type == "export_statement":
+            node = node.child_by_field_name("declaration")
+            if node is None:
+                continue
+        if node.type == "ambient_declaration":
+            if not node.named_children:
+                continue
+            node = node.named_children[0]
+        if node.type == "expression_statement" and node.named_children:
+            if node.named_children[0].type == "internal_module":
+                node = node.named_children[0]
+        yield stmt, node
+
+
+_JS_SIGNATURE_MAX = 300
+_JS_DOC_MAX = 500
+
+
+def _js_doc_summary(comment_text: str) -> Optional[str]:
+    """First prose line of a `/** … */` JSDoc block (None for plain comments or a
+    block holding only @tags), as Python records keep the docstring's first line."""
+    if not comment_text.startswith("/**") or comment_text.startswith("/**/"):
+        return None
+    body = comment_text[3:-2] if comment_text.endswith("*/") else comment_text[3:]
+    for raw in body.splitlines():
+        line = raw.strip()
+        if line.startswith("*"):
+            line = line[1:].strip()
+        if not line:
+            continue
+        if line.startswith("@"):
+            return None
+        return line[:_JS_DOC_MAX]
+    return None
+
+
+def _js_leading_doc(node: Any, content_bytes: bytes) -> Optional[str]:
+    """The JSDoc summary of the comment directly above `node`. Decorators between the
+    comment and the declaration (class members) are skipped; a blank line breaks it."""
+    anchor, prev = node, node.prev_sibling
+    while prev is not None and prev.type == "decorator":
+        anchor, prev = prev, prev.prev_sibling
+    if prev is None or prev.type != "comment":
+        return None
+    if anchor.start_point[0] - prev.end_point[0] > 1:
+        return None
+    return _js_doc_summary(_get_ts_node_text(prev, content_bytes))
+
+
+def _js_decorator_name(decorator: Any, content_bytes: bytes) -> str:
+    """`@Foo` / `@ns.Foo` -> the expression; `@Foo(...)` -> the callee."""
+    expr = decorator.named_children[0] if decorator.named_children else None
+    if expr is None:
+        return ""
+    if expr.type == "call_expression":
+        expr = expr.child_by_field_name("function") or expr
+    return re.sub(r"\s+", "", _get_ts_node_text(expr, content_bytes))
+
+
+def _js_decorators(nodes: List[Any], content_bytes: bytes) -> List[Tuple[str, Any]]:
+    """(name, decorator node) for the decorator children of `nodes`, in source order."""
+    found: List[Tuple[str, Any]] = []
+    for owner in nodes:
+        for child in owner.children:
+            if child.type == "decorator":
+                name = _js_decorator_name(child, content_bytes)
+                if name:
+                    found.append((name, child))
+    return found
+
+
+def _js_preceding_decorators(node: Any, content_bytes: bytes) -> List[Tuple[str, Any]]:
+    """Decorators written as siblings before a class member (TS class bodies)."""
+    found: List[Tuple[str, Any]] = []
+    prev = node.prev_sibling
+    while prev is not None and prev.type == "decorator":
+        name = _js_decorator_name(prev, content_bytes)
+        if name:
+            found.append((name, prev))
+        prev = prev.prev_sibling
+    found.reverse()
+    return found
+
+
+def _js_signature(node: Any, content_bytes: bytes) -> Optional[str]:
+    """Parameter list plus return type, e.g. `<T>(a: T, b?: string): Promise<T>`
+    (SES prints it after the name). Whitespace is collapsed."""
+    params = node.child_by_field_name("parameters")
+    if params is not None:
+        text = _get_ts_node_text(params, content_bytes)
+    else:
+        single = node.child_by_field_name("parameter")  # x => …
+        if single is None:
+            return None
+        text = f"({_get_ts_node_text(single, content_bytes)})"
+    type_params = node.child_by_field_name("type_parameters")
+    if type_params is not None:
+        text = _get_ts_node_text(type_params, content_bytes) + text
+    return_type = node.child_by_field_name("return_type")
+    if return_type is not None:
+        text += _get_ts_node_text(return_type, content_bytes)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > _JS_SIGNATURE_MAX:
+        text = text[:_JS_SIGNATURE_MAX] + "..."
+    return text or None
+
+
+def _js_add_decorators(
+    entry: Dict[str, Any],
+    decorators: List[Tuple[str, Any]],
+    target_type: str,
+    result: Dict[str, Any],
+) -> None:
+    """Per-symbol `decorators` (names, as SES prints them) and file-level
+    `decorators_used` (the Python analyzer's shape)."""
+    if not decorators:
+        return
+    entry["decorators"] = [name for name, _ in decorators]
+    for name, dec_node in decorators:
+        result["decorators_used"].append(
+            {
+                "name": name,
+                "target_type": target_type,
+                "target_name": entry["name"],
+                "line": dec_node.start_point[0] + 1,
+            }
+        )
+
+
+def _js_heritage_base_name(node: Any, content_bytes: bytes) -> str:
+    """`Base<number>` -> `Base`, `ns . Base` -> `ns.Base`."""
+    if node.type == "generic_type":
+        name_node = node.child_by_field_name("name") or (
+            node.named_children[0] if node.named_children else node
+        )
+        node = name_node
+    return re.sub(r"\s+", "", _get_ts_node_text(node, content_bytes)).split("<", 1)[0]
+
+
+def _js_class_record(
+    node: Any, name_node: Any, content_bytes: bytes, result: Dict[str, Any], stmt: Any = None
+) -> Dict[str, Any]:
+    """
+    Class record with nested methods/properties (name, line, end_line, modifiers,
+    signature, docstring, decorators: no per-symbol scope keys, which would make
+    populate_comments write CONNECTION_MAPs).
+    Heritage goes to the top-level `inheritance` and `type_references` lists.
+    """
+    stmt = stmt if stmt is not None else node
+    class_name = _get_ts_node_text(name_node, content_bytes)
+    record: Dict[str, Any] = {
+        "name": class_name,
+        "line": name_node.start_point[0] + 1,
+        "end_line": node.end_point[0] + 1,
+        "kind": "class",
+    }
+    if node.type == "abstract_class_declaration":
+        record["abstract"] = True
+    doc = _js_leading_doc(stmt, content_bytes)
+    if doc:
+        record["docstring"] = doc
+    owners = [stmt, node] if stmt is not node else [node]
+    _js_add_decorators(record, _js_decorators(owners, content_bytes), "class", result)
+
+    methods: List[Dict[str, Any]] = []
+    properties: List[Dict[str, Any]] = []
+    seen_methods: Set[str] = set()
+    body = node.child_by_field_name("body")
+    for member in body.named_children if body is not None else []:
+        if member.type in _JS_METHOD_TYPES:
+            target, member_name_node = methods, member.child_by_field_name("name")
+        elif member.type in _JS_FIELD_TYPES:
+            target = properties
+            member_name_node = member.child_by_field_name(
+                "name"
+            ) or member.child_by_field_name("property")
+        else:
+            continue
+        if member_name_node is None:
+            continue
+        member_name = _strip_js_string_quotes(
+            _get_ts_node_text(member_name_node, content_bytes)
+        )
+        if target is methods:
+            # Constructors are not methods; overload signatures count once.
+            if member_name == "constructor" or member_name in seen_methods:
+                continue
+            seen_methods.add(member_name)
+        entry: Dict[str, Any] = {
+            "name": member_name,
+            "line": member_name_node.start_point[0] + 1,
+            "end_line": member.end_point[0] + 1,
+        }
+        if target is methods:
+            signature = _js_signature(member, content_bytes)
+            if signature:
+                entry["signature"] = signature
+        doc = _js_leading_doc(member, content_bytes)
+        if doc:
+            entry["docstring"] = doc
+        _js_add_decorators(
+            entry,
+            _js_preceding_decorators(member, content_bytes) + _js_decorators([member], content_bytes),
+            "method" if target is methods else "property",
+            result,
+        )
+        modifiers: List[str] = []
+        for child in member.children:
+            if child.start_byte >= member_name_node.start_byte:
+                break
+            if child.type == "accessibility_modifier":
+                modifiers.append(_get_ts_node_text(child, content_bytes))
+            elif child.type in _JS_MEMBER_MODIFIERS:
+                modifiers.append(child.type)
+        if member.type == "abstract_method_signature" and "abstract" not in modifiers:
+            modifiers.append("abstract")
+        if modifiers:
+            entry["modifiers"] = modifiers
+        target.append(entry)
+    if methods:
+        record["methods"] = methods
+    if properties:
+        record["properties"] = properties
+
+    heritage = next((c for c in node.named_children if c.type == "class_heritage"), None)
+    for clause in heritage.named_children if heritage is not None else []:
+        if clause.type == "extends_clause":
+            value = clause.child_by_field_name("value")
+            bases = [("extends", value)] if value is not None else []
+        elif clause.type == "implements_clause":
+            bases = [("implements", t) for t in clause.named_children]
+        else:  # JavaScript: the extended expression sits directly in class_heritage
+            bases = [("extends", clause)]
+        for heritage_kind, base_node in bases:
+            base_name = _js_heritage_base_name(base_node, content_bytes)
+            if not base_name:
+                continue
+            line = base_node.start_point[0] + 1
+            result["inheritance"].append(
+                {
+                    "class_name": class_name,
+                    "base_class_name": base_name,
+                    "kind": heritage_kind,
+                    "line": line,
+                }
+            )
+            result["type_references"].append(
+                {"type_name_str": base_name, "context": heritage_kind, "line": line}
+            )
+    return record
+
+
+def _collect_js_module_declarations(
+    root_node: Any, content_bytes: bytes, result: Dict[str, Any]
+) -> None:
+    """Module-scope functions (incl. arrow/function-expression consts), classes,
+    interfaces, type aliases, enums and namespaces."""
+    def function_record(name_node: Any, fn_node: Any, end_node: Any) -> Dict[str, Any]:
+        record: Dict[str, Any] = {
+            "name": _get_ts_node_text(name_node, content_bytes),
+            "line": name_node.start_point[0] + 1,
+            "end_line": end_node.end_point[0] + 1,
+        }
+        signature = _js_signature(fn_node, content_bytes)
+        if signature:
+            record["signature"] = signature
+        doc = _js_leading_doc(stmt, content_bytes)
+        if doc:
+            record["docstring"] = doc
+        return record
+
+    for stmt, node in _iter_js_module_declarations(root_node):
+        node_type = node.type
+        name_node = node.child_by_field_name("name")
+        if node_type in _JS_FUNCTION_DECL_TYPES:
+            if name_node is not None:
+                result["functions"].append(function_record(name_node, node, node))
+        elif node_type in ("lexical_declaration", "variable_declaration"):
+            for declarator in node.named_children:
+                if declarator.type != "variable_declarator":
+                    continue
+                decl_name = declarator.child_by_field_name("name")
+                decl_value = declarator.child_by_field_name("value")
+                # Only a literal arrow / function expression; memo(...) etc. are calls.
+                if (
+                    decl_name is not None
+                    and decl_name.type == "identifier"
+                    and decl_value is not None
+                    and decl_value.type in _JS_FUNCTION_VALUE_TYPES
+                ):
+                    result["functions"].append(function_record(decl_name, decl_value, declarator))
+        elif node_type in _JS_CLASS_DECL_TYPES:
+            if name_node is not None:
+                result["classes"].append(
+                    _js_class_record(node, name_node, content_bytes, result, stmt)
+                )
+        elif node_type in _JS_TYPE_DECL_KINDS or node_type == "internal_module":
+            if name_node is not None and name_node.type != "string":
+                record: Dict[str, Any] = {
+                    "name": _get_ts_node_text(name_node, content_bytes),
+                    "line": name_node.start_point[0] + 1,
+                    "end_line": node.end_point[0] + 1,
+                    "kind": _JS_TYPE_DECL_KINDS.get(node_type, "namespace"),
+                }
+                doc = _js_leading_doc(stmt, content_bytes)
+                if doc:
+                    record["docstring"] = doc
+                result["classes"].append(record)
+
+
+def _js_import_record(path_node: Any, content_bytes: bytes, kind: str) -> Dict[str, Any]:
+    return {
+        "path": _strip_js_string_quotes(_get_ts_node_text(path_node, content_bytes)),
+        "line": path_node.start_point[0] + 1,
+        "symbols": [],
+        "kind": kind,
+    }
+
+
+def _js_import_clause_symbols(
+    clause: Any, content_bytes: bytes, type_only: bool
+) -> List[Dict[str, Any]]:
+    """
+    Symbols bound by an import clause, in the shape the suggester's import map reads:
+    {type: default|named|namespace, name, alias?, type_only?}. For named imports
+    `name` is the exported name and `alias` the local one.
+    """
+    symbols: List[Dict[str, Any]] = []
+
+    def add(sym_type: str, name: str, alias: Optional[str] = None, is_type: bool = False) -> None:
+        sym: Dict[str, Any] = {"type": sym_type, "name": name}
+        if alias:
+            sym["alias"] = alias
+        if type_only or is_type:
+            sym["type_only"] = True
+        symbols.append(sym)
+
+    for part in clause.named_children:
+        if part.type == "identifier":
+            add("default", _get_ts_node_text(part, content_bytes))
+        elif part.type == "namespace_import":
+            ident = next((c for c in part.named_children if c.type == "identifier"), None)
+            if ident is not None:
+                add("namespace", _get_ts_node_text(ident, content_bytes))
+        elif part.type == "named_imports":
+            for spec in part.named_children:
+                if spec.type != "import_specifier":
+                    continue
+                spec_name = spec.child_by_field_name("name")
+                spec_alias = spec.child_by_field_name("alias")
+                if spec_name is None:
+                    continue
+                add(
+                    "named",
+                    _strip_js_string_quotes(_get_ts_node_text(spec_name, content_bytes)),
+                    _get_ts_node_text(spec_alias, content_bytes) if spec_alias is not None else None,
+                    is_type=any(c.type == "type" for c in spec.children),
+                )
+    return symbols
+
+
+def _js_require_binding_symbols(call_node: Any, content_bytes: bytes) -> List[Dict[str, Any]]:
+    """
+    Symbols for a module-scope `const x = require("m")` (namespace: members are checked
+    against the target's exports) or `const {a, b: c} = require("m")` (named).
+    """
+    declarator = call_node.parent
+    if declarator is None or declarator.type != "variable_declarator":
+        return []
+    declaration = declarator.parent
+    scope = declaration.parent if declaration is not None else None
+    if scope is not None and scope.type == "export_statement":
+        scope = scope.parent
+    if scope is None or scope.type != "program":
+        return []
+    name_node = declarator.child_by_field_name("name")
+    if name_node is None:
+        return []
+    if name_node.type == "identifier":
+        return [{"type": "namespace", "name": _get_ts_node_text(name_node, content_bytes)}]
+    symbols: List[Dict[str, Any]] = []
+    if name_node.type == "object_pattern":
+        for prop in name_node.named_children:
+            if prop.type == "shorthand_property_identifier_pattern":
+                symbols.append({"type": "named", "name": _get_ts_node_text(prop, content_bytes)})
+            elif prop.type == "pair_pattern":
+                key = prop.child_by_field_name("key")
+                value = prop.child_by_field_name("value")
+                if key is not None and value is not None and value.type == "identifier":
+                    symbols.append(
+                        {
+                            "type": "named",
+                            "name": _strip_js_string_quotes(_get_ts_node_text(key, content_bytes)),
+                            "alias": _get_ts_node_text(value, content_bytes),
+                        }
+                    )
+    return symbols
+
+
+_TS_TYPE_CONTEXT_TYPES = (
+    "type_annotation",
+    "type_alias_declaration",
+    "type_arguments",
+    "type_query",
+    "nested_type_identifier",
+)
+
+
+def _js_import_call_kind(path_node: Any) -> str:
+    """
+    `import("x")` in an expression is a dynamic import; TS `import("x").T` in a type
+    position (annotation, alias, union, generic argument ...) is a type-only import.
+    """
+    call = path_node.parent.parent if path_node.parent is not None else None
+    node = call.parent if call is not None else None
+    # ERROR: tree-sitter-typescript fails on e.g. `import("x").T[]` inside an annotation.
+    while node is not None and node.type in ("member_expression", "call_expression", "ERROR"):
+        node = node.parent
+    if node is not None and (node.type in _TS_TYPE_CONTEXT_TYPES or node.type.endswith("_type")):
+        return "type"
+    return "dynamic"
+
+
+def _collect_js_imports(
+    language: Any, root_node: Any, content_bytes: bytes, result: Dict[str, Any]
+) -> None:
+    """
+    Import edges with `kind` (static | type | side-effect | reexport | require | dynamic;
+    TS `import("x").T` type positions count as type)
+    and, for module-scope bindings, the imported `symbols`. Re-export and dynamic edges
+    bind no local names, so they carry no symbols.
+    """
+    for stmt in root_node.named_children:
+        if stmt.type == "import_statement":
+            source = stmt.child_by_field_name("source")
+            require_clause = next(
+                (c for c in stmt.named_children if c.type == "import_require_clause"), None
+            )
+            if require_clause is not None:  # TS: import x = require("m")
+                req_source = require_clause.child_by_field_name("source")
+                ident = next((c for c in require_clause.named_children if c.type == "identifier"), None)
+                if req_source is not None:
+                    record = _js_import_record(req_source, content_bytes, "require")
+                    if ident is not None:
+                        record["symbols"] = [
+                            {"type": "namespace", "name": _get_ts_node_text(ident, content_bytes)}
+                        ]
+                    result["imports"].append(record)
+                continue
+            if source is None:
+                continue
+            clause = next((c for c in stmt.named_children if c.type == "import_clause"), None)
+            type_only = any(c.type == "type" for c in stmt.children)
+            if clause is None:
+                result["imports"].append(_js_import_record(source, content_bytes, "side-effect"))
+                continue
+            record = _js_import_record(source, content_bytes, "type" if type_only else "static")
+            record["symbols"] = _js_import_clause_symbols(clause, content_bytes, type_only)
+            result["imports"].append(record)
+        elif stmt.type == "export_statement":
+            source = stmt.child_by_field_name("source")
+            if source is not None:
+                result["imports"].append(_js_import_record(source, content_bytes, "reexport"))
+
+    for caps in _run_ts_query_matches(language, _JS_REQUIRE_IMPORT_QUERY, root_node, result):
+        if "dynamic.path" in caps:
+            path_node = caps["dynamic.path"][0]
+            result["imports"].append(
+                _js_import_record(path_node, content_bytes, _js_import_call_kind(path_node))
+            )
+        elif "require.path" in caps:
+            fn_node = caps["require.fn"][0]
+            if _get_ts_node_text(fn_node, content_bytes) != "require":
+                continue
+            record = _js_import_record(caps["require.path"][0], content_bytes, "require")
+            record["symbols"] = _js_require_binding_symbols(fn_node.parent, content_bytes)
+            result["imports"].append(record)
+
+
+def _collect_js_jsx_refs(
+    language: Any, root_node: Any, content_bytes: bytes, result: Dict[str, Any]
+) -> None:
+    """JSX component usage (<Btn/>, <Ctx.Provider>) as call records with kind "jsx"."""
+    for node, cap in _run_ts_query(language, _JSX_REFS_QUERY, root_node, result):
+        if cap != "jsx.name":
+            continue
+        tag = _get_ts_node_text(node, content_bytes)
+        if ":" in tag or not (tag[:1].isupper() or "." in tag):
+            continue  # intrinsic elements (<div>) and namespaced names (<svg:path>)
+        result["calls"].append(
+            {
+                "target_name": tag,
+                "potential_source": tag.rsplit(".", 1)[0] if "." in tag else None,
+                "line": node.start_point[0] + 1,
+                "kind": "jsx",
+            }
+        )
+
+
+def _collect_js_cjs_and_default_exports(
+    root_node: Any, content_bytes: bytes, add: Any
+) -> None:
+    """
+    Module-scope exports the query table does not cover: CommonJS `module.exports = …`,
+    `exports.x = …`, `module.exports.x = …`, TS `export = X`, and anonymous / expression
+    `export default …`.
+    """
+    for stmt in root_node.named_children:
+        line = stmt.start_point[0] + 1
+        if stmt.type == "export_statement":
+            child_types = [c.type for c in stmt.children]
+            value = stmt.child_by_field_name("value")
+            if "=" in child_types:  # export = X
+                ident = next((c for c in stmt.named_children if c.type == "identifier"), None)
+                record: Dict[str, Any] = {"name": "default", "line": line}
+                if ident is not None:
+                    record["alias"] = _get_ts_node_text(ident, content_bytes)
+                add(record)
+            elif "default" in child_types and value is not None and value.type != "identifier":
+                add({"name": "default", "line": line})
+            continue
+        if stmt.type != "expression_statement" or not stmt.named_children:
+            continue
+        expr = stmt.named_children[0]
+        if expr.type != "assignment_expression":
+            continue
+        left, right = expr.child_by_field_name("left"), expr.child_by_field_name("right")
+        if left is None or right is None or left.type != "member_expression":
+            continue
+        obj = _get_ts_node_text(left.child_by_field_name("object"), content_bytes)
+        prop = _get_ts_node_text(left.child_by_field_name("property"), content_bytes)
+        if obj == "module" and prop == "exports":
+            if right.type == "object":
+                for member in right.named_children:
+                    if member.type == "shorthand_property_identifier":
+                        key_node: Any = member
+                    elif member.type in ("pair", "method_definition"):
+                        key_node = member.child_by_field_name(
+                            "key"
+                        ) or member.child_by_field_name("name")
+                    else:
+                        continue
+                    if key_node is not None:
+                        add(
+                            {
+                                "name": _strip_js_string_quotes(
+                                    _get_ts_node_text(key_node, content_bytes)
+                                ),
+                                "line": member.start_point[0] + 1,
+                            }
+                        )
+            else:
+                record = {"name": "default", "line": line}
+                if right.type == "identifier":
+                    record["alias"] = _get_ts_node_text(right, content_bytes)
+                add(record)
+        elif obj in ("exports", "module.exports"):
+            add({"name": prop, "line": line})
+
+
+def _analyze_js_family_file_ts(
+    file_path: str, content: str, result: Dict[str, Any], kind: str
+) -> None:
+    """
+    Shared tree-sitter analysis for JavaScript ("js"), TypeScript ("ts") and TSX ("tsx"):
+      - imports with kind (static/type/side-effect/reexport/require/dynamic) and symbols
+      - module-scope functions (incl. arrow / function-expression consts)
+      - classes with methods/properties (TS/TSX also interfaces, type aliases, enums,
+        namespaces, abstract classes; tagged with `kind`)
+      - inheritance (extends/implements), also emitted as type references
+      - calls (target_name / potential_source, as in the Python analyzer) and JSX
+        component usage (calls with kind "jsx")
+      - type references (TS/TSX)
+      - exports, re-exports and CommonJS exports
+      - comments and meaningful literals (SES input)
+    Each section runs in isolation: a failing query or section is recorded in
+    result["analysis_warnings"] instead of aborting the rest of the analysis.
+    """
+    language = {"js": JS_LANGUAGE, "ts": TS_LANGUAGE, "tsx": TSX_LANGUAGE}[kind]
+    is_ts = kind in ("ts", "tsx")
+    for key in (
+        "imports", "functions", "classes", "calls", "exports", "inheritance",
+        "type_references", "decorators_used",
+    ):
+        result.setdefault(key, [])
     result.setdefault("_ts_tree", None)
 
     try:
         content_bytes = content.encode("utf-8", errors="ignore")
-        parser = Parser(JS_LANGUAGE)
+        parser = Parser(language)
         tree = parser.parse(content_bytes)
         result["_ts_tree"] = tree
+        root = tree.root_node
 
-        # Expand JS tree-sitter queries: imports (incl. require), exports, functions, classes, calls (identifier, member)
-        imports_query = """
-        [
-          (import_statement source: (string) @path)
-          (call_expression
-            function: (identifier) @req.fn
-            arguments: (arguments (string) @path)
-          ) @require
-            (#match? @req.fn "^(require|import)$")
-        ]
-        """
-        functions_query = "(function_declaration name: (identifier) @function.name)"
-        classes_query = "(class_declaration name: (identifier) @class.name)"
-        calls_query = """
-        [
-          (call_expression function: (identifier) @call.name)
-          (call_expression function: (member_expression property: (property_identifier) @call.name))
-        ]
-        """
-        # Capture comments and string literals for SES
-        extra_query = """
-        [
-          (comment) @comment
-          (string) @literal
-        ]
-        """
-        exports_query = """
-        [
-        (export_statement
-            (export_clause (export_specifier name: (identifier) @export.name))
+        _run_js_section(result, "imports", _collect_js_imports, language, root, content_bytes, result)
+        _run_js_section(result, "declarations", _collect_js_module_declarations, root, content_bytes, result)
+        _run_js_section(result, "calls", _collect_js_calls, language, root, content_bytes, result)
+        if kind in ("js", "tsx"):
+            _run_js_section(result, "jsx", _collect_js_jsx_refs, language, root, content_bytes, result)
+
+        if is_ts:
+
+            def collect_type_refs() -> None:
+                for query_str, context in _TS_TYPE_REF_QUERIES:
+                    for node, cap in _run_ts_query(language, query_str, root, result):
+                        if cap == "type.name":
+                            result["type_references"].append(
+                                {
+                                    "type_name_str": _get_ts_node_text(node, content_bytes),
+                                    "context": context,
+                                    "line": node.start_point[0] + 1,
+                                }
+                            )
+
+            _run_js_section(result, "type references", collect_type_refs)
+
+        _run_js_section(
+            result, "comments", _collect_js_comments_and_literals, language, root, content_bytes, result
         )
-        (export_statement
-            (export_clause (export_specifier name: (identifier) @export.orig alias: (identifier) @export.alias))
+
+        export_queries = [_JS_EXPORTS_QUERY]
+        if is_ts:
+            export_queries.append(_TS_EXTRA_EXPORTS_QUERY)
+        _run_js_section(
+            result, "exports", _collect_js_exports, language, root, content_bytes, result, export_queries
         )
-        (export_statement
-            declaration: (variable_declaration
-            (variable_declarator
-                name: (identifier) @export.default))
-        ) @default.export
-        (export_statement
-            declaration: (function_declaration name: (identifier) @export.func.name)
-        )
-        (export_statement
-            declaration: (class_declaration name: (identifier) @export.class.name)
-        )
-        ]
-        """
-
-        def run_query_js(query_str: str) -> List[Tuple[Any, str]]:
-            # Use QueryCursor.matches API per tree_sitter/__init__.pyi
-            q = Query(JS_LANGUAGE, query_str)
-            captures: List[Tuple[Any, str]] = []
-            cursor = QueryCursor(q)
-            matches = cursor.matches(tree.root_node)
-            for _pattern_index, captures_dict in matches:
-                for cap_name, nodes in captures_dict.items():
-                    for node in nodes:
-                        captures.append((node, cap_name))
-            return captures
-
-        # Imports (ESM and require/import() calls)
-        for node, cap in run_query_js(imports_query):
-            if cap == "path":
-                path_text = _get_ts_node_text(node, content_bytes)
-                if (
-                    len(path_text) >= 2
-                    and path_text[0] in ('"', "'")
-                    and path_text[-1] == path_text[0]
-                ):
-                    path_text = path_text[1:-1]
-                result["imports"].append(
-                    {"path": path_text, "line": node.start_point[0] + 1, "symbols": []}
-                )
-
-        # Functions
-        for node, cap in run_query_js(functions_query):
-            if cap == "function.name":
-                result["functions"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-
-        # Classes
-        for node, cap in run_query_js(classes_query):
-            if cap == "class.name":
-                result["classes"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-
-        # Calls (identifier and member-expression calls)
-        for node, cap in run_query_js(calls_query):
-            if cap == "call.name":
-                result["calls"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-
-        # Extra literals and comments
-        result.setdefault("comments", [])
-        result.setdefault("literals", [])
-        for node, cap in run_query_js(extra_query):
-            text = _get_ts_node_text(node, content_bytes)
-            if cap == "comment":
-                # Clean up comment markers
-                clean = text.strip("/ \n*")
-                if len(clean) > 5 and clean not in result["comments"]:
-                    result["comments"].append(clean)
-            elif cap == "literal":
-                # Clean quotes
-                if (
-                    len(text) >= 2
-                    and text[0] in ("'", '"', "`")
-                    and text[-1] == text[0]
-                ):
-                    text = text[1:-1]
-
-                # Filter for "meaningful" literals:
-                # - Paths or URLs (contains /)
-                # - Descriptive identifiers (long, contains space/underscore, or capital letters)
-                # Optimized uppercase check avoiding generator instantiation overhead
-                is_meaningful = len(text) > 5 and (
-                    "/" in text or " " in text or "_" in text or text != text.lower()
-                )
-                if is_meaningful and text not in result["literals"]:
-                    result["literals"].append(text)
-
-        # Exports (collect names and re-exports)
-        result.setdefault("exports", [])
-        for node, cap in run_query_js(exports_query):
-            if cap == "export.name":
-                result["exports"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-            elif cap == "export.orig":
-                # will be paired with alias cap in same match; capture as name, alias separately if present
-                result["exports"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-            elif cap == "export.alias":
-                # attach alias to last export if appropriate
-                if result["exports"]:
-                    result["exports"][-1]["alias"] = _get_ts_node_text(
-                        node, content_bytes
-                    )
-            elif cap == "export.from":
-                from_text = _get_ts_node_text(node, content_bytes)
-                if (
-                    len(from_text) >= 2
-                    and from_text[0] in ('"', "'")
-                    and from_text[-1] == from_text[0]
-                ):
-                    from_text = from_text[1:-1]
-                result["exports"].append(
-                    {"from": from_text, "line": node.start_point[0] + 1}
-                )
-            elif cap == "export.default":
-                result["exports"].append(
-                    {
-                        "name": "default",
-                        "alias": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
 
     except Exception as e:
-        logger.exception(f"JS analysis error for {file_path}: {e}")
-        result["error"] = f"JS analysis error: {e}"
+        logger.exception(f"{kind.upper()} analysis error for {file_path}: {e}")
+        result["error"] = f"{kind.upper()} analysis error: {e}"
     finally:
         # Normalization to ensure downstream suggestion pipeline has consistent shapes
-        result.setdefault("imports", [])
-        result.setdefault("functions", [])
-        result.setdefault("classes", [])
-        result.setdefault("calls", [])
-        result.setdefault("exports", [])
-        # ensure import dicts have "path" key
+        for key in (
+            "imports", "functions", "classes", "calls", "exports", "inheritance",
+            "type_references", "decorators_used",
+        ):
+            result.setdefault(key, [])
         _normalize_imports(result)
-        # Tag analysis kind for consumers
-        result["analysis_kind"] = "js"
-        # Build exports (JS minimal): handle `export ... from "path"` re-exports if present
-        try:
-            if "exports" not in result:
-                result["exports"] = []
-            # A very light pattern using tree-sitter captures already built elsewhere can be added later.
-            # Keep placeholder structure consistent.
-        except Exception:
-            pass
+        result["analysis_kind"] = kind
+
+
+def _analyze_javascript_file_ts(
+    file_path: str, content: str, result: Dict[str, Any]
+) -> None:
+    """Tree-sitter analysis for JavaScript (.js/.jsx/.mjs/.cjs) files."""
+    _analyze_js_family_file_ts(file_path, content, result, "js")
 
 
 def _analyze_typescript_file_ts(
     file_path: str, content: str, result: Dict[str, Any]
 ) -> None:
-    """
-    Tree-sitter based analysis for TypeScript (.ts) files using minimal, grammar-safe patterns:
-      - import paths
-      - function declarations
-      - class declarations
-      - simple identifier call expressions
-      - type references (type_identifier in type_annotation/generic_type)
-    """
-    result.setdefault("imports", [])
-    result.setdefault("functions", [])
-    result.setdefault("classes", [])
-    result.setdefault("calls", [])
-    result.setdefault("type_references", [])
-    result.setdefault("_ts_tree", None)
-
-    try:
-        content_bytes = content.encode("utf-8", errors="ignore")
-        parser = Parser(TS_LANGUAGE)
-        tree = parser.parse(content_bytes)
-        result["_ts_tree"] = tree
-
-        # Expand TS queries: imports (incl. require), exports, richer calls, plus types
-        imports_query = """
-        [
-          (import_statement source: (string) @path)
-          (call_expression
-            function: (identifier) @req.fn
-            arguments: (arguments (string) @path))
-            (#match? @req.fn "^(require|import)$")
-        ]
-        """
-        functions_query = "(function_declaration name: (identifier) @function.name)"
-        classes_query = "(class_declaration name: (identifier) @class.name)"
-        calls_query = """
-        [
-          (call_expression function: (identifier) @call.name)
-          (call_expression function: (member_expression property: (property_identifier) @call.name))
-        ]
-        """
-        type_ann_query = "(type_annotation (type_identifier) @type.name)"
-        generic_type_query = "(generic_type (type_identifier) @type.name)"
-        exports_query = """
-        [
-          (export_statement
-            (export_clause (export_specifier name: (identifier) @export.name))
-          )
-          (export_statement
-            (export_clause (export_specifier name: (identifier) @export.orig alias: (identifier) @export.alias))
-          )
-          (export_statement
-            (export_clause (export_from_clause source: (string) @export.from))
-          )
-          (export_statement
-            (export_default_declaration (identifier) @export.default)
-          )
-        ]
-        """
-
-        def run_query_ts(query_str: str) -> List[Tuple[Any, str]]:
-            q = Query(TS_LANGUAGE, query_str)
-            captures: List[Tuple[Any, str]] = []
-            cursor = QueryCursor(q)
-            matches = cursor.matches(tree.root_node)
-            for _pattern_index, captures_dict in matches:
-                for cap_name, nodes in captures_dict.items():
-                    for node in nodes:
-                        captures.append((node, cap_name))
-            return captures
-
-        # Imports
-        for node, cap in run_query_ts(imports_query):
-            if cap == "path":
-                path_text = _get_ts_node_text(node, content_bytes)
-                if (
-                    len(path_text) >= 2
-                    and path_text[0] in ('"', "'")
-                    and path_text[-1] == path_text[0]
-                ):
-                    path_text = path_text[1:-1]
-                result["imports"].append(
-                    {"path": path_text, "line": node.start_point[0] + 1, "symbols": []}
-                )
-
-        # Functions
-        for node, cap in run_query_ts(functions_query):
-            if cap == "function.name":
-                result["functions"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-
-        # Classes
-        for node, cap in run_query_ts(classes_query):
-            if cap == "class.name":
-                result["classes"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-
-        # Calls
-        for node, cap in run_query_ts(calls_query):
-            if cap == "call.name":
-                result["calls"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-
-        # Type references
-        for node, cap in run_query_ts(type_ann_query):
-            if cap == "type.name":
-                result["type_references"].append(
-                    {
-                        "type_name_str": _get_ts_node_text(node, content_bytes),
-                        "context": "type_annotation",
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-        for node, cap in run_query_ts(generic_type_query):
-            if cap == "type.name":
-                result["type_references"].append(
-                    {
-                        "type_name_str": _get_ts_node_text(node, content_bytes),
-                        "context": "generic_type",
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-
-        # Exports
-        result.setdefault("exports", [])
-        for node, cap in run_query_ts(exports_query):
-            if cap == "export.name":
-                result["exports"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-            elif cap == "export.orig":
-                result["exports"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-            elif cap == "export.alias":
-                if result["exports"]:
-                    result["exports"][-1]["alias"] = _get_ts_node_text(
-                        node, content_bytes
-                    )
-            elif cap == "export.from":
-                from_text = _get_ts_node_text(node, content_bytes)
-                if (
-                    len(from_text) >= 2
-                    and from_text[0] in ('"', "'")
-                    and from_text[-1] == from_text[0]
-                ):
-                    from_text = from_text[1:-1]
-                result["exports"].append(
-                    {"from": from_text, "line": node.start_point[0] + 1}
-                )
-            elif cap == "export.default":
-                result["exports"].append(
-                    {
-                        "name": "default",
-                        "alias": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-
-    except Exception as e:
-        logger.exception(f"TS analysis error for {file_path}: {e}")
-        result["error"] = f"TS analysis error: {e}"
-    finally:
-        # Normalization for suggestion pipeline
-        result.setdefault("imports", [])
-        result.setdefault("functions", [])
-        result.setdefault("classes", [])
-        result.setdefault("calls", [])
-        result.setdefault("type_references", [])
-        result.setdefault("exports", [])
-        _normalize_imports(result)
-        result["analysis_kind"] = "ts"
-        # Ensure exports list exists for re-export links
-        try:
-            result.setdefault("exports", [])
-        except Exception:
-            pass
+    """Tree-sitter analysis for TypeScript (.ts/.mts/.cts) files."""
+    _analyze_js_family_file_ts(file_path, content, result, "ts")
 
 
 def _analyze_tsx_file_ts(file_path: str, content: str, result: Dict[str, Any]) -> None:
-    """
-    Tree-sitter based analysis for TSX (.tsx) files using minimal, grammar-safe patterns:
-      - import paths
-      - function declarations
-      - class declarations
-      - simple identifier call expressions
-      - type references (type_identifier in type_annotation/generic_type)
-    """
-    result.setdefault("imports", [])
-    result.setdefault("functions", [])
-    result.setdefault("classes", [])
-    result.setdefault("calls", [])
-    result.setdefault("type_references", [])
-    result.setdefault("_ts_tree", None)
-
-    try:
-        content_bytes = content.encode("utf-8", errors="ignore")
-        parser = Parser(TSX_LANGUAGE)
-        tree = parser.parse(content_bytes)
-        result["_ts_tree"] = tree
-
-        # Expand TSX queries similar to TS
-        imports_query = """
-        [
-          (import_statement source: (string) @path)
-          (call_expression
-            function: (identifier) @req.fn
-            arguments: (arguments (string) @path))
-            (#match? @req.fn "^(require|import)$")
-        ]
-        """
-        functions_query = "(function_declaration name: (identifier) @function.name)"
-        classes_query = "(class_declaration name: (identifier) @class.name)"
-        calls_query = """
-        [
-          (call_expression function: (identifier) @call.name)
-          (call_expression function: (member_expression property: (property_identifier) @call.name))
-        ]
-        """
-        type_ann_query = "(type_annotation (type_identifier) @type.name)"
-        generic_type_query = "(generic_type (type_identifier) @type.name)"
-        exports_query = """
-        [
-          (export_statement
-            (export_clause (export_specifier name: (identifier) @export.name))
-          )
-          (export_statement
-            (export_clause (export_specifier name: (identifier) @export.orig alias: (identifier) @export.alias))
-          )
-          (export_statement
-            (export_clause (export_from_clause source: (string) @export.from))
-          )
-          (export_statement
-            (export_default_declaration (identifier) @export.default)
-          )
-        ]
-        """
-
-        def run_query_tsx(query_str: str) -> List[Tuple[Any, str]]:
-            q = Query(TSX_LANGUAGE, query_str)
-            captures: List[Tuple[Any, str]] = []
-            cursor = QueryCursor(q)
-            matches = cursor.matches(tree.root_node)
-            for _pattern_index, captures_dict in matches:
-                for cap_name, nodes in captures_dict.items():
-                    for node in nodes:
-                        captures.append((node, cap_name))
-            return captures
-
-        # Imports
-        for node, cap in run_query_tsx(imports_query):
-            if cap == "path":
-                path_text = _get_ts_node_text(node, content_bytes)
-                if (
-                    len(path_text) >= 2
-                    and path_text[0] in ('"', "'")
-                    and path_text[-1] == path_text[0]
-                ):
-                    path_text = path_text[1:-1]
-                result["imports"].append(
-                    {"path": path_text, "line": node.start_point[0] + 1, "symbols": []}
-                )
-
-        # Functions
-        for node, cap in run_query_tsx(functions_query):
-            if cap == "function.name":
-                result["functions"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-
-        # Classes
-        for node, cap in run_query_tsx(classes_query):
-            if cap == "class.name":
-                result["classes"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-
-        # Calls
-        for node, cap in run_query_tsx(calls_query):
-            if cap == "call.name":
-                result["calls"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-
-        # Type references
-        for node, cap in run_query_tsx(type_ann_query):
-            if cap == "type.name":
-                result["type_references"].append(
-                    {
-                        "type_name_str": _get_ts_node_text(node, content_bytes),
-                        "context": "type_annotation",
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-        for node, cap in run_query_tsx(generic_type_query):
-            if cap == "type.name":
-                result["type_references"].append(
-                    {
-                        "type_name_str": _get_ts_node_text(node, content_bytes),
-                        "context": "generic_type",
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-
-        # Exports
-        result.setdefault("exports", [])
-        for node, cap in run_query_tsx(exports_query):
-            if cap == "export.name":
-                result["exports"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-            elif cap == "export.orig":
-                result["exports"].append(
-                    {
-                        "name": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-            elif cap == "export.alias":
-                if result["exports"]:
-                    result["exports"][-1]["alias"] = _get_ts_node_text(
-                        node, content_bytes
-                    )
-            elif cap == "export.from":
-                from_text = _get_ts_node_text(node, content_bytes)
-                if (
-                    len(from_text) >= 2
-                    and from_text[0] in ('"', "'")
-                    and from_text[-1] == from_text[0]
-                ):
-                    from_text = from_text[1:-1]
-                result["exports"].append(
-                    {"from": from_text, "line": node.start_point[0] + 1}
-                )
-            elif cap == "export.default":
-                result["exports"].append(
-                    {
-                        "name": "default",
-                        "alias": _get_ts_node_text(node, content_bytes),
-                        "line": node.start_point[0] + 1,
-                    }
-                )
-
-    except Exception as e:
-        logger.exception(f"TSX analysis error for {file_path}: {e}")
-        result["error"] = f"TSX analysis error: {e}"
-    finally:
-        # Normalization for suggestion pipeline
-        result.setdefault("imports", [])
-        result.setdefault("functions", [])
-        result.setdefault("classes", [])
-        result.setdefault("calls", [])
-        result.setdefault("type_references", [])
-        result.setdefault("exports", [])
-        _normalize_imports(result)
-        result["analysis_kind"] = "tsx"
-        # Ensure exports list exists for re-export links
-        try:
-            result.setdefault("exports", [])
-        except Exception:
-            pass
+    """Tree-sitter analysis for TSX (.tsx) files."""
+    _analyze_js_family_file_ts(file_path, content, result, "tsx")
 
 
 def _analyze_json_file_ts(file_path: str, content: str, result: Dict[str, Any]) -> None:

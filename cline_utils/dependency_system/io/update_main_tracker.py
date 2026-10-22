@@ -25,7 +25,10 @@ from cline_utils.dependency_system.utils.path_utils import (
     normalize_path,
 )
 from cline_utils.dependency_system.utils.tracker_utils import (
+    get_authoritative_tracker_keys,
+    get_unapproved_module_paths,
     read_tracker_file_structured,
+    tracker_path_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,6 +94,18 @@ def main_key_filter(
                 for root_dir in abs_code_roots
             ):
                 filtered_modules[norm_path] = key_info  # Add the KeyInfo object
+
+    # tracker_map.json is authoritative: modules whose mini tracker is not approved
+    # (not in the map) get no key in the main tracker.
+    unapproved = get_unapproved_module_paths(
+        path_to_key_info, config_manager, project_root
+    )
+    for unapproved_path in unapproved:
+        filtered_modules.pop(unapproved_path, None)
+    if unapproved:
+        logger.info(
+            f"Main key filter dropped {len(unapproved)} module(s) whose tracker is not in tracker_map.json."
+        )
 
     logger.info(
         f"Main key filter selected {len(filtered_modules)} module paths for the main tracker."
@@ -175,6 +190,15 @@ def aggregate_dependencies_contextual(
     config = ConfigManager()
     get_priority = config.get_char_priority
 
+    # tracker_map.json is authoritative: a module's mini tracker contributes relations
+    # only if the map lists it. The module KEY stays in the main tracker (the key set
+    # comes from the key map, not from trackers); an unmapped module simply adds no
+    # direct relations (it can still receive them from mapped trackers and roll up).
+    authorized_trackers, _map_is_authoritative = get_authoritative_tracker_keys(
+        config, project_root
+    )
+    skipped_unmapped = 0
+
     # Stores module_path -> target_module_path -> (highest_priority_char, highest_priority)
     aggregated_deps_prio: Dict[str, Dict[str, Tuple[str, int]]] = defaultdict(
         lambda: defaultdict(lambda: (PLACEHOLDER_CHAR, -1))
@@ -192,6 +216,12 @@ def aggregate_dependencies_contextual(
         norm_source_module_path = source_module_path
         mini_tracker_path = _get_mini_tracker_path_local(norm_source_module_path)
         if not os.path.exists(mini_tracker_path):
+            continue
+        if tracker_path_key(mini_tracker_path) not in authorized_trackers:
+            skipped_unmapped += 1
+            logger.debug(
+                f"Main tracker aggregation: skipping '{mini_tracker_path}' (not in tracker_map.json)."
+            )
             continue
 
         processed_mini_trackers += 1
@@ -301,7 +331,8 @@ def aggregate_dependencies_contextual(
             )
 
     logger.info(
-        f"Processed {processed_mini_trackers} mini-trackers for direct dependencies."
+        f"Processed {processed_mini_trackers} mini-trackers for direct dependencies"
+        f" ({skipped_unmapped} existing mini-trackers skipped: not in tracker_map.json)."
     )
 
     # --- Step 2: Perform Hierarchical Rollup (Using Paths) ---

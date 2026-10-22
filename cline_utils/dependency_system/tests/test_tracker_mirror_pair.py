@@ -8,6 +8,7 @@ from cline_utils.dependency_system.core.dependency_grid import decompress
 from cline_utils.dependency_system.core.key_manager import KeyInfo
 from cline_utils.dependency_system.io import update_main_tracker
 from cline_utils.dependency_system.io.tracker_io import update_tracker
+from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.tracker_batch_collector import (
     build_dependency_suggestions_with_reciprocals,
 )
@@ -23,6 +24,16 @@ def _grid(tmp_path: Path, monkeypatch, suggestions, force: bool, *, then=()) -> 
     """Apply ``suggestions`` to a fresh main tracker, then each ``(suggestions, force)`` in ``then``."""
     a, b = _key("1A", tmp_path / "a"), _key("1B", tmp_path / "b")
     tracker_path = tmp_path / "main_tracker.md"
+    # backup_tracker_file() writes to config 'backups_dir', which resolves to an ABSOLUTE
+    # path inside the real repo, so patching get_project_root alone is not enough.
+    real_get_path = ConfigManager.get_path
+
+    def _sandboxed_get_path(self, path_type, default_path=None):
+        if path_type == "backups_dir":
+            return str(tmp_path / "backups")
+        return real_get_path(self, path_type, default_path)
+
+    monkeypatch.setattr(ConfigManager, "get_path", _sandboxed_get_path)
     monkeypatch.setitem(update_main_tracker.main_tracker_data, "get_tracker_path",
                         lambda project_root: str(tracker_path))
     monkeypatch.setitem(update_main_tracker.main_tracker_data, "key_filter",
@@ -72,8 +83,11 @@ def test_forward_only_after_on_disk_mirror_stays_directional(tmp_path, monkeypat
 @pytest.mark.parametrize(
     "initial,followup",
     [
+        # B depends on A on record; force "A depends on B" from A's row ...
         ({"1B": [("1A", "<")]}, {"1A": [("1B", "<")]}),
+        # ... or from B's row (the opposite arrow written into the same cell).
         ({"1B": [("1A", "<")]}, {"1B": [("1A", ">")]}),
+        # A depends on B on record (stated from A's row as '>'); the same two ways.
         ({"1A": [("1B", ">")]}, {"1A": [("1B", "<")]}),
         ({"1A": [("1B", ">")]}, {"1B": [("1A", ">")]}),
     ],
@@ -81,7 +95,8 @@ def test_forward_only_after_on_disk_mirror_stays_directional(tmp_path, monkeypat
 def test_force_add_dependency_over_existing_reverse_edge_is_mutual(
     tmp_path, monkeypatch, initial, followup
 ):
-    # B already depends on A; user force-adds "A depends on B" with reciprocals.
+    # Upstream aa85dd1: a forced edit adding the other direction makes the pair 'x',
+    # whether it lands in the reverse cell or as the opposite arrow in the same cell.
     rows = _grid(
         tmp_path,
         monkeypatch,
@@ -90,6 +105,14 @@ def test_force_add_dependency_over_existing_reverse_edge_is_mutual(
         then=[(build_dependency_suggestions_with_reciprocals(followup), True)],
     )
     assert rows == {"1A": "ox", "1B": "xo"}  # the mirror must not overwrite the promoted 'x'
+
+
+def test_unforced_opposite_arrow_over_existing_arrow_is_not_mutual(tmp_path, monkeypatch):
+    # Without force, an arrow already on disk is not evidence from this pass (it may be
+    # stale or inverted), so the forced-only rule above must not fire.
+    rows = _grid(tmp_path, monkeypatch, {"1B": [("1A", "<")]}, False,
+                 then=[({"1B": [("1A", ">")]}, False)])
+    assert "x" not in rows["1A"] + rows["1B"]
 
 
 def test_unforced_mutual_does_not_clobber_manual_n_override(tmp_path, monkeypatch):
@@ -103,4 +126,3 @@ def test_unforced_mutual_does_not_clobber_manual_n_override(tmp_path, monkeypatc
         then=[({"1A": [("1B", "<")]}, False)],
     )
     assert rows == {"1A": "on", "1B": "<o"}
-

@@ -1,0 +1,6 @@
+{
+  // JSONC: comments and trailing commas must parse.
+  "extends": "./configs/base.json",
+  "include": ["src", "lib",],
+  "references": [{ "path": "./tsconfig.z-ref.json" }],
+}

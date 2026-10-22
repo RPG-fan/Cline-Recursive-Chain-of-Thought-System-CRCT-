@@ -1011,14 +1011,54 @@ class CrossProcessLock:
     Uses platform-specific locking: msvcrt on Windows, fcntl on POSIX.
     """
 
+    # One in-process lock per lock file. Threads of the same process queue on it
+    # (blocking, woken by the OS) and only its holder polls the file lock. When every
+    # thread polled the file itself (try, sleep 50ms, retry), a waiter could keep
+    # losing to threads re-acquiring in tight loops and starve for its whole timeout
+    # although each holder kept the lock for under 10ms.
+    _thread_locks: Dict[str, threading.Lock] = {}
+    _thread_locks_guard = threading.Lock()
+
+    @classmethod
+    def _thread_lock_for(cls, lockfile_path: str) -> threading.Lock:
+        key = os.path.normcase(os.path.abspath(lockfile_path))
+        with cls._thread_locks_guard:
+            lock = cls._thread_locks.get(key)
+            if lock is None:
+                lock = cls._thread_locks[key] = threading.Lock()
+            return lock
+
     def __init__(self, lockfile_path: str):
         super().__init__()
         self.lockfile_path = lockfile_path
         self._fd: Optional[int] = None
+        self._thread_lock = self._thread_lock_for(lockfile_path)
+        self._holds_thread_lock = False
 
     def acquire(self, timeout: float = 60.0, poll_interval: float = 0.05) -> bool:
-        """Acquire the lock, blocking until timeout."""
+        """Acquire the lock, blocking until timeout (the in-process queue and the
+        file lock share the one timeout)."""
         start_time = time.time()
+        if not self._thread_lock.acquire(timeout=max(0.0, timeout)):
+            return False
+        self._holds_thread_lock = True
+        try:
+            if self._acquire_file_lock(start_time, timeout, poll_interval):
+                return True
+        except BaseException:
+            self._release_thread_lock()
+            raise
+        self._release_thread_lock()
+        return False
+
+    def _release_thread_lock(self) -> None:
+        if self._holds_thread_lock:
+            self._holds_thread_lock = False
+            self._thread_lock.release()
+
+    def _acquire_file_lock(
+        self, start_time: float, timeout: float, poll_interval: float
+    ) -> bool:
         # Ensure parent directory exists
         os.makedirs(os.path.dirname(self.lockfile_path), exist_ok=True)
 
@@ -1093,6 +1133,8 @@ class CrossProcessLock:
                 except Exception:
                     pass
                 self._fd = None
+        # File lock first, then let the next queued thread in.
+        self._release_thread_lock()
 
     def __enter__(self) -> "CrossProcessLock":
         if not self.acquire():
@@ -1279,8 +1321,10 @@ class VRAMResourceManager:
         except Exception as e:
             logger.error(f"Failed to save VRAM registry: {e}")
 
-    def _prune_dead_allocations(self, registry: Dict[str, Any]) -> None:
-        """Prune allocations of processes that are no longer running."""
+    def _prune_dead_allocations(self, registry: Dict[str, Any]) -> bool:
+        """Prune allocations of processes that are no longer running.
+
+        Returns True if anything was removed (the registry needs saving)."""
         dead_ids = []
         for alloc_id, alloc in registry.items():
             pid = alloc.get("pid")
@@ -1292,24 +1336,37 @@ class VRAMResourceManager:
                 f"Pruning stale VRAM allocation {alloc_id} from dead process {registry[alloc_id].get('pid')}"
             )
             del registry[alloc_id]
+        return bool(dead_ids)
 
     def _get_physical_vram_gb(self) -> float:
-        """Get total physical VRAM in GB."""
+        """Get total physical VRAM in GB. Queried once; the hardware total never
+        changes, so later calls make no CUDA call."""
+        cached = getattr(self, "_physical_vram_gb", None)
+        if cached:
+            return cached
         if not TORCH_AVAILABLE or torch is None or not torch.cuda.is_available():
             return 0.0
         try:
             _, total_memory = torch.cuda.mem_get_info(0)
-            return total_memory / (1024**3)
+            self._physical_vram_gb = total_memory / (1024**3)
+            return self._physical_vram_gb
         except Exception as e:
             logger.warning(f"Failed to get physical VRAM: {e}")
             return 0.0
 
     def _get_available_vram_gb(self) -> float:
-        """Get actually free VRAM in GB (not accounting for reservations)."""
+        """Get actually free VRAM in GB (not accounting for reservations).
+
+        Never call this while holding the cross-process lock or _allocation_lock. Even
+        without a sync, a CUDA driver call can stall behind other GPU work (e.g. the
+        first reranker forward pass warming up kernels for ~20s), and every other
+        thread's lock attempt would then time out. Callers read it first and pass the
+        value in. No torch.cuda.synchronize(): a caller that wants a post-kernel
+        reading synchronizes itself (the reranker planner does).
+        """
         if not TORCH_AVAILABLE or torch is None or not torch.cuda.is_available():
             return 0.0
         try:
-            torch.cuda.synchronize()
             free_memory, _ = torch.cuda.mem_get_info(0)
             return free_memory / (1024**3)
         except Exception as e:
@@ -1330,13 +1387,14 @@ class VRAMResourceManager:
             + self._safety_buffer_gb,
         )
 
-    def _get_available_for_allocation_locked(self, registry: Dict[str, Any]) -> float:
+    def _get_available_for_allocation_locked(
+        self, registry: Dict[str, Any], free_vram: float, reserved: float
+    ) -> float:
         """
-        Calculate available VRAM using an already-loaded registry.
-        Must be called under _allocation_lock and while holding the CrossProcessLock.
+        Calculate available VRAM using an already-loaded registry and a free/reserved
+        reading taken BEFORE the locks were acquired (no CUDA call happens here).
+        Must be called while holding the CrossProcessLock.
         """
-        free_vram = self._get_available_vram_gb()
-        reserved = self.get_reserved_vram_gb()
         total_allocated = sum(
             float(alloc.get("size_gb", 0.0)) for alloc in registry.values()
         )
@@ -1357,28 +1415,38 @@ class VRAMResourceManager:
         Returns:
             Available VRAM in GB for new allocations
         """
-        with self._allocation_lock:
-            lock = CrossProcessLock(self._lockfile_path)
-            try:
-                if lock.acquire(timeout=5.0):
-                    try:
-                        registry = self._load_registry()
-                        self._prune_dead_allocations(registry)
+        # GPU readings first, outside both locks (see _get_available_vram_gb).
+        free_vram = self._get_available_vram_gb()
+        reserved = self.get_reserved_vram_gb()
+        # Lock order everywhere: CrossProcessLock first, then _allocation_lock.
+        # This query used to hold _allocation_lock while waiting for the file lock,
+        # while request_allocation holds the file lock and then takes
+        # _allocation_lock, so each blocked the other until the 5s timeout.
+        lock = CrossProcessLock(self._lockfile_path)
+        try:
+            if lock.acquire(timeout=5.0):
+                try:
+                    registry = self._load_registry()
+                    # Read-only query: rewrite the shared file only if pruning
+                    # changed it.
+                    if self._prune_dead_allocations(registry):
                         self._save_registry(registry)
-                        return self._get_available_for_allocation_locked(registry)
-                    finally:
-                        lock.release()
-                else:
-                    logger.warning(
-                        "Could not acquire cross-process lock for VRAM query, using cached/local state"
-                    )
-            except Exception as e:
-                logger.warning(f"Error checking cross-process VRAM availability: {e}")
+                    with self._allocation_lock:
+                        return self._get_available_for_allocation_locked(
+                            registry, free_vram, reserved
+                        )
+                finally:
+                    lock.release()
+            else:
+                logger.warning(
+                    "Could not acquire cross-process lock for VRAM query, using cached/local state"
+                )
+        except Exception as e:
+            logger.warning(f"Error checking cross-process VRAM availability: {e}")
 
-            free_vram = self._get_available_vram_gb()
-            reserved = self.get_reserved_vram_gb()
+        with self._allocation_lock:
             available = free_vram - reserved - self._total_allocated_gb
-            return max(0.0, available)
+        return max(0.0, available)
 
     def get_model_footprint(self, model_name: str) -> float:
         """Get the estimated VRAM footprint for a model.
@@ -1458,6 +1526,9 @@ class VRAMResourceManager:
 
         while True:
             # Try to acquire CrossProcessLock to verify and update the global registry
+            # GPU readings first, outside the lock (see _get_available_vram_gb).
+            free_vram = self._get_available_vram_gb()
+            reserved = self.get_reserved_vram_gb()
             try:
                 if lock.acquire(timeout=5.0):
                     try:
@@ -1465,7 +1536,9 @@ class VRAMResourceManager:
                         self._prune_dead_allocations(registry)
 
                         # Calculate available VRAM using the loaded registry
-                        available = self._get_available_for_allocation_locked(registry)
+                        available = self._get_available_for_allocation_locked(
+                            registry, free_vram, reserved
+                        )
 
                         # Check if we can allocate (adding safety buffer)
                         if available >= (size_gb + self._safety_buffer_gb):
@@ -1625,8 +1698,8 @@ class VRAMResourceManager:
             if lock.acquire(timeout=5.0):
                 try:
                     registry = self._load_registry()
-                    self._prune_dead_allocations(registry)
-                    self._save_registry(registry)
+                    if self._prune_dead_allocations(registry):
+                        self._save_registry(registry)
 
                     global_allocated_gb = sum(
                         float(alloc.get("size_gb", 0.0)) for alloc in registry.values()
@@ -1645,14 +1718,18 @@ class VRAMResourceManager:
             global_allocated_gb = self._total_allocated_gb
             global_active_count = len(self._active_allocations)
 
+        # GPU readings outside _allocation_lock (see _get_available_vram_gb).
+        available_gb = self.get_available_for_allocation()
+        physical_gb = self._get_physical_vram_gb()
+        reserved_gb = self.get_reserved_vram_gb()
         with self._allocation_lock:
             return {
                 **self._stats,
                 "current_allocated_gb": global_allocated_gb,
                 "peak_allocated_gb": max(self._peak_allocated_gb, global_allocated_gb),
-                "available_for_allocation_gb": self.get_available_for_allocation(),
-                "physical_vram_gb": self._get_physical_vram_gb(),
-                "reserved_vram_gb": self.get_reserved_vram_gb(),
+                "available_for_allocation_gb": available_gb,
+                "physical_vram_gb": physical_gb,
+                "reserved_vram_gb": reserved_gb,
                 "active_allocations": global_active_count,
             }
 
@@ -1673,20 +1750,21 @@ class VRAMResourceManager:
         Returns:
             Recommended maximum number of workers
         """
-        with self._allocation_lock:
-            available = self.get_available_for_allocation()
+        # No lock held here: both readings make CUDA calls (get_model_footprint even
+        # synchronizes), which must not stall threads waiting on _allocation_lock.
+        available = self.get_available_for_allocation()
 
-            # Get model footprint
-            model_footprint = self.get_model_footprint(model_name)
+        # Get model footprint
+        model_footprint = self.get_model_footprint(model_name)
 
-            # Calculate workers: available VRAM / model footprint
-            if model_footprint <= 0:
-                return 1
+        # Calculate workers: available VRAM / model footprint
+        if model_footprint <= 0:
+            return 1
 
-            max_workers = int(available / model_footprint)
+        max_workers = int(available / model_footprint)
 
-            # Cap at reasonable limits (but allow more workers if VRAM allows)
-            return max(1, min(max_workers, 16))
+        # Cap at reasonable limits (but allow more workers if VRAM allows)
+        return max(1, min(max_workers, 16))
 
     def should_pause_for_backpressure(
         self, threshold_gb: Optional[float] = None

@@ -1,0 +1,1 @@
+{ "compilerOptions": { "allowJs": true, "paths": { "@scripts/*": ["./scripts/*"], "@dup/*": ["./dupb/*"] } }, "include": ["scripts"] }

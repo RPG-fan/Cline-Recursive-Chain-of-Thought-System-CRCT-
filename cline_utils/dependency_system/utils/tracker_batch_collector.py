@@ -29,6 +29,7 @@ from cline_utils.dependency_system.utils.cache_manager import (
 )
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.path_utils import is_subpath, normalize_path
+from cline_utils.dependency_system.utils.tracker_utils import is_authorized_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,31 @@ class TrackerBatchCollector:
         self._backup_mappings: Dict[str, str] = {}
         self.highest_dependency_cache: Dict[Tuple[str, str], Tuple[str, Set[str]]] = {}
         self.key_to_paths: Dict[str, Set[str]] = {}
+        # Lazily computed view of tracker_map.json (see _authorized_tracker_keys).
+        self._authorized_keys: Optional[Set[str]] = None
+        self._map_is_authoritative: bool = False
         super().__init__()
+
+    def _authorized_tracker_keys(self) -> Set[str]:
+        """
+        tracker_path_key()s of the trackers this batch may read or consolidate from:
+        the entries of the raw tracker_map.json (the same set reset-mutual-dependencies
+        works on), or a discovery scan when no map has been saved yet. Computed once per
+        collector; the map is only rewritten at the end of analyze-project.
+        """
+        if self._authorized_keys is None:
+            from cline_utils.dependency_system.utils.tracker_utils import (
+                get_authoritative_tracker_keys,
+            )
+
+            try:
+                self._authorized_keys, self._map_is_authoritative = (
+                    get_authoritative_tracker_keys(ConfigManager(), get_project_root())
+                )
+            except Exception as e:
+                logger.warning(f"Could not resolve authorized trackers: {e}")
+                self._authorized_keys = set()
+        return self._authorized_keys
 
     def add(self, update: TrackerUpdate) -> None:
         """
@@ -201,6 +226,19 @@ class TrackerBatchCollector:
         """
         if not update:
             raise ValueError("Cannot add None update to batch")
+
+        # tracker_map.json is authoritative: an existing tracker file it does not list
+        # is neither updated nor allowed to feed the consolidation cache. (Files that
+        # do not exist yet are new trackers; with no map saved at all nothing is known.)
+        if update.output_file and os.path.exists(update.output_file):
+            authorized = self._authorized_tracker_keys()
+            if self._map_is_authoritative and not is_authorized_tracker(
+                update.output_file, authorized
+            ):
+                logger.warning(
+                    f"Ignoring update for '{update.output_file}': tracker is not in tracker_map.json."
+                )
+                return
 
         # Deduplicate by output_file: if an update for the same file already
         # exists, replace it with the newer one (last-write-wins, which is
@@ -357,9 +395,11 @@ class TrackerBatchCollector:
                     results[update.output_file] = success
 
                     if not success:
-                        logger.warning(
-                            f"Failed to write {update.output_file}, "
-                            "will attempt rollback"
+                        # Not rolled back: the file keeps its previous content, and
+                        # the other trackers of the batch are still written.
+                        logger.error(
+                            f"Failed to write {update.output_file}; it was left "
+                            "unchanged (previous content kept)."
                         )
 
                 except Exception as e:
@@ -388,9 +428,17 @@ class TrackerBatchCollector:
             # Clean up backups on success
             self._cleanup_backups()
 
-            logger.info(
-                f"Successfully committed {len(self.pending_updates)} tracker updates"
-            )
+            failed = [path for path, ok in results.items() if not ok]
+            if failed:
+                logger.error(
+                    f"Committed {len(self.pending_updates) - len(failed)} of "
+                    f"{len(self.pending_updates)} tracker updates; failed (left "
+                    f"unchanged): {', '.join(os.path.basename(p) for p in failed)}"
+                )
+            else:
+                logger.info(
+                    f"Successfully committed {len(self.pending_updates)} tracker updates"
+                )
 
         except Exception as e:
             logger.error(f"Batch write failed: {e}. Initiating rollback...")
@@ -598,6 +646,10 @@ class TrackerBatchCollector:
                                 ac = PLACEHOLDER_CHAR
 
                         cc = dr[ci]
+                        # A verified 'n' is never overwritten by consolidation (only a
+                        # forced manual change replaces it).
+                        if cc == "n" and not u.force_apply_suggestions:
+                            continue
                         if ac != PLACEHOLDER_CHAR and ac != cc:
                             try:
                                 ap, cp = get_priority(ac), get_priority(cc)
@@ -877,20 +929,28 @@ class TrackerBatchCollector:
             logger.error(f"Batch consolidation/pruning error: {e}", exc_info=True)
 
     def _load_ast_links(self) -> List[Dict[str, str]]:
-        """Loads AST-verified links from the central JSON file once per batch."""
+        """
+        Loads AST-verified links from the central JSON file once per batch.
 
-        ast_links_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "analysis",
-            "ast_verified_links.json",
-        )
+        The file is written by analyze-project to core/state/ast_verified_links.json
+        (resolved like project_analyzer/dependency_suggester do) as a plain list of
+        links; a legacy ``{"links": [...]}`` object is accepted as well.
+        """
+        import json
+
+        from cline_utils.dependency_system.core import key_manager, resolve_state_path
+
+        core_dir = os.path.dirname(os.path.abspath(key_manager.__file__))
+        ast_links_path = resolve_state_path("ast_verified_links.json", core_dir)
         if os.path.exists(ast_links_path):
             try:
-                import json
-
                 with open(ast_links_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    return data.get("links", [])
+                if isinstance(data, dict):
+                    data = data.get("links", [])
+                if isinstance(data, list):
+                    return [link for link in data if isinstance(link, dict)]
+                logger.warning(f"Unexpected AST links format in {ast_links_path}")
             except Exception as e:
                 logger.error(f"Error loading AST links: {e}")
         return []
@@ -934,6 +994,10 @@ class TrackerBatchCollector:
                 if ri < len(decomp_rows) and ci < len(decomp_rows[ri]):
                     current = decomp_rows[ri][ci]
                     if current != char:
+                        # 'n' (verified no dependency) is only set by a user / LLM
+                        # resolution and is only replaced by a forced manual change.
+                        if current == "n" and not u.force_apply_suggestions:
+                            continue
                         # AST overrides handle conflict via priority or 'n' logic
                         if get_priority(char) >= get_priority(current) or char == "n":
                             decomp_rows[ri][ci] = char
@@ -959,6 +1023,7 @@ class TrackerBatchCollector:
             read_tracker_file_structured,
         )
 
+        authorized = self._authorized_tracker_keys()
         needed_home_trackers: Set[str] = set()
         for u in self.pending_updates:
             if u.tracker_type != "mini" or not u.module_path:
@@ -972,7 +1037,12 @@ class TrackerBatchCollector:
                     elif ki.parent_path:
                         home_path = get_mini_tracker_path(ki.parent_path)
 
-                    if home_path and os.path.exists(home_path):
+                    # Only trackers listed in tracker_map.json are imported from.
+                    if (
+                        home_path
+                        and os.path.exists(home_path)
+                        and is_authorized_tracker(home_path, authorized)
+                    ):
                         needed_home_trackers.add(home_path)
 
         if not needed_home_trackers:

@@ -117,6 +117,10 @@ def mock_embedding_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         embedding_manager, "rerank_candidates_with_qwen3", lambda *args, **kwargs: []
     )
+    # The suggester calls rerank_candidates_scored ((top_k, scored indices)).
+    monkeypatch.setattr(
+        embedding_manager, "rerank_candidates_scored", lambda *args, **kwargs: ([], set())
+    )
 
     # Ensure _model_instance is set
     embedding_manager._model_instance = mock_model

@@ -172,6 +172,65 @@ def test_e2e_force_embeddings(test_project_e2e: Path, mock_args: MagicMock) -> N
     assert exit_code == 0
 
 
+def test_e2e_analyze_project_typescript(
+    test_project_e2e: Path, mock_args: MagicMock
+) -> None:
+    """
+    analyze-project over TS/TSX/CommonJS sources: analyzer records survive the symbol
+    map, symbol-level JS links are verified, and no CONNECTION_MAP is written into
+    JS/TS sources (their records carry no per-symbol scope data).
+    """
+    src_dir = test_project_e2e / "src"
+    (src_dir / "lib.ts").write_text(
+        "export interface Shape { area(): number }\n"
+        "export class Square implements Shape { area(): number { return 1; } }\n"
+        "export function helper(): number { return 2; }\n"
+    )
+    (src_dir / "app.tsx").write_text(
+        "import { helper, Square } from './lib';\n"
+        "import type { Shape } from './lib';\n"
+        "const legacy = require('./legacy');\n"
+        "export const App = (s: Shape) => { helper(); legacy.run(); return <Square/>; };\n"
+    )
+    (src_dir / "legacy.js").write_text("function run() {}\nmodule.exports = { run };\n")
+
+    clear_all_caches()
+    mock_args.project_root = str(test_project_e2e)
+    assert command_handler_analyze_project(mock_args) == 0
+
+    def find_state(name: str) -> Path:
+        hits = list(test_project_e2e.parent.rglob(name))
+        assert hits, f"{name} not written"
+        return max(hits, key=lambda p: p.stat().st_mtime)
+
+    def norm(p: Path) -> str:
+        return str(p).replace("\\", "/").lower()
+
+    symbol_map = json.loads(find_state("project_symbol_map.json").read_text(encoding="utf-8"))
+    entries = {k.lower(): v for k, v in symbol_map.items()}
+    app = entries[norm(src_dir / "app.tsx")]
+    lib = entries[norm(src_dir / "lib.ts")]
+    assert app["file_type"] == "tsx"
+    assert {s["name"] for i in app["imports"] for s in i["symbols"]} >= {"helper", "Square", "Shape", "legacy"}
+    assert {(c["name"], c["kind"]) for c in lib["classes"]} == {("Shape", "interface"), ("Square", "class")}
+    assert {e["name"] for e in entries[norm(src_dir / "legacy.js")]["exports"]} == {"run"}
+
+    links = json.loads(find_state("ast_verified_links.json").read_text(encoding="utf-8"))
+    # Persisted links merge all reasons for a (source, target) pair: "A, B, C".
+    reasons = {
+        (Path(l["source_path"]).name, Path(l["target_path"]).name, r.strip())
+        for l in links
+        for r in l["reason"].split(",")
+    }
+    assert ("app.tsx", "lib.ts", "JSCall/helper") in reasons
+    assert ("app.tsx", "lib.ts", "JSCall/Square") in reasons  # JSX usage
+    assert ("app.tsx", "lib.ts", "JSTypeRef/Shape") in reasons
+    assert ("app.tsx", "legacy.js", "JSCall/legacy.run") in reasons
+
+    for name in ("lib.ts", "app.tsx", "legacy.js"):
+        assert "CONNECTION_MAP" not in (src_dir / name).read_text(encoding="utf-8")
+
+
 def test_e2e_force_validate(
     test_project_e2e: Path, mock_args: MagicMock, caplog: pytest.LogCaptureFixture
 ) -> None:

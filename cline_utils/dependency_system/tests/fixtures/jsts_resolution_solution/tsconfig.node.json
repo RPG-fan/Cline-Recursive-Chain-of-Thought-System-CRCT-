@@ -1,0 +1,1 @@
+{ "compilerOptions": { "allowJs": true }, "include": ["vite.config.ts"] }

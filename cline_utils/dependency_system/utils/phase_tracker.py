@@ -1,6 +1,11 @@
 import sys
 import time
 import shutil
+
+# At most this many terminal redraws per second. Each redraw rewrites and flushes the
+# whole line; an unthrottled bar redrew ~300 times a second during fast phases, which
+# can freeze the VS Code integrated terminal (and the window) while it re-renders.
+MAX_REDRAWS_PER_SECOND = 10
 from typing import Optional
 
 
@@ -18,6 +23,7 @@ class PhaseTracker:
         self.current = 0
         self.start_time = 0.0
         self.last_update_time = 0.0
+        self._drawn = False
         self.description = ""
         self._check_tty()
 
@@ -39,6 +45,9 @@ class PhaseTracker:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        # Always show the final state (a throttled last update may not have drawn).
+        if self.is_tty:
+            self._print_progress(force=True)
         # Ensure we print a final newline so the cursor moves down
         if self.is_tty:
             sys.stdout.write("\n")
@@ -78,8 +87,9 @@ class PhaseTracker:
         minutes = int(minutes % 60)
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-    def _print_progress(self):
-        """Render the progress bar to stdout."""
+    def _print_progress(self, force: bool = False):
+        """Render the progress bar to stdout (TTY: at most MAX_REDRAWS_PER_SECOND,
+        except the first draw, the completed state and forced draws)."""
         if not self.is_tty:
             if self.total > 0:
                 percent = (self.current / self.total) * 100
@@ -99,6 +109,16 @@ class PhaseTracker:
             pass
 
         now = time.time()
+        complete = self.total > 0 and self.current >= self.total
+        if (
+            not force
+            and not complete
+            and self._drawn
+            and now - self.last_update_time < 1.0 / MAX_REDRAWS_PER_SECOND
+        ):
+            return
+        self._drawn = True
+        self.last_update_time = now
         elapsed = now - self.start_time
 
         # Calculate percentage

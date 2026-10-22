@@ -379,6 +379,25 @@ def handle_determine_dependency(args: argparse.Namespace) -> int:
 # --- Command Handlers ---
 
 
+def _make_json_serializable(obj: Any) -> Any:
+    """Recursively remove non-JSON-serializable objects (AST/tree-sitter trees) from results."""
+    if isinstance(obj, dict):
+        # Remove known non-serializable keys
+        cleaned: Dict[str, Any] = {
+            k: _make_json_serializable(v)
+            for k, v in cast(Dict[str, Any], obj).items()
+            if k not in ("_ast_tree", "_ts_tree")
+        }
+        return cleaned
+    elif isinstance(obj, list):
+        return [_make_json_serializable(item) for item in cast(List[Any], obj)]
+    elif isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    else:
+        # Convert any other non-serializable objects to string representation
+        return str(obj)
+
+
 def command_handler_analyze_file(args: argparse.Namespace) -> int:
     """Handle the analyze-file command."""
 
@@ -386,7 +405,7 @@ def command_handler_analyze_file(args: argparse.Namespace) -> int:
         if not os.path.exists(args.file_path):
             print(f"Error: File not found: {args.file_path}")
             return 1
-        results = analyze_file(args.file_path)
+        results = _make_json_serializable(analyze_file(args.file_path))
         if args.output:
             output_dir = os.path.dirname(args.output)
             os.makedirs(output_dir, exist_ok=True) if output_dir else None
@@ -524,31 +543,12 @@ def command_handler_analyze_project(args: argparse.Namespace) -> int:
         #     f"All Suggestions before Tracker Update: {results.get('dependency_suggestion', {}).get('suggestions')}"
         # )
 
-        # Helper function to make results JSON-serializable by removing AST objects
-        def make_serializable(obj: Any) -> Any:
-            """Recursively remove non-JSON-serializable objects from the results."""
-            if isinstance(obj, dict):
-                # Remove known non-serializable keys
-                cleaned: Dict[str, Any] = {
-                    k: make_serializable(v)
-                    for k, v in cast(Dict[str, Any], obj).items()
-                    if k not in ("_ast_tree", "_ts_tree")
-                }
-                return cleaned
-            elif isinstance(obj, list):
-                return [make_serializable(item) for item in cast(List[Any], obj)]
-            elif isinstance(obj, (str, int, float, bool, type(None))):
-                return obj
-            else:
-                # Convert any other non-serializable objects to string representation
-                return str(obj)
-
         if args.output:
             output_path_abs = normalize_path(os.path.abspath(args.output))
             output_dir = os.path.dirname(output_path_abs)
             os.makedirs(output_dir, exist_ok=True) if output_dir else None
             # Clean results before JSON serialization
-            serializable_results = make_serializable(results)
+            serializable_results = _make_json_serializable(results)
             with open(output_path_abs, "w", encoding="utf-8") as f:
                 json.dump(serializable_results, f, indent=2)
             print(f"Analysis results saved to {output_path_abs}")
@@ -1221,6 +1221,64 @@ def handle_clear_caches(args: argparse.Namespace) -> int:
         return 0
     except Exception as e:
         logger.exception(f"Error clearing caches: {e}")
+        print(f"Error: {e}")
+        return 1
+
+
+def handle_reset_mutual_dependencies(args: argparse.Namespace) -> int:
+    """One-time migration: reset every mutual ('x') cell in every tracker to 'p'."""
+    from cline_utils.dependency_system.core.key_manager import load_tracker_map
+    from cline_utils.dependency_system.utils.reset_mutual import (
+        format_report,
+        reset_mutual_dependencies,
+    )
+
+    try:
+        project_root = get_project_root()
+        config = ConfigManager()
+        # Only used to tell directories from files; tracker labels come from the trackers.
+        path_to_key_info = load_global_key_map() or {}
+
+        # Use the raw tracker_map.json (not only the exclusion-filtered view): analyze-project
+        # builds its 'x'-skip state from the raw map, so excluded-but-registered trackers must
+        # be reset as well. Fall back to discovery when no map has been saved yet.
+        tracker_paths = {normalize_path(p) for p in load_tracker_map() if os.path.exists(p)}
+        if not tracker_paths:
+            tracker_paths = set(find_all_tracker_paths(config, project_root))
+        if not tracker_paths:
+            print("No trackers found.")
+            return 0
+
+        doc_roots: List[str] = []
+        for d in config.get_doc_directories():
+            doc_roots.append(d if os.path.isabs(d) else os.path.join(project_root, d))
+
+        report = reset_mutual_dependencies(
+            sorted(tracker_paths),
+            path_to_key_info,
+            doc_roots=doc_roots,
+            apply=bool(args.apply),
+            project_root=project_root,
+        )
+        text = format_report(report)
+        print(text)
+        if args.output:
+            with open(args.output, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+            print(f"Report saved to {args.output}")
+        if not args.apply:
+            print(
+                "Dry run only. Re-run with --apply to write; then run analyze-project "
+                "and resolve-placeholders to re-verify the reset pairs."
+            )
+        else:
+            print(
+                "Next: run analyze-project (restores code relations), then "
+                "resolve-placeholders for doc pairs."
+            )
+        return 1 if report.has_failures else 0
+    except Exception as e:
+        logger.exception(f"Error in reset-mutual-dependencies: {e}")
         print(f"Error: {e}")
         return 1
 
@@ -3158,6 +3216,24 @@ def main():
         "clear-caches", help="Clear all internal caches"
     )
     clear_caches_parser.set_defaults(func=handle_clear_caches)
+
+    reset_mutual_parser = subparsers.add_parser(
+        "reset-mutual-dependencies",
+        help="One-time migration: reset every mutual ('x') cell in all trackers to 'p'",
+    )
+    reset_mutual_mode = reset_mutual_parser.add_mutually_exclusive_group()
+    reset_mutual_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would change without writing (default)",
+    )
+    reset_mutual_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Back up and rewrite every tracker that holds 'x' cells",
+    )
+    reset_mutual_parser.add_argument("--output", "-o", help="Save the report to a file")
+    reset_mutual_parser.set_defaults(func=handle_reset_mutual_dependencies)
 
     reset_config_parser = subparsers.add_parser(
         "reset-config", help="Reset config to defaults"

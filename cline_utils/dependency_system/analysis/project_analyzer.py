@@ -9,9 +9,12 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
-from cline_utils.dependency_system.analysis import embedding_manager
+from cline_utils.dependency_system.analysis import embedding_manager, similarity_index
 from cline_utils.dependency_system.analysis.dependency_analyzer import analyze_file
 from cline_utils.dependency_system.analysis.dependency_suggester import (
+    load_project_symbol_map,
+    prepare_structural_index,
+    prepare_tracker_relations_index,
     suggest_dependencies,
 )
 from cline_utils.dependency_system.analysis.embedding_manager import generate_embeddings
@@ -53,7 +56,11 @@ from cline_utils.dependency_system.utils.tracker_batch_collector import (
 )
 from cline_utils.dependency_system.utils.tracker_utils import (
     aggregate_all_dependencies,
+    collect_tracker_map_paths,
+    find_all_tracker_paths,
     get_key_global_instance_string,
+    is_discoverable_mini_tracker_path,
+    tracker_path_key,
 )
 from cline_utils.dependency_system.utils.viz.renderer import (
     cleanup_orphaned_render_processes,
@@ -284,38 +291,35 @@ def analyze_project(
     # --- Load Existing Dependency State (for Optimization) ---
     logger.info("Loading existing dependency state for suggestion optimization...")
     existing_dependency_state: Dict[Tuple[str, str], Tuple[str, Set[str]]] = {}
+    # tracker_map.json is the authoritative tracker set: every read/update below is
+    # limited to these trackers (see the note above get_authorized_tracker_paths).
+    authorized_tracker_paths: Set[str] = set()
     try:
-        # Load tracker paths from tracker_map.json
-        tracker_map_path = normalize_path(
-            os.path.join(
-                project_root,
-                "cline_utils",
-                "dependency_system",
-                "core",
-                "state",
-                "tracker_map.json",
+        authorized_tracker_paths = set(find_all_tracker_paths(config, project_root))
+        if authorized_tracker_paths:
+            existing_dependency_state = aggregate_all_dependencies(
+                authorized_tracker_paths,
+                path_migration_info,
+                path_to_key_info,
+                show_progress=False,
             )
-        )
-        if os.path.exists(tracker_map_path):
-            with open(tracker_map_path, "r", encoding="utf-8") as f:
-                tracker_paths = json.load(f)
-
-            if tracker_paths:
-                existing_dependency_state = aggregate_all_dependencies(
-                    set(tracker_paths),
-                    path_migration_info,
-                    path_to_key_info,
-                    show_progress=False,
-                )
-                logger.info(
-                    f"Loaded {len(existing_dependency_state)} existing dependency relationships from {len(tracker_paths)} trackers."
-                )
+            logger.info(
+                f"Loaded {len(existing_dependency_state)} existing dependency relationships from {len(authorized_tracker_paths)} trackers."
+            )
         else:
-            logger.info("tracker_map.json not found. Optimization disabled.")
+            logger.info("No trackers in tracker_map.json yet. Optimization disabled.")
     except Exception as e:
         logger.warning(
             f"Failed to load existing dependency state: {e}. Optimization disabled."
         )
+    authorized_tracker_keys: Set[str] = {
+        tracker_path_key(p) for p in authorized_tracker_paths
+    }
+    # Raw map entries, including ones whose file does not exist (yet): an owner who lists
+    # the path of a tracker they want in a dot-directory gets it created on the next run.
+    listed_tracker_keys: Set[str] = {
+        tracker_path_key(p) for p in key_manager.load_tracker_map()
+    }
 
     # --- File Identification and Filtering ---
     logger.debug("Identifying files for analysis...")
@@ -689,6 +693,37 @@ def analyze_project(
     # Pre-calculate tracked paths set to avoid O(N) reconstruction per file
     tracked_paths_globally = set(path_to_key_info.keys())
 
+    # Upfront bulk passes, so the parallel workers only look results up:
+    # similarity rows from one embedding matrix, and JS/TS import resolution, export
+    # verification and structural links. Either falls back to per-file work on error.
+    try:
+        embeddings_dir_abs = normalize_path(
+            os.path.join(
+                project_root,
+                config.get_path(
+                    "embeddings_dir", "cline_utils/dependency_system/analysis/embeddings"
+                ),
+            )
+        )
+        similarity_index.prepare(embeddings_dir_abs, project_root, path_to_key_info)
+    except Exception as e:
+        logger.warning(f"Upfront similarity index failed; scoring per pair instead: {e}")
+    try:
+        prepare_structural_index(
+            file_analysis_results,
+            path_to_key_info,
+            project_root,
+            load_project_symbol_map(),
+            tracked_paths_globally=tracked_paths_globally,
+        )
+    except Exception as e:
+        logger.warning(f"Upfront structural pass failed; computing per file instead: {e}")
+    embedding_manager.reset_rerank_run_state()
+    try:
+        prepare_tracker_relations_index(config, project_root, path_to_key_info)
+    except Exception as e:
+        logger.warning(f"Upfront tracker relations failed; reading trackers per file instead: {e}")
+
     # Parallel process suggestion generation
     suggestion_results: List[
         Optional[Tuple[str, List[Tuple[str, str]], List[Dict[str, str]]]]
@@ -990,57 +1025,24 @@ def analyze_project(
         read_tracker_file_structured,
     )
 
-    # Get all tracker paths from tracker_map.json
+    # Only trackers in tracker_map.json (authorized_tracker_paths) are pre-loaded.
     try:
-        core_dir = os.path.dirname(os.path.abspath(key_manager.__file__))
-        tracker_map_path = os.path.join(core_dir, "state", "tracker_map.json")
-        if os.path.exists(tracker_map_path):
-            with open(tracker_map_path, "r", encoding="utf-8") as f:
-                tracker_map = json.load(f)
-
-            # Flatten all paths from the map
-            all_tracker_paths: List[str] = []
-            if isinstance(tracker_map, list):
-                # Cast list to avoid 'Unknown' iteration type
-                all_tracker_paths = [str(p) for p in cast(List[Any], tracker_map)]
-            elif isinstance(tracker_map, dict):
-                # Cast to help Pyright with nested dict access
-                t_map_dict = cast(Dict[str, Any], tracker_map)
-                trackers_section = t_map_dict.get("trackers")
-                if isinstance(trackers_section, dict):
-                    # Cast trackers_section.values() to avoid 'Unknown' group type
-                    for group in cast(Dict[str, Any], trackers_section).values():
-                        if isinstance(group, dict):
-                            all_tracker_paths.extend(
-                                [str(v) for v in cast(Dict[str, Any], group).values()]
-                            )
-                        elif isinstance(group, list):
-                            all_tracker_paths.extend(
-                                [str(v) for v in cast(List[Any], group)]
-                            )
-
-            for t_path_entry in all_tracker_paths:
-                # If path is already absolute, use it; otherwise join with project_root
-                if os.path.isabs(t_path_entry):
-                    t_path_abs = normalize_path(t_path_entry)
-                else:
-                    t_path_abs = normalize_path(
-                        os.path.join(project_root, t_path_entry)
+        for t_path_abs in sorted(authorized_tracker_paths):
+            t_path_abs = normalize_path(t_path_abs)
+            if os.path.exists(t_path_abs):
+                try:
+                    structured_data = read_tracker_file_structured(
+                        t_path_abs, include_raw_lines=True
                     )
-                if os.path.exists(t_path_abs):
-                    try:
-                        structured_data = read_tracker_file_structured(
-                            t_path_abs, include_raw_lines=True
-                        )
-                        if structured_data:
-                            tracker_cache[t_path_abs] = structured_data
-                    except Exception as e_preload:
-                        logger.warning(
-                            f"Failed to pre-load tracker '{t_path_abs}': {e_preload}"
-                        )
+                    if structured_data:
+                        tracker_cache[t_path_abs] = structured_data
+                except Exception as e_preload:
+                    logger.warning(
+                        f"Failed to pre-load tracker '{t_path_abs}': {e_preload}"
+                    )
         logger.info(f"Successfully cached {len(tracker_cache)} trackers.")
     except Exception as e_map:
-        logger.error(f"Failed to read tracker_map.json for pre-loading: {e_map}")
+        logger.error(f"Failed to pre-load trackers from tracker_map.json: {e_map}")
 
     # --- Update Trackers ---
     logger.info("Updating trackers...")
@@ -1095,6 +1097,8 @@ def analyze_project(
     batch_collector = TrackerBatchCollector()
 
     # --- Collect Mini Tracker Updates ---
+    skipped_unmapped_trackers: List[str] = []
+    skipped_undiscoverable_trackers: List[str] = []
     with PhaseTracker(
         total=len(potential_mini_tracker_dirs), phase_name="Preparing Mini Trackers"
     ) as tracker:
@@ -1129,6 +1133,27 @@ def analyze_project(
                     tracker_type="mini",
                     module_path=norm_module_path,
                 )
+                # tracker_map.json is authoritative. An existing tracker the map does
+                # not list (e.g. one in a dot-directory) is left untouched; a missing
+                # tracker is created if the map lists it or discovery will find (and
+                # so record) it.
+                if os.path.exists(mini_tracker_path_val):
+                    if tracker_path_key(mini_tracker_path_val) not in authorized_tracker_keys:
+                        skipped_unmapped_trackers.append(mini_tracker_path_val)
+                        analysis_results["tracker_updates"]["mini"][
+                            norm_module_path
+                        ] = "skipped_unmapped"
+                        continue
+                elif tracker_path_key(
+                    mini_tracker_path_val
+                ) not in listed_tracker_keys and not is_discoverable_mini_tracker_path(
+                    mini_tracker_path_val, config, project_root
+                ):
+                    skipped_undiscoverable_trackers.append(mini_tracker_path_val)
+                    analysis_results["tracker_updates"]["mini"][
+                        norm_module_path
+                    ] = "skipped_undiscoverable"
+                    continue
                 logger.debug(
                     f"Preparing mini tracker for module '{norm_module_path}' (Key: {module_key_info_obj.key_string})"
                 )
@@ -1190,6 +1215,20 @@ def analyze_project(
                 logger.debug(
                     f"Skipping mini-tracker update for empty module directory: {norm_module_path}"
                 )
+
+    if skipped_unmapped_trackers:
+        logger.info(
+            f"Skipped {len(skipped_unmapped_trackers)} existing mini tracker(s) not listed in "
+            "tracker_map.json (add a tracker to the map to track it):"
+        )
+        for skipped_path in skipped_unmapped_trackers:
+            logger.info(f"  - {skipped_path}")
+    if skipped_undiscoverable_trackers:
+        logger.info(
+            f"Did not create {len(skipped_undiscoverable_trackers)} new mini tracker(s) that "
+            "tracker discovery would not find (dot-directories / excluded paths)."
+        )
+    analysis_results["skipped_unmapped_trackers"] = sorted(skipped_unmapped_trackers)
 
     # --- Collect Doc Tracker Update ---
     doc_directories_rel = config.get_doc_directories()
@@ -1344,10 +1383,9 @@ def analyze_project(
     # to ensure it contains all current trackers (main, doc, and all mini-trackers).
     try:
         logger.info("Updating persistent tracker map...")
-        current_tracker_paths = tracker_io.find_all_tracker_paths(
-            config, project_root, force_scan=True
-        )
-        key_manager.save_tracker_map(list(current_tracker_paths))
+        # Union of discovery and the existing map: trackers the owner opted in by hand
+        # (e.g. in a dot-directory) must survive the refresh.
+        key_manager.save_tracker_map(collect_tracker_map_paths(config, project_root))
         state_mgr.mark_completed({"trackers_committed": len(batch_collector)})
     except Exception as e:
         logger.error(f"Failed to update persistent tracker map: {e}")

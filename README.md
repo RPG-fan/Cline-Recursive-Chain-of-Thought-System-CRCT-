@@ -1,7 +1,15 @@
-# Cline Recursive Chain-of-Thought System (CRCT) - v8.4
+# Cline Recursive Chain-of-Thought System (CRCT) - v8.5
 
 Welcome to the **Cline Recursive Chain-of-Thought System (CRCT)**, a framework designed to manage context, dependencies, and tasks in large-scale Cline projects within VS Code. Built for the Cline extension, CRCT leverages a recursive, file-based approach with a modular dependency tracking system to maintain project state and efficiency as complexity increases.
 
+- Version **v8.5**: 🚀 **UNIFIED STRUCTURAL ENGINE, JS/TS OVERHAUL & BULK ANALYSIS** - Precision, Speed & Tracker Integrity
+    - **Unified Multi-Language Structural Engine (`structural_engine.py`)**: Consolidated dependency suggestion across Python, JS/TS/TSX, Svelte, CSS, HTML, JSON, SQL, and Markdown into a single adapter-driven workflow with deterministic symbol verification.
+    - **TypeScript-Accurate JS/TS Analyzer & Resolver (`js_ts_queries.py`, `js_tsconfig.py`, `js_verification_registry.py`)**: Replaced separate JS/TS/TSX analyzers with a unified tree-sitter query engine and full JSONC `tsconfig.json` module resolution (`extends`, `references`, `paths`, `baseUrl`, `.js`→`.ts` source resolution, and bundler aliases).
+    - **Upfront Bulk Suggestion Passes & Similarity Index (`similarity_index.py`)**: Pre-loads all embeddings once into a single `float32` matrix and pre-indexes JS structural links and tracker relations before worker threads start—cutting suggestion phase wall-clock time on an 820-file project from ~1,433s to ~60s (~3s when nothing requires reranking).
+    - **SES-Aware Embedding Invalidation & Safe Model Handling**: Tracks `ses_hash` in `metadata.json` so files re-embed whenever their Symbol Essence String changes even if source files were not edited; performs structural-only GGUF checks during model selection and skips embedding updates on transient VRAM contention to preserve existing Qwen3 vectors and model weights.
+    - **Directional Tracker Integrity & Mutual Reset (`reset-mutual-dependencies`)**: Fixed opposed `<`/`>` arrow merges so one-way dependencies are never mis-upgraded into mutual `x` links, and added the `reset-mutual-dependencies` CLI command (`--dry-run` / `--apply`) with full backup snapshots to repair legacy `x` cells.
+    - **Atomic Tracker I/O, VRAM Coordination & Freeze Mitigations**: Atomic temp-file-and-swap writes for all trackers (`main`, `doc`, `mini`), deadlock-free cross-process/in-process VRAM locking (`CrossProcessLock`), last-token-only reranker logits (`logits_to_keep=1`), KV-cache source-group pinning in `PlaceholderResolver`, and throttled `PhaseTracker` redraws.
+    - **Precise Symbol-Level Connection Maps & Virtualization**: Upgraded `TransparencyManager` to virtualize `[AUTO]` comments in `transparency_registry.json` with `KEY(symbol:line) {char}` precision and hardened drift recovery.
 - Version **v8.4**: **OPTIMIZATION & NATIVE VIZ** - High-Performance Scaling & Dependency Annotation
     - **Optimization**: Refactored dependency resolution to $O(M)$ complexity using global set sharing, eliminating redundant path reconstruction.
     - **Deterministic LLM Tasking**: Implemented monotonically decreasing context-size sorting for LLM resolution tasks to maximize VRAM efficiency and minimize model reloads.
@@ -96,6 +104,13 @@ Welcome to the **Cline Recursive Chain-of-Thought System (CRCT)**, a framework d
       *   Example: `python -m cline_utils.dependency_system.dependency_processor resolve-placeholders --tracker <path_to_tracker.md>`
     - `determine-dependency`: **(NEW in v8.2)** Performs a detailed local LLM analysis between two specific keys to verify their relationship with full reasoning.
       *   Example: `python -m cline_utils.dependency_system.dependency_processor determine-dependency --source-key <key> --target-key <key>`
+    - `reset-mutual-dependencies`: **(NEW in v8.5)** Resets mutual (`x`) dependency cells across all trackers listed in `tracker_map.json` back to `p` (`--dry-run` by default; `--apply` writes atomically with full backup snapshots under `<backups_dir>/x_reset_<timestamp>/`). Run once after upgrading to v8.5 before re-running `analyze-project` and `resolve-placeholders`.
+      *   Example: `python -m cline_utils.dependency_system.dependency_processor reset-mutual-dependencies --dry-run`
+- **Unified Structural & Bulk Semantic Analysis**: **(NEW in v8.5)**
+    - **Adapter-Driven Structural Engine**: Shared suggestion pipeline (`structural_engine.py`) across Python, JS/TS/TSX, Svelte, CSS, HTML, JSON, SQL, and Markdown with verified symbol usage tracking.
+    - **TypeScript-Accurate Module Resolution**: Full JSONC `tsconfig.json` support (`extends`, `references`, `paths`, `baseUrl`, and `.js`-to-`.ts` source resolution).
+    - **Single-Matrix Similarity Index**: Loads all project embeddings once into a unified matrix (`similarity_index.py`) for instant $O(1)$ per-file matrix-vector similarity scoring.
+    - **SES-Aware Invalidation**: Tracks `ses_hash` per file to automatically refresh embeddings when AST/runtime symbol essence changes.
    - **Dependency Visualization (`visualize-dependencies`)**: **(NEW in v7.8)**
     - Generates Mermaid diagrams for project overview, module scope (internal + interface), or specific key focus.
     - Auto-generates overview/module diagrams via `analyze-project`.
@@ -108,9 +123,10 @@ Welcome to the **Cline Recursive Chain-of-Thought System (CRCT)**, a framework d
     - New template for Roadmap Summaries.
 - **Configurable Embedding Device**: Allows users to configure the embedding device (`cpu`, `cuda`, `mps`) via `.clinerules.config.json` for optimized performance on different hardware. (Note: *the system does not yet install the requirements for cuda or mps automatically, please install the requirements manually or with the help of the LLM.*)
 - **File Exclusion Patterns**: Users can now define file exclusion patterns in `.clinerules.config.json` to customize project analysis.
-- **Automated Dependency Annotation**: **(NEW in v8.4)**
+- **Automated Dependency Annotation & Transparency Virtualization**: **(NEW in v8.4, Enhanced in v8.5)**
     - Automatically injects **Station Headers** (ROLE, LAYER, CRCT_KEY) at the top of source files.
-    - Adds **Connection Maps** (dependency rails) before function and class definitions.
+    - Adds precise symbol-level **Connection Maps** (`KEY(symbol:line) {char}`) before function and class definitions.
+    - Virtualizes `[AUTO]` comments via `TransparencyManager` (`transparency_registry.json`) with hardened drift recovery, keeping working trees clean while enriching Symbol Essence Strings (SES).
     - Preserves agent-authored prose in `[FILL: ...]` tags while refreshing architectural metadata.
 - **Experimental Native SVG Visualization**: **(NEW in v8.4)**
     - A Python-native renderer for high-density dependency graphs.
@@ -267,28 +283,38 @@ Cline-Recursive-Chain-of-Thought-System-CRCT-/
 │     │    dependency_analyzer.py
 │     │    dependency_suggester.py
 │     │    embedding_manager.py
+│     │    js_ts_queries.py        # Unified tree-sitter JS/TS/TSX query engine
+│     │    js_tsconfig.py          # JSONC tsconfig & module resolution
+│     │    js_verification_registry.py # Cross-file JS/TS symbol verification
 │     │    local_llm_processor.py
 │     │    project_analyzer.py
 │     │    reranker_history_tracker.py
 │     │    runtime_inspector.py
+│     │    similarity_index.py     # Upfront bulk embedding similarity matrix
+│     │    structural_engine.py    # Shared multi-language suggestion engine
 │     │    symbol_map_merger.py   # Merges runtime + AST symbol maps
 │     ├──core/                    # Core logic and exceptions
 │     │    dependency_grid.py     # Grid compression/decompression
 │     │    exceptions_enhanced.py
 │     │    key_manager.py         # Key generation & resolution
 │     ├──io/                      # IO and tracker management
-│     │    tracker_io.py          # Read/write tracker files
+│     │    tracker_io.py          # Atomic read/write tracker files
+│     │    transparency_manager.py # Comment virtualization & drift recovery
 │     │    update_doc_tracker.py
 │     │    update_main_tracker.py
 │     │    update_mini_tracker.py
 │     └──utils/                   # Utility modules
 │          batch_processor.py      # Enhanced with PhaseTracker
 │          cache_manager.py        # Persistent Pickle caching & stable hashing
+│          calculate_hash.py       # Normalized content hashing
 │          config_manager.py
+│          cross_process_lock.py   # Cross-process & in-process file locking
 │          path_utils.py           # Path normalization utilities
 │          phase_tracker.py
 │          placeholder_resolver.py # LLM-assisted resolution
+│          reset_mutual.py         # One-time mutual ('x') dependency reset
 │          resource_validator.py
+│          tokenizer_factory.py    # Centralized tokenizer loading & counting
 │          tracker_batch_collector.py
 │          tracker_utils.py        # Tracker read/aggregate helpers
 │          visualize_dependencies.py # Orchestrator for viz
@@ -318,6 +344,7 @@ Cline-Recursive-Chain-of-Thought-System-CRCT-/
 
 ## Current Status & Future Plans
 
+- **v8.5**: 🚀 **Unified Structural Engine, JS/TS Overhaul & Bulk Analysis** - Unified multi-language suggestion engine, TypeScript-accurate module resolution, upfront single-matrix similarity index, SES-aware embedding invalidation, directional tracker integrity (`reset-mutual-dependencies`), symbol-level comment virtualization, and hardened VRAM/atomic I/O stability.
 - **v8.4**: ⚡ **Optimization & Native Viz** - Refactored dependency resolution to $O(M)$, introduced experimental native SVG rendering, and deployed the automated comment-skill annotation system.
 - **v8.3**: 🎨 **Modular Viz & Stable Caching** - Refactored visualization architecture into a dedicated `viz` package and implemented stable SHA256 hashing for reliable persistent caching.
 - **v8.2**: 🤖 **Local LLM & Dual-Tokens** - Automated resolution of dependency placeholders and precise token-based context management.

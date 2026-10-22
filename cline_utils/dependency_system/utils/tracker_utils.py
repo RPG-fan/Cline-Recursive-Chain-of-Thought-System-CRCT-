@@ -22,7 +22,12 @@ from cline_utils.dependency_system.core.key_manager import (
 from .cache_manager import cached
 from .cache_manager import normalize_path_cached as normalize_path
 from .config_manager import ConfigManager
-from .path_utils import PathMigrationInfo, _strip_invisible_chars
+from .path_utils import (
+    PathMigrationInfo,
+    _strip_invisible_chars,
+    is_path_excluded,
+    is_subpath,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -322,6 +327,59 @@ def read_tracker_file_structured(
         return empty_result
 
 
+def _build_mini_tracker_exclusions(
+    config: ConfigManager, project_root: str
+) -> Tuple[List[str], List[str]]:
+    """
+    Returns (excluded_dirs_rel, excluded_paths_abs) used to filter mini trackers.
+
+    excluded_paths_abs is resolved from the raw 'excluded_paths' setting only.
+    ConfigManager.get_excluded_paths() is deliberately not used: it also expands
+    'excluded_file_patterns' by globbing the whole project, and the default
+    patterns include '*_module.md', which would match every mini tracker.
+    """
+    excluded_dirs_rel = [str(d) for d in (config.get_excluded_dirs() or [])]
+    excluded_paths_abs: List[str] = []
+    for p in config.config.get("excluded_paths", []) or []:
+        p = str(p)
+        excluded_paths_abs.append(
+            normalize_path(p if os.path.isabs(p) else os.path.join(project_root, p))
+        )
+    return excluded_dirs_rel, excluded_paths_abs
+
+
+def _is_mini_tracker_excluded(
+    tracker_path: str,
+    project_root: str,
+    excluded_dirs_rel: List[str],
+    excluded_paths_abs: List[str],
+) -> bool:
+    """
+    True if a mini tracker lives under a directory the project excludes.
+
+    Mirrors analyze_file (dependency_analyzer.py): an excluded_dirs entry is a
+    project-root-relative directory checked with is_subpath. It also mirrors the
+    project_analyzer walk, which prunes a directory whose bare name is in
+    excluded_dirs at any depth (node_modules, dist, ...; exact, case-sensitive
+    like the walk), and excluded_paths via
+    is_path_excluded. Paths outside project_root are never excluded.
+    """
+    norm_path = normalize_path(tracker_path)
+    norm_root = normalize_path(project_root)
+    if not is_subpath(norm_path, norm_root):
+        return False
+    dir_parts = norm_path[len(norm_root) + 1 :].split("/")[:-1]
+    for excluded in excluded_dirs_rel:
+        excluded_norm = excluded.replace("\\", "/").strip("/")
+        if not excluded_norm:
+            continue
+        if is_subpath(norm_path, normalize_path(os.path.join(project_root, excluded))):
+            return True
+        if "/" not in excluded_norm and excluded_norm in dir_parts:
+            return True
+    return is_path_excluded(norm_path, excluded_paths_abs)
+
+
 def find_all_tracker_paths(
     config: ConfigManager, project_root: str, force_scan: bool = False
 ) -> Set[str]:
@@ -330,7 +388,19 @@ def find_all_tracker_paths(
         cached_paths = load_tracker_map()
         if cached_paths:
             # Return only those that still exist on disk
-            existing_cached = {p for p in cached_paths if os.path.exists(p)}
+            excl_dirs, excl_paths = _build_mini_tracker_exclusions(config, project_root)
+            # Only mini trackers are filtered; main/doc trackers (memory_dir) are kept.
+            existing_cached = {
+                p
+                for p in cached_paths
+                if os.path.exists(p)
+                and not (
+                    p.endswith("_module.md")
+                    and _is_mini_tracker_excluded(
+                        p, project_root, excl_dirs, excl_paths
+                    )
+                )
+            }
             if existing_cached:
                 # logger.debug(f"Using {len(existing_cached)} tracker paths from persistent map.")
                 return existing_cached
@@ -378,6 +448,9 @@ def find_all_tracker_paths(
             "No code_root_directories configured. Cannot find mini trackers."
         )
     else:
+        excluded_dirs_rel, excluded_paths_abs = _build_mini_tracker_exclusions(
+            config, project_root
+        )
         for code_root_rel in code_roots_rel:
             code_root_abs = normalize_path(os.path.join(project_root, code_root_rel))
             mini_tracker_pattern = os.path.join(code_root_abs, "**", "*_module.md")
@@ -385,6 +458,7 @@ def find_all_tracker_paths(
                 found_mini_trackers = glob.glob(mini_tracker_pattern, recursive=True)
                 normalized_mini_paths: Set[str] = set()
                 warned_invisible = False
+                excluded_count = 0
                 for mt_path in found_mini_trackers:
                     stripped = _strip_invisible_chars(mt_path)
                     if stripped != mt_path:
@@ -394,6 +468,11 @@ def find_all_tracker_paths(
                             )
                             warned_invisible = True
                     normed = normalize_path(stripped)
+                    if _is_mini_tracker_excluded(
+                        normed, project_root, excluded_dirs_rel, excluded_paths_abs
+                    ):
+                        excluded_count += 1
+                        continue
                     normalized_mini_paths.add(normed)
                 all_tracker_paths.update(normalized_mini_paths)
                 if warned_invisible:
@@ -405,7 +484,8 @@ def find_all_tracker_paths(
                         f"Filtered {affected_count} mini tracker path(s) with invisible characters under '{code_root_rel}'."
                     )
                 logger.debug(
-                    f"Found {len(normalized_mini_paths)} mini trackers under '{code_root_rel}'."
+                    f"Found {len(normalized_mini_paths)} mini trackers under '{code_root_rel}'"
+                    f" ({excluded_count} skipped as excluded)."
                 )
             except Exception as e:
                 logger.error(
@@ -413,6 +493,129 @@ def find_all_tracker_paths(
                 )
     # logger.debug(f"Found {len(all_tracker_paths)} total tracker files.")
     return all_tracker_paths
+
+
+# --- tracker_map.json is the authoritative tracker set ---------------------------------
+# Which folders are tracked is the repository owner's choice, recorded in
+# core/state/tracker_map.json. Everything that reads, updates or consolidates trackers
+# (analyze-project mini-tracker preparation, TrackerBatchCollector, aggregation, show-*)
+# goes through find_all_tracker_paths(), which returns the map's entries. The helpers
+# below give analyze-project/the batch collector the same view as a normalized key set.
+#
+# * An existing tracker file that is NOT in the map is never updated and never imported.
+#   (Discovery globs "**/*_module.md" and therefore skips dot-directories such as
+#   ".agents"; trackers there are only tracked if the owner adds them to the map.)
+# * A tracker file that does not exist yet is created only if discovery would find it
+#   (see is_discoverable_mini_tracker_path), so the end-of-run map refresh records it.
+# * The map is only ever extended by the end-of-run refresh (collect_tracker_map_paths):
+#   owner-added entries survive, entries whose file vanished or whose dir is excluded
+#   are dropped.
+
+
+def tracker_path_key(path: str) -> str:
+    """Case/separator-normalized key used to compare tracker paths."""
+    return os.path.normcase(normalize_path(path))
+
+
+def get_authorized_tracker_paths(config: ConfigManager, project_root: str) -> Set[str]:
+    """
+    Normalized keys (tracker_path_key) of every tracker CRCT may read or update:
+    the existing, non-excluded entries of tracker_map.json (or a discovery scan
+    when no map has been saved yet).
+    """
+    return {tracker_path_key(p) for p in find_all_tracker_paths(config, project_root)}
+
+
+def get_authoritative_tracker_keys(
+    config: ConfigManager, project_root: str
+) -> Tuple[Set[str], bool]:
+    """
+    (tracker_path_key set, map_is_authoritative) for readers that must only consume
+    trackers the owner registered: the raw tracker_map.json entries (the set
+    reset-mutual-dependencies works on), or, when no map has been saved yet, a
+    discovery scan with ``map_is_authoritative=False``.
+    """
+    mapped = load_tracker_map()
+    if mapped:
+        return {tracker_path_key(p) for p in mapped}, True
+    return get_authorized_tracker_paths(config, project_root), False
+
+
+def is_authorized_tracker(tracker_path: str, authorized: Set[str]) -> bool:
+    return tracker_path_key(tracker_path) in authorized
+
+
+def is_discoverable_mini_tracker_path(
+    tracker_path: str, config: ConfigManager, project_root: str
+) -> bool:
+    """
+    True if find_all_tracker_paths(force_scan=True) would find a mini tracker at
+    ``tracker_path``: it lies under a code root, no component below the code root
+    starts with '.' (glob's '**' and '*' skip dot entries), and it is not excluded.
+    """
+    norm_path = normalize_path(tracker_path)
+    for code_root_rel in config.get_code_root_directories() or []:
+        code_root_abs = normalize_path(os.path.join(project_root, code_root_rel))
+        if not is_subpath(norm_path, code_root_abs):
+            continue
+        rel_parts = norm_path[len(code_root_abs) :].strip("/").split("/")
+        if any(part.startswith(".") for part in rel_parts):
+            continue
+        excl_dirs, excl_paths = _build_mini_tracker_exclusions(config, project_root)
+        if _is_mini_tracker_excluded(norm_path, project_root, excl_dirs, excl_paths):
+            continue
+        return True
+    return False
+
+
+def get_unapproved_module_paths(
+    path_to_key_info: Dict[str, KeyInfo], config: ConfigManager, project_root: str
+) -> Set[str]:
+    """
+    Normalized paths of module directories (under a code root) whose mini tracker is not
+    approved: the tracker file exists but is not in tracker_map.json, or it does not exist
+    and discovery would not create it (dot-directory, excluded path) and the map does not
+    list it. Their keys are left out of the main tracker and out of other modules' mini
+    trackers, exactly as if ``remove-key`` had been run for them.
+    """
+    authorized, _ = get_authoritative_tracker_keys(config, project_root)
+    listed = {tracker_path_key(p) for p in load_tracker_map()}
+    code_roots = [
+        normalize_path(os.path.join(project_root, r))
+        for r in (config.get_code_root_directories() or [])
+    ]
+    unapproved: Set[str] = set()
+    for norm_path, ki in path_to_key_info.items():
+        if not ki.is_directory:
+            continue
+        if not any(norm_path == r or is_subpath(norm_path, r) for r in code_roots):
+            continue
+        name = os.path.basename(norm_path.rstrip("/"))
+        if not name:
+            continue
+        tracker = os.path.join(norm_path, f"{name}_module.md")
+        key = tracker_path_key(tracker)
+        if os.path.exists(tracker):
+            if key not in authorized:
+                unapproved.add(norm_path)
+        elif key not in listed and not is_discoverable_mini_tracker_path(
+            tracker, config, project_root
+        ):
+            unapproved.add(norm_path)
+    return unapproved
+
+
+def collect_tracker_map_paths(config: ConfigManager, project_root: str) -> List[str]:
+    """
+    Paths to persist in tracker_map.json after a run: freshly discovered trackers
+    plus the existing map entries (owner opt-ins such as a tracker in a dot-directory).
+    """
+    merged: Dict[str, str] = {
+        tracker_path_key(p): p for p in find_all_tracker_paths(config, project_root)
+    }
+    for p in find_all_tracker_paths(config, project_root, force_scan=True):
+        merged[tracker_path_key(p)] = p
+    return sorted(merged.values())
 
 
 def get_global_map_cache_key_part(global_map: Dict[str, Any]) -> str:

@@ -486,8 +486,19 @@ class Cache:
                 )
 
     def is_expired(self) -> bool:
-        self.flush()
-        return (time.time() - self.creation_time) > self.default_ttl and not self.data
+        """Past its TTL and holding nothing in either layer.
+
+        No flush: get_cache() calls this on every cached-function call, and flushing
+        walked all of L1 each time (~45us; most of the suggestion phase's CPU). It
+        flushed only so dirty L1 items counted as data. A clean L1 item always also
+        lives in L2, so "L2 empty after a flush" is exactly "both layers empty now".
+        """
+        with self.lock:
+            return (
+                (time.time() - self.creation_time) > self.default_ttl
+                and not self.data
+                and not self.l1_data
+            )
 
     def invalidate(self, key_pattern: str) -> None:
         """Invalidate entries matching a key pattern (supports regex). Also invalidates dependent entries."""
@@ -526,7 +537,9 @@ class Cache:
                     except KeyError:
                         pass
 
-            if processed_for_invalidation:
+            # Only whole-cache invalidations are logged; per-file ones run once per
+            # tracker write (100+ lines per run) and carry no actionable information.
+            if processed_for_invalidation and key_pattern == ".*":
                 logger.debug(
                     f"Cache '{self.name}': Invalidated {len(processed_for_invalidation)} entries matching pattern '{key_pattern}'."
                 )
@@ -647,6 +660,7 @@ class CacheManager:
         if cache_name in self._pending_dealias:
             self._pending_dealias.discard(cache_name)
             cache = self.caches[cache_name]
+            cache.flush()  # is_expired() no longer flushes; include any L1 items
             raw_data = {k: v[0] for k, v in cache.data.items()}
             dealiased = dealias_data(raw_data, cache_name)
             # Rebuild cache with de-aliased data, preserving TTL/access metadata

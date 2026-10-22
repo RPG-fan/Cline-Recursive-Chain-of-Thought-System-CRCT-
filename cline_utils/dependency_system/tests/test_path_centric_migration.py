@@ -10,7 +10,7 @@ from cline_utils.dependency_system.core.analysis_state_manager import (
     AnalysisPhase,
     AnalysisStateManager,
 )
-from cline_utils.dependency_system.core.key_manager import KeyInfo
+from cline_utils.dependency_system.core.key_manager import KeyInfo, save_tracker_map
 from cline_utils.dependency_system.core.dependency_grid import compress, decompress
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.path_utils import normalize_path
@@ -102,6 +102,9 @@ def test_import_external_relationships_uses_paths_not_stale_keys(tmp_path: Path)
         module_path=normalize_path(str(tmp_path / "other")),
     )
     collector.add(update)
+
+    # tracker_map.json is authoritative: only home trackers it lists are imported from.
+    save_tracker_map([normalize_path(str(home_tracker))])
 
     # 3. Trigger _import_external_relationships
     collector._import_external_relationships(config, project_root, set())

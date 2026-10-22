@@ -17,6 +17,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union, cast
 
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
+from cline_utils.dependency_system.utils.generated_files import generated_reason
 from cline_utils.dependency_system.utils.path_utils import (
     get_project_root,
     normalize_path,
@@ -262,6 +263,8 @@ def generate_keys(
         if excluded_file_patterns is not None
         else config_manager.config.get("excluded_file_patterns", [])
     )
+    exclude_generated = config_manager.get_exclude_generated_files()
+    generated_skipped: Dict[str, int] = defaultdict(int)  # reason -> count
     project_root = get_project_root()
     absolute_excluded_dirs = {
         normalize_path(os.path.join(project_root, d)) for d in excluded_dirs_names
@@ -368,6 +371,7 @@ def generate_keys(
             except OSError as e:
                 logger.error(f"Error accessing directory '{dir_path}': {e}")
                 return
+            lower_items = {name.lower() for name in items}
 
             # --- Initialize counters for THIS level ---
             file_counter = 1  # For files (1A1, 1Ba1, 2A1...)
@@ -443,6 +447,13 @@ def generate_keys(
                             fnmatch.fnmatch(item_name, pattern)
                             for pattern in excluded_file_patterns_resolved
                         ):
+                            continue
+
+                    # Build output (compiled .js beside its .ts, *.min.js, source-mapped JS)
+                    if is_file and exclude_generated:
+                        reason = generated_reason(item_name, dir_path, lower_items)
+                        if reason:
+                            generated_skipped[reason] += 1
                             continue
 
                     # --- Key Generation Logic ---
@@ -625,6 +636,13 @@ def generate_keys(
                 if other_root.startswith(root_path + "/"):
                     root_exclusions.add(other_root)
         process_directory(root_path, root_exclusions, parent_info=None)
+
+    if generated_skipped:
+        by_reason = ", ".join(f"{r} {n}" for r, n in sorted(generated_skipped.items()))
+        logger.info(
+            f"Key generation: skipped {sum(generated_skipped.values())} generated file(s) "
+            f"({by_reason}); set \"exclude_generated_files\": false to track them."
+        )
 
     # Ensure the returned list contains unique KeyInfo objects (in case of reprocessing/overlaps)
     # Using dict.fromkeys preserves order (Python 3.7+) and ensures uniqueness based on KeyInfo equality

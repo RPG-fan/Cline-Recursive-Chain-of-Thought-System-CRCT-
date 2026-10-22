@@ -159,6 +159,9 @@ DEFAULT_CONFIG = {
         "AGENTS.md",
         "GEMINI.md",
     ],
+    # Skip build output during key generation: compiled .js beside its .ts source,
+    # *.min.js, and JS ending in a sourceMappingURL comment (utils/generated_files.py).
+    "exclude_generated_files": True,
     "visualization": {
         "auto_generate_on_analyze": True,  # Enable auto-generation by default
         "auto_diagram_output_dir": None,  # Default to None, meaning derive from memory_dir
@@ -567,6 +570,12 @@ class ConfigManager:
         """
         return self.config.get(
             "excluded_extensions", copy.deepcopy(DEFAULT_CONFIG["excluded_extensions"])
+        )
+
+    def get_exclude_generated_files(self) -> bool:
+        """Whether key generation skips generated JS (see utils/generated_files.py)."""
+        return bool(
+            self.config.get("exclude_generated_files", DEFAULT_CONFIG["exclude_generated_files"])
         )
 
     def get_excluded_paths(self) -> List[str]:

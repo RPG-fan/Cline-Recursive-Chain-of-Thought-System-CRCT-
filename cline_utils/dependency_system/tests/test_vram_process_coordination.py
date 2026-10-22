@@ -1,5 +1,4 @@
 import os
-import tempfile
 import time
 import pytest
 from unittest.mock import patch
@@ -11,28 +10,8 @@ from cline_utils.dependency_system.utils.resource_validator import (
 )
 
 
-@pytest.fixture(autouse=True)
-def clean_registry():
-    """Fixture to ensure a fresh, clean VRAM registry and lock file for each test."""
-    temp_dir = tempfile.gettempdir()
-    lockfile_path = os.path.join(temp_dir, "vram_lock.lock")
-    registry_path = os.path.join(temp_dir, "vram_registry.json")
-    
-    for path in (lockfile_path, registry_path):
-        if os.path.exists(path):
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-                
-    yield
-    
-    for path in (lockfile_path, registry_path):
-        if os.path.exists(path):
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+# Each test gets its own VRAM lock and registry in tmp_path (conftest
+# isolate_vram_registry); the real %TEMP% files are never touched.
 
 
 def test_cross_process_allocation_coordination():

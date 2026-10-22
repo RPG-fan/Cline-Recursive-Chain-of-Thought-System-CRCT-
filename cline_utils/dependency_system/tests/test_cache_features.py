@@ -22,6 +22,11 @@ def temp_dir(tmp_path):
     return tmp_path
 
 
+
+def _cached(cache, key):
+    """In either layer: L1 is no longer flushed to L2 on every get_cache() call."""
+    return key in cache.data or key in cache.l1_data
+
 def test_track_path_args(temp_dir, clear_cache):
     test_file = temp_dir / "test_file.txt"
     test_file.write_text("initial content")
@@ -64,14 +69,14 @@ def test_throttled_cleanup(clear_cache):
     # Fill cache
     func_to_cache(1)
     cache = cache_manager.get_cache("throttle_test")
-    assert "func_to_cache::1" in cache.data
+    assert _cached(cache, "func_to_cache::1")
 
     time.sleep(1.2)  # Expire key1
 
     # Reset last cleanup time to force cleanup on next call
     cache_manager._last_cleanup_time = 0
     func_to_cache(2)
-    assert "func_to_cache::1" not in cache.data  # Should be cleaned up now
+    assert not _cached(cache, "func_to_cache::1")  # Should be cleaned up now
     time_cleanup_was_executed = cache_manager._last_cleanup_time
     assert time_cleanup_was_executed > 0
 
@@ -82,13 +87,13 @@ def test_throttled_cleanup(clear_cache):
     # Second call within 60s should NOT trigger cleanup
     # We don't reset _last_cleanup_time here
     func_to_cache(3)
-    assert "manual_key" in cache.data  # Still there because cleanup was throttled
+    assert _cached(cache, "manual_key")  # Still there because cleanup was throttled
     assert cache_manager._last_cleanup_time == time_cleanup_was_executed
 
     # Force cleanup by resetting time again
     cache_manager._last_cleanup_time = 0
     func_to_cache(4)
-    assert "manual_key" not in cache.data
+    assert not _cached(cache, "manual_key")
     assert cache_manager._last_cleanup_time > time_cleanup_was_executed
 
 
@@ -240,10 +245,10 @@ def test_grid_cache_deterministic_hash(clear_cache):
     )
 
     expected_cache_key = f"validate_grid:{expected_hash}:{':'.join(sort_key_strings_hierarchically([ki.key_string for ki in keys]))}"
-    assert expected_cache_key in cache.data
+    assert _cached(cache, expected_cache_key)
 
     # 4. Verify that calling get_dependencies_from_grid caches with deterministic key
     get_dependencies_from_grid(grid, "1A1", keys)
     cache_deps = cache_manager.get_cache("grid_dependencies")
     expected_cache_key_deps = f"grid_deps:{expected_hash}:1A1:{':'.join(sort_key_strings_hierarchically([ki.key_string for ki in keys]))}"
-    assert expected_cache_key_deps in cache_deps.data
+    assert _cached(cache_deps, expected_cache_key_deps)

@@ -103,9 +103,14 @@ def normalize_path(path: str) -> str:
 _FILE_TYPE_MAP = {
     ".py": "py",
     ".js": "js",
-    ".ts": "js",
     ".jsx": "js",
-    ".tsx": "js",
+    ".mjs": "js",
+    ".cjs": "js",
+    # TypeScript gets its own types so the TS/TSX grammars and analyzers are used.
+    ".ts": "ts",
+    ".mts": "ts",
+    ".cts": "ts",
+    ".tsx": "tsx",
     ".md": "md",
     ".rst": "md",
     ".html": "html",

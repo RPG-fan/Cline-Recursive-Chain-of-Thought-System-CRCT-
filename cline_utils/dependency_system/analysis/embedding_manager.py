@@ -15,6 +15,7 @@ import re
 import sys
 import textwrap
 import threading
+import time
 import urllib.error
 from urllib.request import Request, urlopen
 from typing import Any, Dict, List, Optional, Set, Tuple, Sequence, cast
@@ -213,8 +214,13 @@ def _select_device() -> str:
     return _selected_device_cache or "cpu"
 
 
-def _verify_qwen3_model(model_path: str) -> bool:
-    """Verify that the Qwen3 GGUF model file is valid."""
+def _qwen3_file_is_intact(model_path: str) -> bool:
+    """
+    Structural check only (exists, plausible size, GGUF header). This is the only
+    check that may justify replacing the file: a failed *load* test can be caused by
+    busy VRAM, drivers or a concurrent process, and must never cost the user a
+    multi-GB re-download.
+    """
     if not os.path.exists(model_path):
         return False
     try:
@@ -224,10 +230,20 @@ def _verify_qwen3_model(model_path: str) -> bool:
             return False
         with open(model_path, "rb") as f:
             header = f.read(4)
-            if header != b"GGUF":
-                logger.warning(f"Invalid GGUF header: {header}")
-                return False
+        if header != b"GGUF":
+            logger.warning(f"Invalid GGUF header: {header}")
+            return False
+        return True
+    except Exception as e:
+        logger.warning(f"Qwen3 model file check failed: {e}")
+        return False
 
+
+def _verify_qwen3_model(model_path: str) -> bool:
+    """Verify that the Qwen3 GGUF model file is valid and loadable."""
+    if not _qwen3_file_is_intact(model_path):
+        return False
+    try:
         # Try a quick load test with llama-cpp-python
         try:
             from llama_cpp import Llama
@@ -440,12 +456,19 @@ def _download_qwen3_model(model_path: str) -> bool:
         if _verify_qwen3_model(model_path):
             logger.debug("Qwen3 model verification passed, using existing model")
             return True
-        else:
-            logger.warning("Qwen3 model verification failed, re-downloading...")
-            try:
-                os.remove(model_path)
-            except:
-                pass
+        if _qwen3_file_is_intact(model_path):
+            # The file is structurally fine; only the load test failed (VRAM, drivers,
+            # another process). Keep it: deleting would force a multi-GB re-download.
+            logger.warning(
+                f"Qwen3 model at {model_path} is intact but could not be loaded "
+                "(see previous warning). Keeping the file and falling back for this run."
+            )
+            return False
+        logger.warning("Qwen3 model file is corrupt, re-downloading...")
+        try:
+            os.remove(model_path)
+        except OSError:
+            pass
 
     # Create models directory if it doesn't exist
     model_dir = os.path.dirname(model_path)
@@ -468,16 +491,30 @@ def _download_qwen3_model(model_path: str) -> bool:
                 f"Successfully downloaded and verified Qwen3 model to {model_path}"
             )
             return True
-        else:
-            logger.error("Downloaded Qwen3 model failed verification")
-            try:
-                os.remove(model_path)
-            except:
-                pass
+        if _qwen3_file_is_intact(model_path):
+            logger.error(
+                "Downloaded Qwen3 model is intact but could not be loaded; keeping it."
+            )
             return False
+        logger.error("Downloaded Qwen3 model is corrupt; removing it.")
+        try:
+            os.remove(model_path)
+        except OSError:
+            pass
+        return False
     else:
         logger.error(f"Download failed: {model_path}")
         return False
+
+
+def _configured_qwen3_path(config_manager: "ConfigManager") -> Optional[str]:
+    """`qwen3_model_path` from config; a relative path is relative to the project
+    root, never to the current working directory (tests and scripts run from
+    elsewhere must not touch, or delete, a different project's model)."""
+    path = config_manager.get_embedding_setting("qwen3_model_path")
+    if path and not os.path.isabs(path):
+        path = os.path.join(get_project_root(), path)
+    return path
 
 
 def _select_best_model() -> Dict[str, Any]:
@@ -491,14 +528,19 @@ def _select_best_model() -> Dict[str, Any]:
 
     if model_selection == "qwen3-4b":
         model_config = MODEL_CONFIGS["qwen3-4b"].copy()
-        model_config["path"] = config_manager.get_embedding_setting("qwen3_model_path")
+        model_config["path"] = _configured_qwen3_path(config_manager)
         if not model_config["path"]:
             # Fallback default path if not in config
             model_config["path"] = os.path.join(
                 get_project_root(), "models", "Qwen3-Embedding-4B-Q6_K.gguf"
             )
 
-        if not os.path.exists(model_config["path"]) or not _verify_qwen3_model(
+        # Structural check only (size + GGUF header). The full GPU load test used to
+        # run here on every analysis (3.3 GB weights + a 16k-token KV cache, a multi-GB
+        # VRAM spike that could freeze GPU-composited windows such as VS Code) even
+        # when nothing needed embedding. The model is now loaded only when embeddings
+        # are generated; a failed load skips embedding updates for that run.
+        if not os.path.exists(model_config["path"]) or not _qwen3_file_is_intact(
             model_config["path"]
         ):
             _download_qwen3_model(model_config["path"])
@@ -515,7 +557,7 @@ def _select_best_model() -> Dict[str, Any]:
 
     # Prefer Qwen3 if VRAM allows, else mpnet
     qwen_config = MODEL_CONFIGS["qwen3-4b"].copy()
-    qwen_config["path"] = config_manager.get_embedding_setting("qwen3_model_path")
+    qwen_config["path"] = _configured_qwen3_path(config_manager)
 
     mem_req: float = float(
         (qwen_config["min_vram_gb"] if device == "cuda" else qwen_config["min_ram_gb"])
@@ -529,7 +571,8 @@ def _select_best_model() -> Dict[str, Any]:
                 get_project_root(), "models", "Qwen3-Embedding-4B-Q6_K.gguf"
             )
 
-        if os.path.exists(qwen_config["path"]) and _verify_qwen3_model(
+        # Structural check only; see the qwen3-4b branch above.
+        if os.path.exists(qwen_config["path"]) and _qwen3_file_is_intact(
             qwen_config["path"]
         ):
             _selected_model_config = qwen_config
@@ -732,8 +775,17 @@ def _load_project_symbol_map() -> Dict[str, Dict[str, Any]]:
     return {}
 
 
+_token_metadata_cache: Dict[str, Tuple[Tuple[int, int], Dict[str, Dict[str, int]]]] = {}
+_token_metadata_lock = threading.Lock()
+
+
 def _load_token_metadata(project_root: str) -> Dict[str, Dict[str, int]]:
-    """Loads token counts from metadata.json."""
+    """Token counts from metadata.json, parsed once per version of the file.
+
+    Every SES built for reranking used to re-read and re-parse the whole metadata
+    file (~48ms each). The parsed map is cached on (mtime_ns, size) and shared;
+    callers only read it.
+    """
     metadata_path = os.path.join(
         project_root,
         "cline_utils",
@@ -742,6 +794,24 @@ def _load_token_metadata(project_root: str) -> Dict[str, Dict[str, int]]:
         "embeddings",
         "metadata.json",
     )
+    try:
+        st = os.stat(metadata_path)
+        version = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {}
+    cached = _token_metadata_cache.get(metadata_path)
+    if cached is not None and cached[0] == version:
+        return cached[1]
+    with _token_metadata_lock:
+        cached = _token_metadata_cache.get(metadata_path)
+        if cached is not None and cached[0] == version:
+            return cached[1]
+        token_map = _parse_token_metadata(metadata_path)
+        _token_metadata_cache[metadata_path] = (version, token_map)
+        return token_map
+
+
+def _parse_token_metadata(metadata_path: str) -> Dict[str, Dict[str, int]]:
     token_map: Dict[str, Dict[str, int]] = {}
     if os.path.exists(metadata_path):
         try:
@@ -950,14 +1020,16 @@ def generate_symbol_essence_string(
     if classes:
         for c in classes:
             c_name = str(c.get("name", "unknown")).strip()
+            # JS/TS class records carry kind: class | interface | type_alias | enum.
+            c_label = str(c.get("kind") or "class").upper()
             c_doc = str(c.get("docstring") or "").strip()
             if len(c_doc) > 500:
                 c_doc = c_doc[:500] + "..."
             if c_doc:
-                parts.append(f"CLASS: {c_name}")
+                parts.append(f"{c_label}: {c_name}")
                 parts.append(f"  DOC: {c_doc}")
             else:
-                parts.append(f"CLASS: {c_name}")
+                parts.append(f"{c_label}: {c_name}")
 
             # Add inheritance info (runtime)
             inheritance = c.get("inheritance", {})
@@ -969,9 +1041,6 @@ def generate_symbol_essence_string(
             decorators = c.get("decorators", [])
             if decorators:
                 parts.append(f"  DECORATORS: {', '.join(decorators)}")
-
-            if c_doc:
-                parts.append(f"  DOC: {c_doc}")
 
             # Methods with enhanced runtime information
             methods = c.get("methods", [])
@@ -1232,8 +1301,10 @@ def generate_symbol_essence_string(
                 e_name = e.strip()
                 e_from = ""
             elif isinstance(e, dict):
-                e_name = str(e.get("name") or e.get("default") or "unknown").strip()
                 e_from = str(e.get("from") or "").strip()
+                # `export {a} from "x"` edge records have no name of their own.
+                fallback = "{...}" if e_from else "unknown"
+                e_name = str(e.get("name") or e.get("default") or fallback).strip()
             else:
                 continue
             if not e_name:
@@ -2217,6 +2288,7 @@ MIN_RERANK_BATCH_SIZE = 6  # Don't thrash with items=1; wait for VRAM instead
 RERANK_MAX_PROMPT_TOKENS = 16384
 RERANK_WAIT_TIMEOUT_SEC = 20.0
 RERANK_ALLOC_TIMEOUT_SEC = 120.0
+RERANK_CACHE_TTL_SEC = 600  # same as the former @cached default (DEFAULT_TTL)
 
 # Qwen3 Reranker Configuration
 RERANKER_REPO_ID = "ManiKumarAdapala/Qwen3-Reranker-0.6B-Q8_0-Safetensors"
@@ -2541,12 +2613,65 @@ def _get_rerank_cache_key(
     source_normalized = normalize_path(source_file_path) if source_file_path else ""
     source_hash = hashlib.sha256(source_normalized.encode("utf-8")).hexdigest()[:16]
     return (
-        f"rerank:{query_hash}:{candidates_hash}:{top_k}:"
+        # "rerank2": results cached before 2026-10-21 may hold invented 0.0 scores
+        # from failed batches; the new prefix never reads them.
+        f"rerank2:{query_hash}:{candidates_hash}:{top_k}:"
         f"{instruction_hash}:{source_hash}"
     )
 
 
-@cached("reranking", key_func=_get_rerank_cache_key)
+RERANK_SCORE_DEADLINE_SEC = 600.0  # per call: how long to keep waiting for VRAM
+
+# Set when a call gives up on VRAM (deadline passed). For the rest of the run, later
+# calls return unscored at once instead of each waiting out its own deadline (with
+# ~25 workers that would stall a run for many minutes for nothing). Reset per run by
+# reset_rerank_run_state() (project_analyzer, dependency_suggester.clear_caches).
+_rerank_vram_gave_up = False
+
+
+def reset_rerank_run_state() -> None:
+    global _rerank_vram_gave_up
+    _rerank_vram_gave_up = False
+
+
+def _is_out_of_memory(e: BaseException) -> bool:
+    oom_type = getattr(getattr(torch, "cuda", None), "OutOfMemoryError", None)
+    if isinstance(e, MemoryError) or (oom_type is not None and isinstance(e, oom_type)):
+        return True
+    return "out of memory" in str(e).lower()
+
+
+def rerank_candidates_scored(
+    query_text: str,
+    candidate_texts: List[str],
+    top_k: int = 10,
+    source_file_path: Optional[str] = None,
+    instruction: Optional[str] = None,
+) -> Tuple[List[Tuple[int, float]], Set[int]]:
+    """
+    Rerank candidates; returns (top_k scored candidates, indices of every candidate
+    the reranker actually scored).
+
+    A candidate that could not be scored (no VRAM grant before the deadline, an
+    out-of-memory error even as a single item, a failed batch, or no reranker) is
+    left out. It never gets an invented score. Only complete results are cached, so
+    a partial answer is never replayed.
+    """
+    key = _get_rerank_cache_key(
+        query_text, candidate_texts, top_k, source_file_path, instruction
+    )
+    cache = cache_manager.get_cache("reranking", RERANK_CACHE_TTL_SEC)
+    all_scored = cache.get(key)
+    if all_scored is None:
+        all_scored, complete = _rerank_scores(
+            query_text, candidate_texts, source_file_path, instruction
+        )
+        if complete:
+            cache.set(key, all_scored, [], ttl=RERANK_CACHE_TTL_SEC)
+            cache_manager.cleanup()
+    return list(all_scored[:top_k]), {idx for idx, _ in all_scored}
+
+
 def rerank_candidates_with_qwen3(
     query_text: str,
     candidate_texts: List[str],
@@ -2554,20 +2679,42 @@ def rerank_candidates_with_qwen3(
     source_file_path: Optional[str] = None,
     instruction: Optional[str] = None,
 ) -> List[Tuple[int, float]]:
+    """Top-k (index, score) of the candidates the reranker scored; see
+    rerank_candidates_scored. Unscored candidates are omitted, never scored 0.0."""
+    return rerank_candidates_scored(
+        query_text, candidate_texts, top_k, source_file_path, instruction
+    )[0]
+
+
+def _rerank_scores(
+    query_text: str,
+    candidate_texts: List[str],
+    source_file_path: Optional[str] = None,
+    instruction: Optional[str] = None,
+) -> Tuple[List[Tuple[int, float]], bool]:
     """
-    Rerank candidate texts using Qwen3 reranker model.
-    Implements official Qwen3-Reranker-0.6B format from HuggingFace with special token handling.
-    Optimizes throughput by sorting candidates by length and using dynamic batch sizing.
+    Score every candidate with the Qwen3 reranker (official Qwen3-Reranker-0.6B prompt
+    format). Returns (scores sorted best first, complete). Candidates are sorted by
+    length and batched to fit the VRAM the manager grants.
     """
+    global _rerank_vram_gave_up
+    if _rerank_vram_gave_up:
+        logger.debug(
+            f"Reranker gave up on VRAM earlier this run; {len(candidate_texts)} "
+            "candidate(s) left unscored."
+        )
+        return [], False
+
     tokenizer, model = _load_reranker_model()
 
-    # Fallback: If reranker failed to load (e.g. low memory), return original candidates
     if tokenizer is None or model is None:
+        # Previously every candidate got 1.0 here, which promoted all of them to
+        # verified arrows. Unscored candidates now fall back to embedding similarity.
         logger.warning(
-            "Reranker unavailable (likely due to memory constraints). Skipping reranking."
+            f"Reranker unavailable (likely due to memory constraints); "
+            f"{len(candidate_texts)} candidate(s) left unscored."
         )
-        # Return candidates with default score 1.0, preserving original order (which is usually vector sim order)
-        return [(i, 1.0) for i in range(len(candidate_texts))][:top_k]
+        return [], False
 
     # Use pre-computed values
     token_false_id = reranker_false_id
@@ -2613,15 +2760,20 @@ def rerank_candidates_with_qwen3(
 
     except Exception as e:
         logger.error(f"Tokenization failed: {e}")
-        return []
+        return [], False
 
     # 2. Sort by Length (Ascending)
     # This groups short items together (large batches) and long items together (small batches).
     sorted_items = sorted(full_prompts_data, key=lambda x: x["length"])
 
     all_scores: List[Tuple[int, float]] = []
+    unscored = 0
     start_idx = 0
     total_candidates = len(sorted_items)
+    deadline = time.time() + RERANK_SCORE_DEADLINE_SEC
+    # Upper bound on the next batch after a denied allocation or an out-of-memory
+    # error: the same items are retried in halves, down to a single item.
+    size_cap: Optional[int] = None
 
     # 3. Process in Dynamic Batches with VRAM coordination
     # Get the VRAM manager directly for coordinated VRAM management
@@ -2634,10 +2786,9 @@ def rerank_candidates_with_qwen3(
         vram_manager = get_vram_manager()
 
     while start_idx < total_candidates:
-        # Check for backpressure from the VRAM manager
-        if vram_manager is not None and vram_manager.should_pause_for_backpressure():
-            logger.debug("Reranking paused due to VRAM backpressure")
-            vram_manager.wait_for_available_vram(0.75, timeout=RERANK_WAIT_TIMEOUT_SEC)
+        # The allocation request below is the VRAM gate (it never grants beyond the
+        # cap). The former separate "backpressure" pause waited up to 20s and then
+        # went ahead regardless, so it only added delay.
 
         # ── Serialized batch planning ────────────────────────────────
         # Acquire the planning lock so that only one thread at a time
@@ -2664,6 +2815,8 @@ def rerank_candidates_with_qwen3(
             batch_size = _calculate_dynamic_batch_size(
                 available_mem, current_len, device
             )
+            if size_cap is not None:
+                batch_size = min(batch_size, size_cap)
 
             # Look ahead to find the actual max length in this tentative batch
             end_idx = min(start_idx + batch_size, total_candidates)
@@ -2687,7 +2840,8 @@ def rerank_candidates_with_qwen3(
             # If batch is too small AND there are enough items remaining,
             # wait for VRAM instead of thrashing with items=1 batches.
             if (
-                actual_batch_count < MIN_RERANK_BATCH_SIZE
+                size_cap is None
+                and actual_batch_count < MIN_RERANK_BATCH_SIZE
                 and remaining_items >= MIN_RERANK_BATCH_SIZE
                 and vram_manager is not None
             ):
@@ -2700,10 +2854,6 @@ def rerank_candidates_with_qwen3(
                     )
                     / 1024.0
                 )
-                # logger.debug(
-                #     f"Batch too small ({actual_batch_count} < {MIN_RERANK_BATCH_SIZE}), "
-                #     f"waiting for {_wait_for_vram_gb:.2f}GB VRAM"
-                # )
             # Lock released here by 'with' block exit
 
         # After releasing the lock, wait for VRAM if needed and retry
@@ -2737,16 +2887,25 @@ def rerank_candidates_with_qwen3(
             granted, allocation_id = vram_manager.request_allocation(
                 size_gb=max(estimated_vram_gb, 0.75),  # Minimum 0.75GB per batch
                 blocking=True,
-                timeout=RERANK_ALLOC_TIMEOUT_SEC,
+                timeout=min(RERANK_ALLOC_TIMEOUT_SEC, max(1.0, deadline - time.time())),
             )
             if not granted:
-                logger.warning(
-                    f"VRAM allocation denied/timed out for batch after "
-                    f"{RERANK_ALLOC_TIMEOUT_SEC:.0f}s, using fallback scores"
+                if time.time() >= deadline:
+                    remaining = total_candidates - start_idx
+                    unscored += remaining
+                    logger.warning(
+                        f"No VRAM grant within {RERANK_SCORE_DEADLINE_SEC:.0f}s; "
+                        f"{remaining} candidate(s) left unscored. Reranking is off "
+                        "for the rest of this run; a later run retries these pairs."
+                    )
+                    _rerank_vram_gave_up = True
+                    break
+                # Retry the same items: in a smaller batch, or the single item again.
+                size_cap = max(1, len(batch_items) // 2)
+                logger.debug(
+                    f"VRAM allocation not granted for {len(batch_items)} item(s); "
+                    f"retrying with at most {size_cap}."
                 )
-                for item in batch_items:
-                    all_scores.append((item["index"], 0.0))
-                start_idx = end_idx
                 continue
 
         try:
@@ -2774,8 +2933,13 @@ def rerank_candidates_with_qwen3(
                 for k in padded_batch:
                     padded_batch[k] = padded_batch[k].to(device)
 
-                # Get logits
-                logits = model(**padded_batch).logits[:, -1, :]
+                # Get logits for the last position only. Without logits_to_keep the
+                # model materializes batch x seq_len x vocab (151,669) fp16 logits,
+                # ~296MB per 1k tokens per item, which the batch VRAM estimate
+                # does not budget for (7 items x 3.7k tokens -> a 7.4GB tensor).
+                # Left padding puts every item's final token at -1, so scores are
+                # unchanged.
+                logits = model(**padded_batch, logits_to_keep=1).logits[:, -1, :]
 
                 # Extract yes/no token scores
                 true_vector = logits[:, token_true_id]
@@ -2804,22 +2968,41 @@ def rerank_candidates_with_qwen3(
                     torch.cuda.empty_cache()
 
         except Exception as e:
-            logger.error(f"Reranking batch failed: {e}")
-            # Fallback: assign zero scores
-            for item in batch_items:
-                all_scores.append((item["index"], 0.0))
+            if device == "cuda":
+                torch.cuda.empty_cache()
+            if _is_out_of_memory(e) and len(batch_items) > 1:
+                # Retry the same items in halves instead of scoring them 0.0.
+                size_cap = max(1, len(batch_items) // 2)
+                logger.warning(
+                    f"Reranking batch of {len(batch_items)} ran out of memory; "
+                    f"retrying in batches of at most {size_cap}."
+                )
+                continue
+            unscored += len(batch_items)
+            logger.error(
+                f"Reranking batch failed ({e}); {len(batch_items)} candidate(s) left unscored."
+            )
         finally:
             # Always release the VRAM allocation
             if allocation_id is not None and vram_manager is not None:
                 vram_manager.release_allocation(allocation_id)
 
-        # Move to next batch
+        # Move to next batch (scored, or given up on after a single-item failure).
+        # A size_cap from a denied grant or an OOM stays for the rest of this call:
+        # the next batch would otherwise retry the size that just failed.
         start_idx = end_idx
 
-    # 4. Sort and Return Top-K
-    # all_scores contains (original_index, score)
+    if unscored:
+        logger.warning(
+            f"Reranker could not score {unscored} of {total_candidates} candidate(s)"
+            f"{' for ' + source_file_path if source_file_path else ''}; they are "
+            "omitted (never scored 0.0), not cached, and not logged as scanned, so a "
+            "later run retries them."
+        )
+
+    # 4. Sort, best first: (original_index, score)
     all_scores.sort(key=lambda x: x[1], reverse=True)
-    return all_scores[:top_k]
+    return all_scores, unscored == 0
 
 
 def _get_text_content_for_embedding(
@@ -2853,6 +3036,11 @@ def _get_text_content_for_embedding(
 
 
 # --- Main Embedding Generation ---
+
+
+def _compute_ses_hash(text: str) -> str:
+    """Stable fingerprint of the exact text that is embedded (the SES for code files)."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
 
 
 def generate_embeddings(
@@ -2931,6 +3119,7 @@ def generate_embeddings(
 
     # 2. Identification Phase
     files_to_process: List[KeyInfo] = []
+    ses_check_candidates: List[KeyInfo] = []
 
     for key_info in path_to_key_info.values():
         if key_info.is_directory:
@@ -3002,6 +3191,49 @@ def generate_embeddings(
 
         if should_process:
             files_to_process.append(key_info)
+        else:
+            ses_check_candidates.append(key_info)
+
+    # 2b. SES invalidation. The source-hash/mtime fast path above only notices source
+    # edits, but the embedded text (SES) also depends on analyzer output and on other
+    # files (CALLED_BY). For every file that would be skipped, regenerate the SES once
+    # and compare its hash with the stored ``ses_hash``. A missing ``ses_hash`` (metadata
+    # written before this field existed) deliberately forces ONE re-embed: we cannot
+    # know which SES the existing vector was built from, and trusting it is what let
+    # stale embeddings survive the JS/TS analyzer rewrite. The new metadata records
+    # the hash, so later runs skip normally. SES generation reads files through
+    # read_file_transparently (writes only on drift), so this runs without wrapping
+    # the pass in a registry update_context.
+    precomputed_ses: Dict[str, str] = {}
+
+    def _check_ses(ki: KeyInfo) -> Optional[Tuple[KeyInfo, str]]:
+        try:
+            ses_text = _get_text_content_for_embedding(
+                ki.norm_path, symbol_map, project_root
+            )
+        except Exception as ex:
+            logger.warning(f"SES check failed for {ki.norm_path}: {ex}")
+            return None
+        if not ses_text or not ses_text.strip():
+            return None
+        m_item = existing_metadata_by_path.get(ki.norm_path)
+        stored_ses_hash = m_item.get("ses_hash") if m_item else None
+        if stored_ses_hash and stored_ses_hash == _compute_ses_hash(ses_text):
+            return None
+        return ki, ses_text
+
+    if ses_check_candidates:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as ses_pool:
+            for res in ses_pool.map(_check_ses, ses_check_candidates):
+                if res is not None:
+                    files_to_process.append(res[0])
+                    precomputed_ses[res[0].norm_path] = res[1]
+        logger.info(
+            f"SES check: {len(precomputed_ses)} of {len(ses_check_candidates)} "
+            "up-to-date-by-source files need re-embedding (missing or changed ses_hash)."
+        )
 
     if not files_to_process and all(
         (
@@ -3067,6 +3299,8 @@ def generate_embeddings(
         logger.warning("Tokenizer not found. Using character-based token estimation.")
 
     processing_queue: List[Dict[str, Any]] = []
+    new_ses_hashes: Dict[str, str] = {}
+    embed_start_time = time.time()
 
     # Parallelize the file reading, SES generation, and token counting.
     import concurrent.futures
@@ -3076,7 +3310,7 @@ def generate_embeddings(
             fp = key_info_obj.norm_path
             rp = os.path.relpath(fp, project_root)
 
-            text_to_embed = _get_text_content_for_embedding(
+            text_to_embed = precomputed_ses.get(fp) or _get_text_content_for_embedding(
                 fp, symbol_map, project_root
             )
 
@@ -3099,6 +3333,7 @@ def generate_embeddings(
                 "rel_path": rp,
                 "ses_token_count": ses_tc,
                 "full_token_count": full_tc,
+                "ses_hash": _compute_ses_hash(text_to_embed),
             }
         except Exception as ex:
             logger.error(
@@ -3131,6 +3366,7 @@ def generate_embeddings(
                         "ses_tokens": result["ses_token_count"],
                         "full_tokens": result["full_token_count"],
                     }
+                    new_ses_hashes[result["key_info"].norm_path] = result["ses_hash"]
                     processing_queue.append(
                         {
                             "key_info": result["key_info"],
@@ -3144,6 +3380,25 @@ def generate_embeddings(
     # Sort by token count (ascending) to grow context window monotonically
     # Sort by tokens to optimize model window
     processing_queue.sort(key=lambda x: cast(int, x["tokens"]))
+
+    # The model is first loaded here, only because there is something to embed
+    # (selection no longer load-tests it). If the GGUF model cannot load (busy VRAM,
+    # drivers), skip embedding updates for this run so existing Qwen3 embeddings and
+    # metadata on disk are preserved instead of being overwritten with a fallback model.
+    if processing_queue and _model_instance is None and _selected_model_config is not None:
+        if _selected_model_config.get("type") == "gguf":
+            first_ctx = min(
+                max(cast(int, processing_queue[0]["tokens"]) + 512, 12800), MAX_CONTEXT_LENGTH
+            )
+            try:
+                _load_model(n_ctx=first_ctx)
+            except Exception as e:
+                logger.warning(
+                    f"Embedding model {_selected_model_config.get('name')} could not be "
+                    f"loaded ({e}); skipping embedding updates for this run."
+                )
+                _unload_model()
+                return False
     current_batch_texts: List[str] = []
     current_batch_paths: List[str] = []
 
@@ -3278,10 +3533,22 @@ def generate_embeddings(
                         raw_for_hash, key_info.norm_path
                     )
 
+                # ses_hash: the hash computed this run, if the vector on disk was
+                # actually (re)written this run; otherwise keep the stored one, which
+                # still describes the vector on disk. "" (unknown) re-embeds next run.
+                ses_hash = ""
+                new_ses_hash = new_ses_hashes.get(key_info.norm_path)
+                if new_ses_hash and os.path.getmtime(npy_path) >= embed_start_time - 2:
+                    ses_hash = new_ses_hash
+                else:
+                    prev_item = existing_metadata_by_path.get(key_info.norm_path)
+                    ses_hash = str(prev_item.get("ses_hash") or "") if prev_item else ""
+
                 new_metadata["keys"][key_info.key_string] = {
                     "path": key_info.norm_path,
                     "mtime": os.path.getmtime(key_info.norm_path),
                     "content_hash": content_hash,
+                    "ses_hash": ses_hash,
                     "ses_tokens": ses_tokens,
                     "full_tokens": full_tokens,
                 }
@@ -3298,6 +3565,9 @@ def generate_embeddings(
     try:
         # Invalidate similarity cache as embeddings have changed
         cache_manager.get_cache("similarity_calculation").invalidate(".*")
+        from . import similarity_index
+
+        similarity_index.invalidate()
         logger.debug(
             "Invalidated similarity_calculation cache after embedding generation."
         )

@@ -1,13 +1,12 @@
 import os
-import tempfile
 import pytest
 
 from cline_utils.dependency_system.utils.resource_validator import CrossProcessLock
 
 
-def test_lock_acquire_release():
+def test_lock_acquire_release(tmp_path):
     """Verify basic lock acquisition and release."""
-    temp_dir = tempfile.gettempdir()
+    temp_dir = str(tmp_path)
     lock_path = os.path.join(temp_dir, "test_basic_lock.lock")
     if os.path.exists(lock_path):
         try:
@@ -33,9 +32,9 @@ def test_lock_acquire_release():
         pass
 
 
-def test_lock_exclusivity():
+def test_lock_exclusivity(tmp_path):
     """Verify that lock is exclusive (other instances cannot acquire it concurrently)."""
-    temp_dir = tempfile.gettempdir()
+    temp_dir = str(tmp_path)
     lock_path = os.path.join(temp_dir, "test_exclusive_lock.lock")
     if os.path.exists(lock_path):
         try:
@@ -66,9 +65,9 @@ def test_lock_exclusivity():
         pass
 
 
-def test_lock_context_manager():
+def test_lock_context_manager(tmp_path):
     """Verify that context manager works as expected and auto-releases."""
-    temp_dir = tempfile.gettempdir()
+    temp_dir = str(tmp_path)
     lock_path = os.path.join(temp_dir, "test_ctx_lock.lock")
     if os.path.exists(lock_path):
         try:

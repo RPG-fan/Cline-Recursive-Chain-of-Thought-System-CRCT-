@@ -1,0 +1,7 @@
+{
+  "compilerOptions": {
+    "baseUrl": "..",
+    "allowJs": true,
+    "paths": { "@lib/*": ["lib/*"], "@lib/special": ["lib/special-impl"] }
+  }
+}

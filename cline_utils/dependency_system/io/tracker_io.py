@@ -9,12 +9,15 @@ hierarchical key string sort, then by normalized path.
 """
 
 import datetime
+import errno
 import io
 import json
 import logging
 import os
 import re
 import shutil
+import tempfile
+import threading
 import time
 from collections import defaultdict
 from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple, cast, Callable
@@ -62,6 +65,7 @@ from cline_utils.dependency_system.utils.tracker_utils import (
     aggregate_all_dependencies,  # type: ignore  # Do not remove!
     find_all_tracker_paths,  # type: ignore  # Do not remove!
     get_key_global_instance_string,
+    get_unapproved_module_paths,
     read_grid_from_lines,
     read_key_definitions_from_lines,
     read_tracker_file_structured,
@@ -591,8 +595,7 @@ def write_mini_tracker_with_template_preservation(
         # os.replace is atomic on the same filesystem (which temp_file is, since
         # it's in the same directory). This prevents readers from seeing a
         # partially-written or zero-byte file.
-        os.replace(temp_file, output_file)
-        logger.debug(f"Successfully wrote mini tracker content to: {output_file}")
+        _replace_with_retry(temp_file, output_file)
     except Exception as e_write_mini:
         logger.error(
             f"Error during write_mini_tracker_with_template_preservation for {output_file}: {e_write_mini}",
@@ -618,6 +621,52 @@ def write_mini_tracker_with_template_preservation(
 
 
 # --- Patched: Top-level write_tracker_file ---
+# --- Robust tracker file writes ---------------------------------------------------
+# On Windows, opening a tracker for writing fails with EINVAL / EACCES while another
+# process briefly holds it (antivirus or indexer scanning it, an editor reading it),
+# e.g. right after the backup copy. Trackers are therefore written to a temp file in the
+# same directory and swapped in with os.replace (never truncated in place, so a failure
+# can't leave a partial file), retrying the swap with a short backoff.
+_TRANSIENT_WRITE_ERRNOS = {errno.EACCES, errno.EINVAL, errno.EBUSY}
+_REPLACE_ATTEMPTS = 6
+_REPLACE_BASE_DELAY = 0.05  # 0.05 + 0.1 + 0.2 + 0.4 + 0.8 = ~1.55s worst case
+
+
+def _replace_with_retry(temp_path: str, target_path: str) -> None:
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(temp_path, target_path)
+            return
+        except OSError as e:
+            transient = isinstance(e, PermissionError) or e.errno in _TRANSIENT_WRITE_ERRNOS
+            if not transient or attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            delay = _REPLACE_BASE_DELAY * (2**attempt)
+            logger.warning(
+                f"Tracker write {os.path.basename(target_path)} blocked ({e}); "
+                f"retry {attempt + 1}/{_REPLACE_ATTEMPTS - 1} in {delay:.2f}s."
+            )
+            time.sleep(delay)
+
+
+def _atomic_write_text(target_path: str, content: str) -> None:
+    """Write content to a temp file beside target_path, then swap it in."""
+    directory = os.path.dirname(target_path) or "."
+    fd, temp_path = tempfile.mkstemp(
+        dir=directory, prefix="." + os.path.basename(target_path) + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+        _replace_with_retry(temp_path, target_path)
+    except BaseException:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise
+
+
 def write_tracker_file(
     tracker_path: str,
     key_info_to_write: List[KeyInfo],
@@ -720,9 +769,8 @@ def write_tracker_file(
                     f"Failed to read existing tracker '{tracker_path}' for comparison: {e_read}. Proceeding with write."
                 )
 
-        # --- Perform Actual Write ---
-        with open(tracker_path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(new_content)
+        # --- Perform Actual Write (temp file + swap, with retry; see _atomic_write_text) ---
+        _atomic_write_text(tracker_path, new_content)
 
         logger.debug(
             f"Successfully updated tracker file: {tracker_path} with {len(key_info_to_write)} key instances."
@@ -836,9 +884,6 @@ def backup_tracker_file(tracker_path: str) -> str:
 
             if len(backup_files_for_base) > 2:
                 files_to_delete = backup_files_for_base[2:]  # All except the two newest
-                logger.debug(
-                    f"Cleaning up {len(files_to_delete)} older backups for '{base_name}'."
-                )
                 for _, file_path_to_delete in files_to_delete:
                     # Retry deleting the old backup to handle transient locks on Windows
                     last_del_err: Optional[OSError] = None
@@ -1449,7 +1494,51 @@ def is_path_in_doc_roots(path: str, doc_roots_set: Set[str]) -> bool:
 # --- End of Helper ---
 
 
-def update_tracker(
+# --- One summary log line per tracker update ---------------------------------------
+# update_tracker used to log ~15 DEBUG lines per tracker plus one per ignored cell
+# (several thousand per run). The body now records counters in a per-call report
+# (_rep / _rep_set) and the wrapper logs a single line when the call finishes.
+_tracker_report = threading.local()
+
+
+def _rep(key: str, n: int = 1) -> None:
+    report = getattr(_tracker_report, "current", None)
+    if report is not None:
+        report[key] = report.get(key, 0) + n
+
+
+def _rep_set(**values: Any) -> None:
+    report = getattr(_tracker_report, "current", None)
+    if report is not None:
+        report.update(values)
+
+
+def _format_tracker_report(report: Dict[str, Any], seconds: float) -> str:
+    order = (
+        "type", "keys", "internal_paths", "sources", "suggestions", "filtered_kept",
+        "filtered_dropped", "to_apply", "applied", "kept_existing", "key_delta",
+        "grid_changed", "fast_path", "cached_state", "migrated_old_grid", "forced", "mode",
+    )
+    fields = " ".join(f"{k}={report[k]}" for k in order if k in report)
+    return f"Tracker summary {report.get('file', '?')}: {fields} ({seconds:.2f}s)"
+
+
+def update_tracker(*args: Any, **kwargs: Any) -> Optional[Dict[str, Any]]:
+    """See _update_tracker_impl. Logs one summary line per call."""
+    previous = getattr(_tracker_report, "current", None)
+    report: Dict[str, Any] = {}
+    _tracker_report.current = report
+    start = time.time()
+    try:
+        return _update_tracker_impl(*args, **kwargs)
+    finally:
+        _tracker_report.current = previous
+        if report:
+            report.setdefault("mode", "write")
+            logger.debug(_format_tracker_report(report, time.time() - start))
+
+
+def _update_tracker_impl(
     output_file_suggestion: str,
     path_to_key_info: Dict[str, KeyInfo],
     tracker_type: str = "main",
@@ -1485,9 +1574,7 @@ def update_tracker(
     will be written.  Prefer ``return_update=True`` + ``TrackerBatchCollector`` for any
     call that applies suggestions so that reciprocals are batch-applied correctly.
     """
-    logger.debug(
-        f"--- update_tracker CALLED --- Suggestion: '{output_file_suggestion}', Type: '{tracker_type}', ForceSugg: {force_apply_suggestions}, ApplyAST: {apply_ast_overrides}"
-    )
+    _rep_set(type=tracker_type, forced=force_apply_suggestions)
     # --- Initialize counters and flags ---
     project_root = get_project_root()
     config = ConfigManager()
@@ -1638,9 +1725,7 @@ def update_tracker(
                     exc_info=True,
                 )
         suggestions_to_process_for_this_tracker = processed_suggestions_for_main
-        logger.info(
-            f"Main Tracker: Populated suggestions_to_process (sources: {len(suggestions_to_process_for_this_tracker)}, total links: {sum(len(v) for v in suggestions_to_process_for_this_tracker.values())})"
-        )
+        _rep_set(sources=len(suggestions_to_process_for_this_tracker), suggestions=sum(len(v) for v in suggestions_to_process_for_this_tracker.values()))
 
     elif tracker_type == "doc":
         get_path_func_doc = cast(
@@ -1686,9 +1771,7 @@ def update_tracker(
                         suggestions_to_process_for_this_tracker[src_gi_str].extend(
                             valid_targets
                         )
-        logger.info(
-            f"Doc Tracker: Populated suggestions_to_process (count: {sum(len(v) for v in suggestions_to_process_for_this_tracker.values())})"
-        )
+        _rep_set(suggestions=sum(len(v) for v in suggestions_to_process_for_this_tracker.values()))
     elif tracker_type == "mini":
         # --- Derive module_path_for_mini and output_file ---
         current_path_check_input = normalize_path(output_file_suggestion)
@@ -1734,9 +1817,6 @@ def update_tracker(
                 f"Mini Update Critical: get_mini_tracker_path for '{module_path_for_mini}' fail: {ve}."
             )
             return None
-        logger.debug(
-            f"Mini Tracker Update Cycle: Module='{module_path_for_mini}', File='{output_file}' (Key: {module_ki_obj_for_path.key_string})"
-        )
 
         # --- Mini-Tracker Relevance Logic (Populates relevant_key_infos_for_type) ---
         internal_kis_mini = [
@@ -1746,9 +1826,7 @@ def update_tracker(
             or ki.parent_path == module_path_for_mini
         ]
         current_rel_paths_set: Set[str] = {ki.norm_path for ki in internal_kis_mini}
-        logger.debug(
-            f"  Mini '{os.path.basename(output_file)}': Initial internal paths ({len(current_rel_paths_set)})."
-        )
+        _rep_set(internal_paths=len(current_rel_paths_set))
         _existing_defs_pairs: List[Tuple[str, str]] = []
         _existing_grid_rows_tuples: List[Tuple[str, str]] = []
         _existing_grid_headers: List[str] = []
@@ -1797,9 +1875,6 @@ def update_tracker(
                 )
                 _existing_grid_rows_tuples = []
         if _existing_grid_rows_tuples and _existing_defs_pairs:
-            logger.debug(
-                f"  Mini Scan '{os.path.basename(output_file)}': Applying persistence rule: foreign FILE if linked from/to internal by non-'p/o/n' char."
-            )
             for r_idx_f, (_, comp_row_f) in enumerate(_existing_grid_rows_tuples):
                 if r_idx_f >= len(_existing_defs_pairs):
                     break
@@ -1882,6 +1957,11 @@ def update_tracker(
             logger.debug(
                 f"  Mini '{os.path.basename(output_file)}': Paths after explicit removals ({len(current_rel_paths_set)})."
             )
+        # tracker_map.json is authoritative: keys of modules whose tracker is not approved
+        # are not listed in other modules' trackers (same effect as remove-key).
+        current_rel_paths_set -= get_unapproved_module_paths(
+            path_to_key_info, config, project_root
+        ) - {module_path_for_mini}
         relevant_key_infos_for_type = [
             path_to_key_info[p] for p in current_rel_paths_set if p in path_to_key_info
         ]
@@ -1933,13 +2013,9 @@ def update_tracker(
                     else:
                         dropped_suggestions_ct += 1
 
-            logger.debug(
-                f"Mini Tracker '{os.path.basename(output_file)}': Filtered non-forced suggestions (kept={kept_suggestions_ct}, dropped={dropped_suggestions_ct}, policy=touches_internal_endpoint)."
-            )
+            _rep_set(filtered_kept=kept_suggestions_ct, filtered_dropped=dropped_suggestions_ct)
             suggestions_to_process_for_this_tracker = filtered_suggestions
-        logger.debug(
-            f"Mini Tracker: Populated suggestions_to_process (count: {sum(len(v) for v in suggestions_to_process_for_this_tracker.values())})"
-        )
+        _rep_set(suggestions=sum(len(v) for v in suggestions_to_process_for_this_tracker.values()))
     else:
         logger.error(f"CRITICAL: Unknown tracker_type '{tracker_type}'. Aborting.")
         raise ValueError(f"Unknown tracker type: {tracker_type}")
@@ -1967,9 +2043,7 @@ def update_tracker(
             f"{tracker_type.capitalize()} tracker '{os.path.basename(output_file)}' (for module: '{module_path_for_mini if tracker_type=='mini' else 'N/A'}') has 0 relevant key-path instances for its grid. May result in an empty tracker."
         )
     else:
-        logger.debug(
-            f"{tracker_type.capitalize()} tracker '{os.path.basename(output_file)}': Final sorted list has {len(final_key_info_list)} key-path instances for grid."
-        )
+        _rep_set(file=os.path.basename(output_file), keys=len(final_key_info_list))
 
     # --- Read Existing Data, Build Migration Map, Create/Rebuild Tracker, Backup ---
     existing_key_path_pairs: List[Tuple[str, str]] = (
@@ -1994,7 +2068,7 @@ def update_tracker(
         current_last_grid_edit = cached.get("last_grid_edit", "Unknown")
         lines_from_old_file = cached.get("raw_lines") or []
         tracker_exists_and_is_sound = True
-        logger.debug(f"UpdateTracker: Using cached state for '{output_file_basename}'.")
+        _rep_set(cached_state=True)
     elif os.path.exists(output_file):
         attempt_read_from_path = output_file
         is_reading_backup = False
@@ -2350,9 +2424,7 @@ def update_tracker(
         current_defs = [(ki.key_string, ki.norm_path) for ki in final_key_info_list]
         if cached_defs == current_defs:
             fast_path_triggered = True
-            logger.debug(
-                f"UpdateTracker: Fast path triggered for '{output_file_basename}'. Structure is identical."
-            )
+            _rep_set(fast_path=True)
 
     new_grid_item_count = len(final_key_info_list)
     if fast_path_triggered:
@@ -2451,16 +2523,11 @@ def update_tracker(
                     current_row_ki = path_to_key_info.get(target_row_path)
                     if not current_row_ki and new_global_key_for_row:
                         for p, ki in path_to_key_info.items():
-                            if (
-                                ki.key_string == new_global_key_for_row
-                                and p in final_path_to_new_idx
-                            ):
+                            if ki.key_string == new_global_key_for_row and p in final_path_to_new_idx:
                                 current_row_ki = ki
                                 break
                     if current_row_ki:
-                        new_final_row_idx = final_path_to_new_idx.get(
-                            current_row_ki.norm_path
-                        )
+                        new_final_row_idx = final_path_to_new_idx.get(current_row_ki.norm_path)
 
                 if new_final_row_idx is None:
                     continue
@@ -2503,16 +2570,11 @@ def update_tracker(
                             current_col_ki = path_to_key_info.get(target_col_path)
                             if not current_col_ki and new_global_key_for_col:
                                 for p, ki in path_to_key_info.items():
-                                    if (
-                                        ki.key_string == new_global_key_for_col
-                                        and p in final_path_to_new_idx
-                                    ):
+                                    if ki.key_string == new_global_key_for_col and p in final_path_to_new_idx:
                                         current_col_ki = ki
                                         break
                             if current_col_ki:
-                                new_final_col_idx = final_path_to_new_idx.get(
-                                    current_col_ki.norm_path
-                                )
+                                new_final_col_idx = final_path_to_new_idx.get(current_col_ki.norm_path)
 
                         if new_final_col_idx is None:
                             continue
@@ -2550,17 +2612,12 @@ def update_tracker(
                 f"Grid migration for '{os.path.basename(output_file)}': Copied {copied_values_count_log}, Skipped(Unstable/Path Issue): {skipped_instab_log}, Skipped(Target Filled): {skipped_filled_log}, Row Errors: {row_proc_err_log}"
             )
     else:
-        logger.debug(
-            f"Skipping old grid value migration for '{os.path.basename(output_file)}' as old grid was not sane, non-existent, or empty."
-        )
+        _rep_set(migrated_old_grid=False)
 
         # --- Structural Dependencies (Patched) ---
         structural_deps_applied_count = 0
         grid_content_changed_by_structural = False
         if tracker_type == "doc" or tracker_type == "mini":
-            logger.debug(
-                f"Calculating structural dependencies for {tracker_type} tracker '{output_file_basename}'..."
-            )
             structural_deps_applied_this_run = 0
             for r_idx_s, r_ki_s in enumerate(final_key_info_list):
                 if not r_ki_s.is_directory:
@@ -2626,15 +2683,40 @@ def update_tracker(
     ast_overrides_applied_count = 0  # Initialize here for clarity
 
     if globally_instanced_suggestions_to_apply:
-        logger.debug(
-            f"Applying {sum(len(v) for v in globally_instanced_suggestions_to_apply.values())} globally-instanced suggestions to grid for '{os.path.basename(output_file)}' (Force Apply: {force_apply_suggestions})"
-        )
+        _rep_set(to_apply=sum(len(v) for v in globally_instanced_suggestions_to_apply.values()))
 
         # This flag tracks if any forced suggestion was "actioned" enough to update metadata and potentially the timestamp
         any_forced_suggestion_processed_for_metadata = False
         # Cell pairs promoted to a mutual 'x' during this pass; their mirror
         # suggestion must not overwrite the 'x' with a directional char.
         mutual_pairs_this_pass: Set[Tuple[int, int]] = set()
+
+        # Directional suggestions of THIS pass as (src_idx, tgt_idx, char). A mutual
+        # 'x' needs both files to report the same character in this pass; an arrow
+        # left in the reverse cell by an earlier run is not independent evidence
+        # (it may be stale or inverted). Forced/manual applies keep the old rule.
+        fresh_arrow_cells: Set[Tuple[int, int, str]] = set()
+        if not force_apply_suggestions:
+            for _src_str, _deps in globally_instanced_suggestions_to_apply.items():
+                _src_ki = resolve_key_global_instance_to_ki(_src_str, path_to_key_info)
+                _src_idx = (
+                    final_path_to_new_idx.get(_src_ki.norm_path) if _src_ki else None
+                )
+                if _src_idx is None:
+                    continue
+                for _tgt_str, _char in _deps:
+                    if _char not in ("<", ">"):
+                        continue
+                    _tgt_ki = resolve_key_global_instance_to_ki(
+                        _tgt_str, path_to_key_info
+                    )
+                    _tgt_idx = (
+                        final_path_to_new_idx.get(_tgt_ki.norm_path)
+                        if _tgt_ki
+                        else None
+                    )
+                    if _tgt_idx is not None and _tgt_idx != _src_idx:
+                        fresh_arrow_cells.add((_src_idx, _tgt_idx, _char))
 
         for (
             src_key_global_instance_str,
@@ -2724,43 +2806,48 @@ def update_tracker(
                     tgt_local_idx
                 ]
                 final_char_to_set_in_grid = dep_char_sugg
-                promoted_to_mutual = False
 
-                if final_char_to_set_in_grid in ("<", ">") and (
-                    force_apply_suggestions or existing_char_in_grid != "n"
-                ):
+                if final_char_to_set_in_grid in ("<", ">"):
                     char_in_reverse_cell = temp_decomp_grid_rows[tgt_local_idx][
                         src_local_idx
                     ]
                     # '<' in [A][B] and '>' in [B][A] is the normal mirrored encoding
-                    # of ONE edge (A depends on B). A genuine mutual dependency is
-                    # formed when the reverse cell already holds the same arrow, or
-                    # when the forward cell itself already holds the opposite arrow.
-                    has_reverse_edge = (
-                        final_char_to_set_in_grid == char_in_reverse_cell
-                        or (
-                            existing_char_in_grid in ("<", ">")
-                            and existing_char_in_grid != final_char_to_set_in_grid
-                        )
+                    # of ONE edge (A depends on B). Only the same arrow in both cells
+                    # (A depends on B AND B depends on A) is a genuine mutual dependency,
+                    # and only when both files report it in this pass (see above).
+                    same_arrow_both_files = final_char_to_set_in_grid == char_in_reverse_cell and (
+                        force_apply_suggestions
+                        or (tgt_local_idx, src_local_idx, final_char_to_set_in_grid)
+                        in fresh_arrow_cells
                     )
-                    if has_reverse_edge and (
-                        force_apply_suggestions or char_in_reverse_cell != "n"
-                    ):
+                    # A forced/manual edit that writes the opposite arrow into a cell
+                    # already holding an arrow adds the other direction to the one on
+                    # record ([B][A]: '<' = B depends on A, forced '>' = A depends on
+                    # B), so the pair is mutual (upstream aa85dd1). Unforced
+                    # suggestions never take this path: an arrow already on disk may be
+                    # stale or inverted, and is not evidence from this pass.
+                    forced_opposite_over_arrow = (
+                        force_apply_suggestions
+                        and existing_char_in_grid in ("<", ">")
+                        and existing_char_in_grid != final_char_to_set_in_grid
+                    )
+                    if same_arrow_both_files or forced_opposite_over_arrow:
                         logger.debug(
                             f"    Mutual dependency formed for {src_ki_in_this_tracker.norm_path} <-> {tgt_ki_in_this_tracker.norm_path}. Upgrading to 'x'."
                         )
                         final_char_to_set_in_grid = "x"
-                        promoted_to_mutual = True
+                        mutual_pairs_this_pass.add(
+                            (min(src_local_idx, tgt_local_idx), max(src_local_idx, tgt_local_idx))
+                        )
+                        if temp_decomp_grid_rows[tgt_local_idx][src_local_idx] != "x":
+                            temp_decomp_grid_rows[tgt_local_idx][src_local_idx] = "x"
+                            suggestion_applied_flag = True
+                            suggestion_applied_count += 1
 
-                if (
-                    dep_char_sugg in ("<", ">")
-                    and (
-                        min(src_local_idx, tgt_local_idx),
-                        max(src_local_idx, tgt_local_idx),
-                    )
-                    in mutual_pairs_this_pass
-                    and final_char_to_set_in_grid != "x"
-                ):
+                if dep_char_sugg in ("<", ">") and (
+                    min(src_local_idx, tgt_local_idx),
+                    max(src_local_idx, tgt_local_idx),
+                ) in mutual_pairs_this_pass and final_char_to_set_in_grid != "x":
                     continue  # mirror of an edge already promoted to 'x' in this pass
 
                 apply_this_suggestion_to_cell = False
@@ -2805,18 +2892,6 @@ def update_tracker(
                         logger.debug(
                             f"    Applied to grid (forward): {src_ki_in_this_tracker.norm_path} -> {tgt_ki_in_this_tracker.norm_path} = '{final_char_to_set_in_grid}'"
                         )
-
-                    if promoted_to_mutual:
-                        mutual_pairs_this_pass.add(
-                            (
-                                min(src_local_idx, tgt_local_idx),
-                                max(src_local_idx, tgt_local_idx),
-                            )
-                        )
-                        if temp_decomp_grid_rows[tgt_local_idx][src_local_idx] != "x":
-                            temp_decomp_grid_rows[tgt_local_idx][src_local_idx] = "x"
-                            suggestion_applied_flag = True
-                            suggestion_applied_count += 1
 
                     # Populate metadata if forced (even if char was same)
                     if force_apply_suggestions:
@@ -2863,9 +2938,7 @@ def update_tracker(
                     if existing_char_in_grid == "n" or get_priority(
                         dep_char_sugg
                     ) <= get_priority(existing_char_in_grid):
-                        logger.debug(
-                            f"    Suggestion Ignored: Grid '{existing_char_in_grid}' kept over sugg '{dep_char_sugg}' for {src_ki_in_this_tracker.norm_path} -> {tgt_ki_in_this_tracker.norm_path}."
-                        )
+                        _rep("kept_existing")
 
         if force_apply_suggestions and any_forced_suggestion_processed_for_metadata:
             suggestion_applied_flag = True  # Ensure timestamp update if any forced suggestion was processed, even if no grid character changed
@@ -2953,9 +3026,7 @@ def update_tracker(
             f"Setting last_GRID_edit (structure changed only): {final_last_grid_edit}"
         )
     else:
-        logger.debug(
-            f"Keeping existing last_GRID_edit message: '{final_last_grid_edit}' (no relevant grid changes detected)."
-        )
+        _rep_set(grid_changed=False)
 
     # --- Compress final grid ---
     final_grid_comp_ordered: List[str]
@@ -2990,7 +3061,7 @@ def update_tracker(
     # --- END OF SECTION: Compress final grid ---
 
     # --- Final Write ---
-    logger.debug(f"Finalizing write for tracker: {output_file}")
+    _rep_set(file=os.path.basename(output_file), applied=suggestion_applied_count)
 
     # Precompute global key counts ONCE before final write for efficiency
     final_global_key_counts: DefaultDict[str, int] = defaultdict(int)
@@ -3005,13 +3076,11 @@ def update_tracker(
     key_delta_count = len(initial_key_set_for_reporting ^ final_key_set_for_reporting)
     if key_delta_count > 0:
         structural_deps_applied_count += key_delta_count
-        logger.debug(
-            f"Structural update for '{os.path.basename(output_file)}': {key_delta_count} key(s) added or removed."
-        )
+        _rep_set(key_delta=key_delta_count)
 
     # --- Intercept for return_update mode ---
     if return_update:
-        logger.debug(f"Returning prepared data for tracker: {output_file}")
+        _rep_set(mode="batch")
         return {
             "tracker_type": tracker_type,
             "output_file": output_file,
