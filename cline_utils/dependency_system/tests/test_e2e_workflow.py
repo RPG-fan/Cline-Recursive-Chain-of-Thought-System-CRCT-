@@ -41,7 +41,8 @@ def mock_embedding_manager() -> Generator[None, None, None]:
         mock_load.side_effect = side_effect_load
 
         # Mock sentence transformer encode method
-        mock_instance.encode.return_value = np.random.rand(1, 384).astype(np.float32)
+        # (one row per input text, as SentenceTransformer.encode returns)
+        mock_instance.encode.side_effect = lambda texts, **_k: np.random.rand(len(texts), 384).astype(np.float32)
         mock_instance.embed.return_value = np.random.rand(384).tolist()
 
         yield

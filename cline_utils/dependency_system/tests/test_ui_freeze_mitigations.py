@@ -4,8 +4,9 @@ Two causes of the VS Code window freezing during analyze-project:
   phases); it now redraws at most MAX_REDRAWS_PER_SECOND, always drawing the final state.
 - Model selection loaded the full Qwen3 GGUF onto the GPU (with a 16k-token context) on
   every run, even with nothing to embed. Selection now only checks the file structurally;
-  the model is loaded when embeddings are generated, and a failed load aborts/skips
-  embedding updates for that run so existing Qwen3 embeddings on disk are preserved.
+  the model is loaded when embeddings are generated, and a load that still fails after
+  a retry skips embedding updates for that run so existing Qwen3 embeddings on disk are
+  preserved (more cases: test_embedding_model_never_switched.py).
 No model is loaded: llama-cpp and the encoder are mocked.
 """
 
@@ -114,6 +115,8 @@ def test_failed_gguf_load_skips_embedding_updates_and_preserves_existing(tmp_pat
     ), patch.object(em, "ConfigManager", return_value=config), patch.object(
         em, "_is_valid_file", return_value=True
     ), patch.object(em, "_get_tokenizer", return_value=None), patch.object(
+        em.time, "sleep"
+    ), patch.object(
         em, "_unload_model"
     ) as unload_mock, patch.object(
         em, "read_file_transparently", return_value=("", None)
@@ -130,9 +133,10 @@ def test_failed_gguf_load_skips_embedding_updates_and_preserves_existing(tmp_pat
         )
         assert result is False
         assert em._selected_model_config["type"] == "gguf"  # pyright: ignore[reportPrivateUsage]
-        unload_mock.assert_called_once()
+        # Each failed attempt frees the partial load before the retry.
+        assert unload_mock.call_count == em.GGUF_LOAD_ATTEMPTS
 
-    assert loads == ["gguf"]
+    assert loads == ["gguf"] * em.GGUF_LOAD_ATTEMPTS
     assert not (emb_dir / "src" / "new.py.npy").exists()
     preserved_vec = np.load(str(existing_npy))
     assert preserved_vec.shape == (gguf_dim,)

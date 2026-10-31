@@ -6,6 +6,7 @@ Handles embedding creation from project files using Symbol Essence Strings (SES)
 the project symbol map, and calculates cosine similarity between embeddings.
 """
 
+import collections
 import gc
 import hashlib
 import json
@@ -97,6 +98,11 @@ MODEL_CONFIGS = {
 
 # Maximum safe context length to prevent OOM/crashes
 MAX_CONTEXT_LENGTH = 32768
+# Loading the GGUF embedding model: attempts before the run skips embedding generation.
+GGUF_LOAD_ATTEMPTS = 2
+GGUF_LOAD_RETRY_DELAY_SEC = 5.0
+# Last llama.cpp log lines (bytes) from the current model load, for load-failure errors.
+_LLAMA_LOG_TAIL: "collections.deque[bytes]" = collections.deque(maxlen=40)
 SIM_CACHE_MAXSIZE = 100_000
 SIM_CACHE_TTL_SEC = 7 * 24 * 60 * 60  # 7 days
 SIM_CACHE_NEGATIVE_RESULTS = True
@@ -660,10 +666,16 @@ def _load_model(n_ctx: int = 8192):
             _selected_model_config
             and _selected_model_config["type"] == "sentence-transformer"
         ):
-            # Update max_seq_length for SentenceTransformer without reload
+            # Update max_seq_length for SentenceTransformer without reload, never past
+            # the model's position limit: mpnet has 512 positions, and a longer
+            # sequence indexes past its embedding table (CUDA "device-side assert").
             if hasattr(_model_instance, "max_seq_length"):
-                if _model_instance.max_seq_length < n_ctx:
-                    _model_instance.max_seq_length = n_ctx
+                limit = int(_selected_model_config.get("context_length") or n_ctx)
+                target = min(n_ctx, limit)
+                if _model_instance.max_seq_length < target:
+                    _model_instance.max_seq_length = target
+                elif _model_instance.max_seq_length > limit:
+                    _model_instance.max_seq_length = limit
             return _model_instance
 
     if _model_instance is None:
@@ -700,7 +712,9 @@ def _load_model(n_ctx: int = 8192):
                 )
 
                 def noop_log_callback(level: int, text: bytes, user_data: int) -> None:
-                    pass
+                    # Nothing is printed; the last lines are kept so a failed load can
+                    # say why (llama-cpp only raises "Failed to load model from file").
+                    _LLAMA_LOG_TAIL.append(text)
 
                 # Keep a reference to prevent GC (Critical!)
                 global _C_LOG_CALLBACK_REF
@@ -708,18 +722,25 @@ def _load_model(n_ctx: int = 8192):
 
                 llama_cpp.llama_log_set(_C_LOG_CALLBACK_REF, ctypes.c_void_p())
 
-                _model_instance = Llama(
-                    model_path=_selected_model_config["path"],
-                    embedding=True,
-                    n_ctx=n_ctx,
-                    n_batch=512,
-                    n_threads=os.cpu_count(),  # Adjust based on CPU
-                    n_gpu_layers=n_gpu_layers,
-                    use_mmap=True,
-                    use_mlock=False,
-                    flash_attn=True,
-                    verbose=False,
-                )
+                _LLAMA_LOG_TAIL.clear()
+                try:
+                    _model_instance = Llama(
+                        model_path=_selected_model_config["path"],
+                        embedding=True,
+                        n_ctx=n_ctx,
+                        n_batch=512,
+                        n_threads=os.cpu_count(),  # Adjust based on CPU
+                        n_gpu_layers=n_gpu_layers,
+                        use_mmap=True,
+                        use_mlock=False,
+                        flash_attn=True,
+                        verbose=False,
+                    )
+                except Exception as e:
+                    raise RuntimeError(
+                        f"{e} (n_ctx={n_ctx}, free VRAM={_free_vram_text()}; "
+                        f"llama.cpp: {_llama_log_summary()})"
+                    ) from e
                 logger.debug(
                     f"Loaded GGUF model: {_selected_model_config['name']} on device: {device}"
                 )
@@ -746,6 +767,29 @@ def _load_model(n_ctx: int = 8192):
             raise
 
     return _model_instance
+
+
+def _llama_log_summary(max_lines: int = 6) -> str:
+    """The last non-empty llama.cpp log lines captured during a load attempt."""
+    lines: List[str] = []
+    for raw in list(_LLAMA_LOG_TAIL):
+        try:
+            text = raw.decode("utf-8", errors="replace").strip() if raw else ""
+        except Exception:
+            continue
+        if text:
+            lines.append(text)
+    return " | ".join(lines[-max_lines:]) or "no log output"
+
+
+def _free_vram_text() -> str:
+    try:
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info()
+            return f"{free / 1024**3:.1f}/{total / 1024**3:.1f} GiB"
+    except Exception:
+        pass
+    return "unknown"
 
 
 def _unload_model():
@@ -3077,6 +3121,9 @@ def generate_embeddings(
     existing_metadata_by_path: Dict[str, Dict[str, Any]] = {}
     metadata_version = ""
     metadata_model = ""
+    # True when the vectors on disk were built by another model: metadata may only
+    # name the new model once every vector has been rewritten with it.
+    index_model_changed = False
     if os.path.exists(metadata_path):
         try:
             with open(metadata_path, "r", encoding="utf-8") as f:
@@ -3111,6 +3158,7 @@ def generate_embeddings(
                     existing_metadata = {}
                     existing_metadata_by_path = {}
                     force = True
+                    index_model_changed = bool(metadata_model) and metadata_model != current_model_name
         except Exception as e:
             logger.warning(f"Failed to load existing metadata: {e}")
 
@@ -3300,7 +3348,6 @@ def generate_embeddings(
 
     processing_queue: List[Dict[str, Any]] = []
     new_ses_hashes: Dict[str, str] = {}
-    embed_start_time = time.time()
 
     # Parallelize the file reading, SES generation, and token counting.
     import concurrent.futures
@@ -3382,25 +3429,46 @@ def generate_embeddings(
     processing_queue.sort(key=lambda x: cast(int, x["tokens"]))
 
     # The model is first loaded here, only because there is something to embed
-    # (selection no longer load-tests it). If the GGUF model cannot load (busy VRAM,
-    # drivers), skip embedding updates for this run so existing Qwen3 embeddings and
-    # metadata on disk are preserved instead of being overwritten with a fallback model.
+    # (selection no longer load-tests it). The selected model is never swapped for
+    # another one at run time: vectors from two models are not comparable, and the
+    # metadata switch would force the whole index to be rebuilt with the fallback.
+    # If the GGUF model cannot load (busy VRAM, drivers), retry once after freeing
+    # memory; if it still fails, skip embedding generation for this run and leave the
+    # vectors and metadata.json untouched (the run continues on the existing index).
     if processing_queue and _model_instance is None and _selected_model_config is not None:
         if _selected_model_config.get("type") == "gguf":
             first_ctx = min(
                 max(cast(int, processing_queue[0]["tokens"]) + 512, 12800), MAX_CONTEXT_LENGTH
             )
-            try:
-                _load_model(n_ctx=first_ctx)
-            except Exception as e:
-                logger.warning(
-                    f"Embedding model {_selected_model_config.get('name')} could not be "
-                    f"loaded ({e}); skipping embedding updates for this run."
+            load_error: Optional[Exception] = None
+            for attempt in range(GGUF_LOAD_ATTEMPTS):
+                try:
+                    _load_model(n_ctx=first_ctx)
+                    load_error = None
+                    break
+                except Exception as e:
+                    load_error = e
+                    _unload_model()
+                    gc.collect()
+                    if attempt + 1 < GGUF_LOAD_ATTEMPTS:
+                        logger.warning(
+                            f"Embedding model {_selected_model_config.get('name')} could not be "
+                            f"loaded ({e}); retrying in {GGUF_LOAD_RETRY_DELAY_SEC:.0f}s."
+                        )
+                        time.sleep(GGUF_LOAD_RETRY_DELAY_SEC)
+            if load_error is not None:
+                logger.error(
+                    f"Embedding model {_selected_model_config.get('name')} could not be loaded "
+                    f"after {GGUF_LOAD_ATTEMPTS} attempts ({load_error}). Skipping embedding "
+                    f"generation for this run: {len(processing_queue)} file(s) keep their "
+                    "previous vectors and metadata.json is unchanged; they are re-embedded "
+                    "on the next run that can load the model."
                 )
-                _unload_model()
                 return False
     current_batch_texts: List[str] = []
     current_batch_paths: List[str] = []
+    written_count = 0
+    written_paths: Set[str] = set()  # vectors actually saved this run
 
     # Determine batch size
     effective_batch_size = batch_size or (
@@ -3432,15 +3500,31 @@ def generate_embeddings(
             current_batch_paths.append(save_path)
 
             if len(current_batch_texts) >= effective_batch_size:
-                _flush_batch(current_batch_texts, current_batch_paths)
+                written_count += _flush_batch(current_batch_texts, current_batch_paths, written_paths)
                 tracker.update(len(current_batch_texts))
                 current_batch_texts = []
                 current_batch_paths = []
 
         # Flush remaining
         if current_batch_texts:
-            _flush_batch(current_batch_texts, current_batch_paths)
+            written_count += _flush_batch(current_batch_texts, current_batch_paths, written_paths)
             tracker.update(len(current_batch_texts))
+
+    failed_count = len(processing_queue) - written_count
+    if failed_count:
+        logger.error(
+            f"Embedding generation: {failed_count} of {len(processing_queue)} vector(s) "
+            "could not be written; those files keep their previous vectors."
+        )
+        if index_model_changed:
+            # The metadata would name a model most vectors on disk were not built with.
+            logger.error(
+                f"metadata.json left unchanged: the index was built with '{metadata_model}' "
+                f"and was not completely rebuilt with "
+                f"'{_selected_model_config['name'] if _selected_model_config else 'unknown'}'."
+            )
+            _unload_model()
+            return False
 
     # 4. Create/Update Metadata
     metadata_path = os.path.join(embeddings_dir, "metadata.json")
@@ -3538,7 +3622,7 @@ def generate_embeddings(
                 # still describes the vector on disk. "" (unknown) re-embeds next run.
                 ses_hash = ""
                 new_ses_hash = new_ses_hashes.get(key_info.norm_path)
-                if new_ses_hash and os.path.getmtime(npy_path) >= embed_start_time - 2:
+                if new_ses_hash and normalize_path(npy_path) in written_paths:
                     ses_hash = new_ses_hash
                 else:
                     prev_item = existing_metadata_by_path.get(key_info.norm_path)
@@ -3575,18 +3659,22 @@ def generate_embeddings(
         logger.warning(f"Failed to invalidate similarity cache: {e}")
 
     _unload_model()
-    return True
+    return failed_count == 0
 
 
-def _flush_batch(texts: List[str], save_paths: List[str]):
-    """Helper to encode a batch of texts and save them to their respective paths."""
+def _flush_batch(
+    texts: List[str], save_paths: List[str], written_paths: Optional[Set[str]] = None
+) -> int:
+    """Encodes a batch of texts and saves each vector to its path. Returns how many
+    vectors were written (0 when the batch failed); adds their paths to written_paths."""
     if not texts:
-        return
+        return 0
 
+    written = 0
     try:
         if _model_instance is None:
             logger.error("Model instance lost during batch flush")
-            return
+            return 0
 
         if _selected_model_config and _selected_model_config["type"] == "gguf":
             # GGUF (llama-cpp) handles one by one in loop usually unless batched explicitly
@@ -3599,6 +3687,11 @@ def _flush_batch(texts: List[str], save_paths: List[str]):
             embeddings = _model_instance.encode(
                 texts, show_progress_bar=False, convert_to_numpy=True
             )
+        if len(embeddings) != len(texts):
+            logger.error(
+                f"Encoder returned {len(embeddings)} vector(s) for {len(texts)} text(s); "
+                "the batch's extra files keep their previous vectors."
+            )
 
         for i, emb in enumerate(embeddings):
             # Normalize
@@ -3610,9 +3703,13 @@ def _flush_batch(texts: List[str], save_paths: List[str]):
             path = save_paths[i]
             os.makedirs(os.path.dirname(path), exist_ok=True)
             np.save(path, emb)
+            written += 1
+            if written_paths is not None:
+                written_paths.add(normalize_path(path))
 
     except Exception as e:
         logger.error(f"Failed to flush batch: {e}")
+    return written
 
 
 # --- Similarity Calculation ---
