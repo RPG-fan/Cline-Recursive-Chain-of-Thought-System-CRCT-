@@ -72,5 +72,5 @@ python -m cline_utils.dependency_system.dependency_processor determine-dependenc
 
 -   **"Unresolved Placeholder"**: If the system cannot resolve a pattern, it will log a warning. Ensure the GGUF model is correctly placed in the `models/` directory.
 -   **Performance Lag**: Large batch resolutions can be CPU/GPU intensive. Use the `--limit` flag to process trackers in smaller chunks.
--   **Model Not Found**: The system defaults to `models/Qwen3-4B-Instruct-2507-Q8_0.gguf`. Ensure this file exists or specify a path using the `--model` flag.
+-   **Model Not Found**: The system defaults to `models/Qwen3-4B-Instruct-2507-Q8_0.gguf` and downloads it on first use if it is missing. If the download fails (offline, proxy), download the file to that path yourself or pass `--model` with an existing GGUF.
 -   **Path Case-Sensitivity**: On Windows, the resolver is case-insensitive, but it will normalize paths to the case found on the filesystem to ensure cross-platform compatibility.

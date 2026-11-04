@@ -21,7 +21,8 @@ The dependency verification process traditionally requires manual inspection or 
     ```
 2.  **Model**: You need a GGUF model file. By default, the system looks for:
     `models/Qwen3-4B-Instruct-2507-Q8_0.gguf`
-    *(You can override this path using the `--model` flag.)*
+    If the file is missing (or corrupt), the first command that needs it downloads it (~4.3 GB) from [`unsloth/Qwen3-4B-Instruct-2507-GGUF`](https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF).
+    *(You can override this path using the `--model` flag. A `--model` path is never downloaded; it must exist.)*
 
 ---
 

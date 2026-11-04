@@ -10,6 +10,7 @@ sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 )
 
+from cline_utils.dependency_system.analysis.local_llm_model import ensure_local_llm_model
 from cline_utils.dependency_system.analysis.local_llm_processor import LocalLLMProcessor
 from cline_utils.dependency_system.utils.path_utils import get_project_root
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
@@ -765,11 +766,8 @@ def main():
         return 0
 
     # Initialize Local LLM
-    model_path = os.path.join(
-        project_root, "models", "Qwen3-4B-Instruct-2507-Q8_0.gguf"
-    )
-    if not os.path.exists(model_path):
-        print(f"Error: Local LLM model not found at {model_path}")
+    model_path = ensure_local_llm_model(None, project_root)
+    if not model_path:
         return 1
 
     print(f"Initializing local LLM from {model_path}...")

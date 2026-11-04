@@ -27,6 +27,7 @@ from cline_utils.dependency_system.analysis.dependency_suggester import (
 from cline_utils.dependency_system.analysis.embedding_manager import (
     generate_symbol_essence_string,
 )
+from cline_utils.dependency_system.analysis.local_llm_model import ensure_local_llm_model
 from cline_utils.dependency_system.analysis.local_llm_processor import LocalLLMProcessor
 
 # --- Analysis Imports ---
@@ -326,14 +327,8 @@ def handle_determine_dependency(args: argparse.Namespace) -> int:
         print(f"Error reading files: {e}")
         return 1
 
-    model_path = args.model
+    model_path = ensure_local_llm_model(args.model, project_root)
     if not model_path:
-        model_path = os.path.join(
-            project_root, "models", "Qwen3-4B-Instruct-2507-Q8_0.gguf"
-        )
-
-    if not os.path.exists(model_path):
-        print(f"Error: Model not found at {model_path}")
         return 1
 
     try:
@@ -2290,8 +2285,6 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
         trackers_to_scan = [tracker_path]
         dep_chars = (dep_char,)
 
-    model_path = args.model if args.model else "models/Qwen3-4B-Instruct-2507-Q8_0.gguf"
-
     # Load Global Map and derived indexes
     global_map = _load_global_map_or_exit()
     indexes = get_keymap_indexes()
@@ -2742,6 +2735,10 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
     )
 
     # --- Initialize processor first so its tokenizer is available for exact counting ---
+    # The model is located (and downloaded on first use) only once there is LLM work.
+    model_path = ensure_local_llm_model(args.model, get_project_root())
+    if not model_path:
+        return 1
     processor = LocalLLMProcessor(model_path=model_path)
 
     # --- Eager preparation: read files + SES substitution for every pair ---
@@ -3018,13 +3015,8 @@ def handle_normalize_docs(args: argparse.Namespace) -> int:
         return 0
 
     # Initialize Local LLM
-    model_path = (
-        args.model
-        if args.model
-        else os.path.join(project_root, "models", "Qwen3-4B-Instruct-2507-Q8_0.gguf")
-    )
-    if not os.path.exists(model_path):
-        print(f"Error: Local LLM model not found at {model_path}")
+    model_path = ensure_local_llm_model(args.model, project_root)
+    if not model_path:
         return 1
 
     logger.info(f"Initializing local LLM from {model_path}...")
